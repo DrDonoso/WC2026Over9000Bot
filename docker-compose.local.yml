@@ -1,0 +1,37 @@
+services:
+  worldcup-bot:
+    build: .
+    image: drdonoso/worldcup2026
+    restart: unless-stopped
+
+    environment:
+      # --- Telegram Bot (via @BotFather) ---
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
+
+      # --- football-data.org API ---
+      FOOTBALL_DATA_API_KEY: "${FOOTBALL_DATA_API_KEY}"
+
+      # --- Predictions YAML path inside container ---
+      PREDICTIONS_PATH: "${PREDICTIONS_PATH:-/app/data/predictions.yml}"
+
+      # --- Competition code (football-data.org) ---
+      COMPETITION_CODE: "${COMPETITION_CODE:-WC}"
+
+      # --- Timezone for match time display ---
+      TIMEZONE: "${TIMEZONE:-Europe/Madrid}"
+
+      # --- Optional: restrict bot to a specific Telegram group ---
+      TELEGRAM_GROUP_ID: "${TELEGRAM_GROUP_ID:-}"
+
+      # Corporate SSL inspection fix: combined system+corporate CA bundle.
+      # Needed on networks with a corporate SSL-inspecting proxy.
+      # The bundle is generated locally and is git-ignored.
+      SSL_CERT_FILE: /certs/combined-ca-bundle.pem
+      REQUESTS_CA_BUNDLE: /certs/combined-ca-bundle.pem
+
+    volumes:
+      # Mount the host ./data directory; edit ./data/predictions.yml on the host (or server)
+      # and the bot picks it up on the next command (hot-reload by mtime). Read-only inside the container.
+      - ./data:/app/data:ro
+      # Corporate CA bundle for SSL-inspection remediation (git-ignored, local dev only)
+      - ./certs:/certs:ro

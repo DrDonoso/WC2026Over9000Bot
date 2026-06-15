@@ -1,0 +1,28 @@
+# Squad: ignore runtime state (logs, inbox, sessions)
+.squad/orchestration-log/
+.squad/log/
+.squad/decisions/inbox/
+.squad/sessions/
+.squad/.scratch/
+# Squad: SubSquad activation file (local to this machine)
+.squad-workstream
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+
+# Local secrets — never commit
+.env
+
+# Runtime data — git-ignored; populated at runtime from predictions.example.yml
+data/predictions.yml
+
+# Corporate CA bundle for SSL-inspection remediation — generated locally, never committed
+certs/

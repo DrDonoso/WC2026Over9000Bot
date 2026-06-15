@@ -1,0 +1,192 @@
+# predictions.example.yml — World Cup 2026 Porra — TEMPLATE
+#
+# PURPOSE: Copy this file to data/predictions.yml and fill in real participants.
+#          This committed file seeds local runs; data/predictions.yml is
+#          mounted into the container (editable live, hot-reloaded).
+#
+# FORMAT:
+#   - Top-level key: Telegram @username (without @), lowercase.
+#   - groups: each group (A–L) lists exactly 3 TLA codes: [1st, 2nd, 3rd].
+#   - knockout: each stage lists the teams you predict will ADVANCE from it.
+#       round_of_32   → 16 teams advancing to Round of 16
+#       round_of_16   → 8 teams advancing to Quarter-finals
+#       quarter_finals → 4 teams advancing to Semi-finals
+#       semi_finals    → 2 teams advancing to the Final
+#       final          → 1 team (the champion)
+#   - Use "**" as a wildcard/no-pick (always scores 0, never errors).
+#   - TLA codes MUST match football-data.org exactly (e.g. KSA not SAU,
+#     URY not URU).  Wrong codes silently score 0.
+#   - base_score: optional manual point adjustment (default 0).
+#   - display_name: optional display name shown in rankings.
+#
+# REAL WC2026 GROUPS (football-data.org standings order, 2026-06-15):
+#   A: MEX KOR CZE RSA     B: SUI CAN QAT BIH
+#   C: SCO MAR BRA HAI     D: USA AUS TUR PAR
+#   E: GER CIV ECU CUW     F: SWE JPN NED TUN
+#   G: EGY BEL IRN NZL     H: CPV KSA ESP URY
+#   I: FRA IRQ NOR SEN     J: ALG ARG JOR AUT
+#   K: COD COL POR UZB     L: ENG GHA CRO PAN
+
+participants:
+
+  drdonoso:
+    display_name: "DavidR"
+    base_score: 0
+    groups:
+      A: ["MEX", "KOR", "CZE"]
+      B: ["SUI", "CAN", "QAT"]
+      C: ["SCO", "MAR", "BRA"]
+      D: ["USA", "AUS", "TUR"]
+      E: ["GER", "CIV", "ECU"]
+      F: ["SWE", "JPN", "NED"]
+      G: ["EGY", "BEL", "IRN"]
+      H: ["CPV", "KSA", "ESP"]
+      I: ["FRA", "IRQ", "NOR"]
+      J: ["ALG", "ARG", "JOR"]
+      K: ["COD", "COL", "POR"]
+      L: ["ENG", "GHA", "CRO"]
+    knockout:
+      round_of_32:
+        - BRA
+        - ESP
+        - ARG
+        - FRA
+        - GER
+        - ENG
+        - POR
+        - NED
+        - MEX
+        - USA
+        - BEL
+        - JPN
+        - MAR
+        - COL
+        - KOR
+        - SUI
+      round_of_16:
+        - BRA
+        - ESP
+        - ARG
+        - FRA
+        - GER
+        - ENG
+        - POR
+        - NED
+      quarter_finals:
+        - BRA
+        - ARG
+        - GER
+        - ENG
+      semi_finals:
+        - BRA
+        - GER
+      final:
+        - BRA
+
+  vicsaez:
+    display_name: "Victor"
+    base_score: 0
+    groups:
+      A: ["MEX", "KOR", "CZE"]
+      B: ["CAN", "SUI", "BIH"]
+      C: ["MAR", "BRA", "SCO"]
+      D: ["USA", "TUR", "AUS"]
+      E: ["GER", "CIV", "ECU"]
+      F: ["JPN", "SWE", "NED"]
+      G: ["EGY", "BEL", "IRN"]
+      H: ["ESP", "KSA", "URY"]
+      I: ["FRA", "NOR", "IRQ"]
+      J: ["ARG", "ALG", "AUT"]
+      K: ["COD", "COL", "POR"]
+      L: ["ENG", "CRO", "GHA"]
+    knockout:
+      round_of_32:
+        - ESP
+        - FRA
+        - ARG
+        - BRA
+        - GER
+        - POR
+        - ENG
+        - NED
+        - MEX
+        - USA
+        - BEL
+        - JPN
+        - MAR
+        - COL
+        - CAN
+        - TUR
+      round_of_16:
+        - ESP
+        - FRA
+        - ARG
+        - BRA
+        - GER
+        - POR
+        - ENG
+        - BEL
+      quarter_finals:
+        - ESP
+        - ARG
+        - GER
+        - POR
+      semi_finals:
+        - ESP
+        - GER
+      final:
+        - GER
+
+  cris_username:
+    display_name: "Cris"
+    base_score: 0
+    groups:
+      A: ["KOR", "MEX", "RSA"]
+      B: ["SUI", "CAN", "QAT"]
+      C: ["BRA", "MAR", "SCO"]
+      D: ["TUR", "USA", "PAR"]
+      E: ["GER", "ECU", "CIV"]
+      F: ["SWE", "NED", "JPN"]
+      G: ["BEL", "EGY", "NZL"]
+      H: ["ESP", "URY", "**"]
+      I: ["FRA", "SEN", "NOR"]
+      J: ["ARG", "JOR", "**"]
+      K: ["POR", "COL", "COD"]
+      L: ["ENG", "GHA", "CRO"]
+    knockout:
+      round_of_32:
+        - FRA
+        - ARG
+        - ENG
+        - BRA
+        - GER
+        - ESP
+        - POR
+        - NED
+        - USA
+        - BEL
+        - JPN
+        - MAR
+        - COL
+        - SUI
+        - MEX
+        - NOR
+      round_of_16:
+        - FRA
+        - ARG
+        - ENG
+        - BRA
+        - GER
+        - ESP
+        - POR
+        - COL
+      quarter_finals:
+        - FRA
+        - ARG
+        - ENG
+        - ESP
+      semi_finals:
+        - FRA
+        - ARG
+      final:
+        - ARG

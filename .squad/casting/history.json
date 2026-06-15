@@ -1,0 +1,21 @@
+{
+  "universe_usage_history": [
+    {
+      "universe": "Football Legends",
+      "assignment_id": "wc2026-initial-2026-06-15",
+      "used_at": "2026-06-15T11:37:45+02:00"
+    }
+  ],
+  "assignment_cast_snapshots": {
+    "wc2026-initial-2026-06-15": {
+      "universe": "Football Legends",
+      "agents": {
+        "lead": "Pirlo",
+        "backend": "Kanté",
+        "devops": "Maldini",
+        "tester": "Buffon"
+      },
+      "created_at": "2026-06-15T11:37:45+02:00"
+    }
+  }
+}

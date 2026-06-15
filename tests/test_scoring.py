@@ -1,0 +1,519 @@
+"""Exhaustive pure-function tests for score_groups and score_knockout.
+
+No I/O, no network — pure logic.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from worldcup_bot.data.stages import GROUP_SCORING, KNOCKOUT_STAGES, STAGE_YAML_KEYS
+from worldcup_bot.porra.scoring import score_groups, score_knockout, score_user_groups_detail
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# score_groups
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestScoreGroupsExact:
+    def test_all_exact_scores_3(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        pts, detail = score_groups(user, actual)
+        assert pts == 3.0
+        assert all(d["note"] == "exacto" for d in detail)
+        assert all(d["points"] == 1.0 for d in detail)
+
+    def test_one_exact_two_others_present(self):
+        # GER exact, USA wrong (pred=2, actual=4), BRA exact (pred=3, actual=3)
+        user = {"A": ["GER", "USA", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        pts, detail = score_groups(user, actual)
+        assert pts == 2.0  # GER(+1.0) + USA(fallo 0) + BRA(+1.0)
+
+    def test_exact_position_constant_is_1(self):
+        assert GROUP_SCORING["exact_position"] == 1.0
+
+    def test_detail_predicted_pos_matches_index(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        _, detail = score_groups(user, actual)
+        assert detail[0]["predicted_pos"] == 1
+        assert detail[1]["predicted_pos"] == 2
+        assert detail[2]["predicted_pos"] == 3
+
+    def test_detail_actual_pos_populated(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        _, detail = score_groups(user, actual)
+        assert detail[0]["actual_pos"] == 1
+        assert detail[1]["actual_pos"] == 2
+        assert detail[2]["actual_pos"] == 3
+
+
+class TestScoreGroupsOffByOne:
+    def test_upward_shift(self):
+        # GER pred=1, actual=2; ESP pred=2, actual=1; BRA pred=3, actual=3
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["ESP", "GER", "BRA", "USA"]}
+        pts, detail = score_groups(user, actual)
+        # GER: actual=2 <=3 → clasifica +0.5; ESP: actual=1 <=3 → clasifica +0.5; BRA: exact +1.0
+        assert pts == 2.0
+        notes = [d["note"] for d in detail]
+        assert notes == ["clasifica", "clasifica", "exacto"]
+
+    def test_downward_shift(self):
+        # GER exact, BRA pred=2 actual=3 (clasifica), ESP pred=3 actual=2 (clasifica)
+        user = {"A": ["GER", "BRA", "ESP"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        pts, detail = score_groups(user, actual)
+        assert pts == 2.0
+        notes = {d["team"]: d["note"] for d in detail}
+        assert notes["GER"] == "exacto"
+        assert notes["BRA"] == "clasifica"
+        assert notes["ESP"] == "clasifica"
+
+    def test_qualified_wrong_position_value_is_0_5(self):
+        assert GROUP_SCORING["qualified_wrong_position"] == 0.5
+
+    def test_qualified_wrong_position_points_in_detail(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["ESP", "GER", "BRA", "USA"]}
+        _, detail = score_groups(user, actual)
+        ger = next(d for d in detail if d["team"] == "GER")
+        assert ger["points"] == 0.5
+
+
+class TestScoreGroupsFallo:
+    def test_qualifies_wrong_position_not_fallo(self):
+        # GER pred=1, actual=3 (clasifica); ESP pred=2, actual=4 (fallo); BRA pred=3, actual=1 (clasifica)
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["BRA", "USA", "GER", "ESP"]}
+        pts, detail = score_groups(user, actual)
+        assert pts == 1.0
+        notes = {d["team"]: d["note"] for d in detail}
+        assert notes["GER"] == "clasifica"
+        assert notes["ESP"] == "fallo"
+        assert notes["BRA"] == "clasifica"
+
+    def test_mixed_clasifica_and_fallo(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["BRA", "USA", "GER", "ESP"]}
+        pts, detail = score_groups(user, actual)
+        assert pts == 1.0
+        notes = {d["team"]: d["note"] for d in detail}
+        assert notes["GER"] == "clasifica"
+        assert notes["ESP"] == "fallo"
+        assert notes["BRA"] == "clasifica"
+
+    def test_diff_3_is_also_fallo(self):
+        # GER pred=1, actual=4
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["USA", "MEX", "CAN", "GER"]}
+        pts, detail = score_groups(user, actual)
+        ger = next(d for d in detail if d["team"] == "GER")
+        assert ger["note"] == "fallo"
+        assert ger["points"] == 0
+
+
+class TestScoreGroupsWildcard:
+    def test_single_wildcard_scores_0(self):
+        user = {"A": ["**", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        pts, detail = score_groups(user, actual)
+        # ** → 0; ESP exact → +1.0; BRA exact → +1.0
+        assert pts == 2.0
+        wc = next(d for d in detail if d["team"] == "**")
+        assert wc["note"] == "wildcard"
+        assert wc["points"] == 0
+
+    def test_wildcard_actual_pos_is_none(self):
+        user = {"A": ["**", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        _, detail = score_groups(user, actual)
+        wc = next(d for d in detail if d["team"] == "**")
+        assert wc["actual_pos"] is None
+
+    def test_all_wildcards_score_0(self):
+        user = {"A": ["**", "**", "**"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        pts, detail = score_groups(user, actual)
+        assert pts == 0.0
+        assert all(d["note"] == "wildcard" for d in detail)
+
+    def test_empty_string_treated_as_wildcard(self):
+        user = {"A": ["", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        pts, detail = score_groups(user, actual)
+        # "" → wildcard; ESP pred=2 actual=2 → +1.0; BRA pred=3 actual=3 → +1.0
+        assert pts == 2.0
+        empty = next(d for d in detail if d["team"] == "")
+        assert empty["note"] == "wildcard"
+
+
+class TestScoreGroupsNoData:
+    def test_team_not_in_actual_standings(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["USA", "MEX", "KOR", "CAN"]}
+        pts, detail = score_groups(user, actual)
+        assert pts == 0.0
+        assert all(d["note"] == "no_data" for d in detail)
+        assert all(d["actual_pos"] is None for d in detail)
+
+    def test_group_key_missing_from_standings(self):
+        user = {"Z": ["GER", "ESP", "BRA"]}
+        actual = {}
+        pts, detail = score_groups(user, actual)
+        assert pts == 0.0
+        assert all(d["note"] == "no_data" for d in detail)
+        assert all(d["group"] == "Z" for d in detail)
+
+    def test_partial_standings_unplayed_team(self):
+        # BRA not in the (partial) GROUP_A list
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP"]}
+        pts, detail = score_groups(user, actual)
+        # GER exact (+1.0), ESP exact (+1.0), BRA no_data (0)
+        assert pts == 2.0
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["note"] == "no_data"
+
+
+class TestScoreGroupsEmptyInputs:
+    def test_empty_user_groups_returns_zero_and_empty_list(self):
+        pts, detail = score_groups({}, {"GROUP_A": ["GER", "ESP", "BRA", "USA"]})
+        assert pts == 0.0
+        assert detail == []
+
+    def test_empty_actual_standings_all_no_data(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        pts, detail = score_groups(user, {})
+        assert pts == 0.0
+        assert all(d["note"] == "no_data" for d in detail)
+
+    def test_both_empty(self):
+        pts, detail = score_groups({}, {})
+        assert pts == 0.0
+        assert detail == []
+
+
+class TestScoreGroupsMultipleGroups:
+    def test_two_groups_independent_scoring(self):
+        user = {
+            "A": ["GER", "ESP", "BRA"],  # all exact → +3.0
+            "B": ["ARG", "FRA", "ENG"],  # ARG↔FRA swapped → clasifica,clasifica; ENG exact
+        }
+        actual = {
+            "GROUP_A": ["GER", "ESP", "BRA", "USA"],
+            "GROUP_B": ["FRA", "ARG", "ENG", "MEX"],
+        }
+        pts, detail = score_groups(user, actual)
+        # A: 1+1+1 = 3; B: ARG pred=1/actual=2 (+0.5) + FRA pred=2/actual=1 (+0.5) + ENG exact (+1.0)
+        assert pts == 5.0
+
+    def test_detail_has_group_key(self):
+        user = {"A": ["GER", "ESP", "BRA"], "B": ["FRA", "ARG", "ENG"]}
+        actual = {
+            "GROUP_A": ["GER", "ESP", "BRA", "USA"],
+            "GROUP_B": ["FRA", "ARG", "ENG", "MEX"],
+        }
+        _, detail = score_groups(user, actual)
+        groups_in_detail = {d["group"] for d in detail}
+        assert groups_in_detail == {"A", "B"}
+
+    def test_detail_entry_has_all_required_keys(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        _, detail = score_groups(user, actual)
+        required = {"group", "team", "predicted_pos", "actual_pos", "points", "note"}
+        for entry in detail:
+            assert required <= entry.keys()
+
+
+class TestScoreUserGroupsDetailIsAlias:
+    def test_returns_same_as_score_groups(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        assert score_groups(user, actual) == score_user_groups_detail(user, actual)
+
+    def test_alias_works_with_multiple_groups(self):
+        user = {"A": ["GER", "ESP", "BRA"], "B": ["FRA", "ARG", "ENG"]}
+        actual = {
+            "GROUP_A": ["GER", "ESP", "BRA", "USA"],
+            "GROUP_B": ["ARG", "FRA", "ENG", "MEX"],
+        }
+        assert score_groups(user, actual) == score_user_groups_detail(user, actual)
+
+
+class TestScoreGroupsQualifiesWrongPosition:
+    """Explicit edge cases for the 'clasifica' branch (qualifies but wrong position)."""
+
+    def test_predicted_3rd_actual_1st(self):
+        # User's exact example: pred=3, actual=1 → 0.5, "clasifica"
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["BRA", "ESP", "GER", "USA"]}
+        _, detail = score_groups(user, actual)
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["points"] == 0.5
+        assert bra["note"] == "clasifica"
+
+    def test_predicted_1st_actual_3rd(self):
+        # "Al revés": pred=1, actual=3 → 0.5, "clasifica"
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["ESP", "USA", "GER", "BRA"]}
+        _, detail = score_groups(user, actual)
+        ger = next(d for d in detail if d["team"] == "GER")
+        assert ger["points"] == 0.5
+        assert ger["note"] == "clasifica"
+
+    def test_predicted_1st_actual_2nd(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["ESP", "GER", "BRA", "USA"]}
+        _, detail = score_groups(user, actual)
+        ger = next(d for d in detail if d["team"] == "GER")
+        assert ger["points"] == 0.5
+        assert ger["note"] == "clasifica"
+
+    def test_predicted_1st_actual_4th(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["ESP", "BRA", "USA", "GER"]}
+        _, detail = score_groups(user, actual)
+        ger = next(d for d in detail if d["team"] == "GER")
+        assert ger["points"] == 0.0
+        assert ger["note"] == "fallo"
+
+    def test_exact_position_scores_1_0(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        _, detail = score_groups(user, actual)
+        ger = next(d for d in detail if d["team"] == "GER")
+        assert ger["points"] == 1.0
+        assert ger["note"] == "exacto"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# score_knockout
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestScoreKnockoutRoundOf32:
+    """ROUND_OF_32 awards 1 point per correct qualifier."""
+
+    def test_one_correct_qualifer_scores_1(self):
+        user = {"round_of_32": ["ESP"]}
+        actual = {"ROUND_OF_32": ["ESP", "FRA", "GER"]}
+        pts, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        assert pts == 1.0
+        assert detail[0]["note"] == "acierto"
+        assert detail[0]["points"] == 1
+
+    def test_wrong_qualifier_scores_0(self):
+        user = {"round_of_32": ["GER"]}
+        actual = {"ROUND_OF_32": ["ESP", "FRA"]}
+        pts, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        assert pts == 0.0
+        assert detail[0]["note"] == "fallo"
+        assert detail[0]["points"] == 0
+
+    def test_multiple_correct_accumulate(self):
+        user = {"round_of_32": ["ESP", "FRA", "GER"]}
+        actual = {"ROUND_OF_32": ["ESP", "FRA", "BRA"]}
+        pts, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        assert pts == 2.0  # ESP + FRA correct; GER fallo
+
+
+class TestScoreKnockoutLast16:
+    """LAST_16 awards 1 point per correct qualifier."""
+
+    def test_point_value_is_1(self):
+        user = {"round_of_16": ["ESP"]}
+        actual = {"LAST_16": ["ESP"]}
+        pts, _ = score_knockout(user, actual, [("LAST_16", "Octavos", 1)])
+        assert pts == 1.0
+
+    def test_yaml_key_is_round_of_16(self):
+        assert STAGE_YAML_KEYS["LAST_16"] == "round_of_16"
+
+    def test_all_eight_correct_scores_8(self):
+        teams = ["ESP", "FRA", "ARG", "BRA", "GER", "ENG", "POR", "NED"]
+        user = {"round_of_16": teams}
+        actual = {"LAST_16": teams}
+        pts, _ = score_knockout(user, actual, [("LAST_16", "Octavos", 1)])
+        assert pts == 8.0
+
+
+class TestScoreKnockoutQuarterFinals:
+    """QUARTER_FINALS awards 2 points per correct qualifier."""
+
+    def test_point_value_is_2(self):
+        user = {"quarter_finals": ["ESP"]}
+        actual = {"QUARTER_FINALS": ["ESP"]}
+        pts, detail = score_knockout(user, actual, [("QUARTER_FINALS", "Cuartos", 2)])
+        assert pts == 2.0
+        assert detail[0]["points"] == 2
+
+    def test_two_correct_scores_4(self):
+        user = {"quarter_finals": ["ESP", "BRA"]}
+        actual = {"QUARTER_FINALS": ["ESP", "BRA", "FRA", "GER"]}
+        pts, _ = score_knockout(user, actual, [("QUARTER_FINALS", "Cuartos", 2)])
+        assert pts == 4.0
+
+    def test_yaml_key_mapping(self):
+        assert STAGE_YAML_KEYS["QUARTER_FINALS"] == "quarter_finals"
+
+
+class TestScoreKnockoutSemiFinals:
+    """SEMI_FINALS awards 3 points per correct qualifier."""
+
+    def test_point_value_is_3(self):
+        user = {"semi_finals": ["ESP"]}
+        actual = {"SEMI_FINALS": ["ESP"]}
+        pts, detail = score_knockout(user, actual, [("SEMI_FINALS", "Semis", 3)])
+        assert pts == 3.0
+        assert detail[0]["points"] == 3
+
+    def test_both_semifinalists_correct(self):
+        user = {"semi_finals": ["ESP", "BRA"]}
+        actual = {"SEMI_FINALS": ["ESP", "BRA"]}
+        pts, _ = score_knockout(user, actual, [("SEMI_FINALS", "Semis", 3)])
+        assert pts == 6.0
+
+    def test_yaml_key_mapping(self):
+        assert STAGE_YAML_KEYS["SEMI_FINALS"] == "semi_finals"
+
+
+class TestScoreKnockoutFinal:
+    """FINAL awards 5 points for correct champion."""
+
+    def test_point_value_is_5(self):
+        user = {"final": ["ESP"]}
+        actual = {"FINAL": ["ESP"]}
+        pts, detail = score_knockout(user, actual, [("FINAL", "Final", 5)])
+        assert pts == 5.0
+        assert detail[0]["points"] == 5
+
+    def test_wrong_champion_scores_0(self):
+        user = {"final": ["GER"]}
+        actual = {"FINAL": ["ESP"]}
+        pts, detail = score_knockout(user, actual, [("FINAL", "Final", 5)])
+        assert pts == 0.0
+        assert detail[0]["note"] == "fallo"
+
+    def test_yaml_key_mapping(self):
+        assert STAGE_YAML_KEYS["FINAL"] == "final"
+
+
+class TestScoreKnockoutWildcard:
+    def test_wildcard_scores_0(self):
+        user = {"round_of_32": ["**"]}
+        actual = {"ROUND_OF_32": ["ESP", "FRA"]}
+        pts, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        assert pts == 0.0
+        assert detail[0]["note"] == "wildcard"
+        assert detail[0]["points"] == 0
+
+    def test_wildcard_mixed_with_correct(self):
+        user = {"round_of_16": ["**", "ESP"]}
+        actual = {"LAST_16": ["ESP", "FRA"]}
+        pts, detail = score_knockout(user, actual, [("LAST_16", "Octavos", 1)])
+        assert pts == 1.0  # only ESP correct, ** is 0
+        notes = {d["team"]: d["note"] for d in detail}
+        assert notes["**"] == "wildcard"
+        assert notes["ESP"] == "acierto"
+
+    def test_empty_string_treated_as_wildcard(self):
+        user = {"round_of_32": [""]}
+        actual = {"ROUND_OF_32": ["ESP"]}
+        pts, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        assert pts == 0.0
+        assert detail[0]["note"] == "wildcard"
+
+
+class TestScoreKnockoutEmptyInputs:
+    def test_empty_user_knockout_no_teams_no_detail(self):
+        pts, detail = score_knockout({}, {"ROUND_OF_32": ["ESP"]})
+        assert pts == 0.0
+        assert detail == []
+
+    def test_empty_actual_winners_all_fallo(self):
+        user = {"round_of_32": ["ESP", "FRA"]}
+        pts, detail = score_knockout(user, {}, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        assert pts == 0.0
+        assert all(d["note"] == "fallo" for d in detail)
+
+    def test_stage_absent_from_actual_is_all_fallo(self):
+        user = {"final": ["ESP"]}
+        pts, detail = score_knockout(user, {}, [("FINAL", "Final", 5)])
+        assert pts == 0.0
+        assert detail[0]["note"] == "fallo"
+
+    def test_both_empty_returns_zero_empty_list(self):
+        pts, detail = score_knockout({}, {})
+        assert pts == 0.0
+        assert detail == []
+
+
+class TestScoreKnockoutAllStagesIntegration:
+    """Test using the default KNOCKOUT_STAGES config (all 5 stages)."""
+
+    def test_all_stages_correct_sums_correctly(self):
+        user = {
+            "round_of_32": ["ESP"],
+            "round_of_16": ["ESP"],
+            "quarter_finals": ["ESP"],
+            "semi_finals": ["ESP"],
+            "final": ["ESP"],
+        }
+        actual = {
+            "ROUND_OF_32": ["ESP"],
+            "LAST_16": ["ESP"],
+            "QUARTER_FINALS": ["ESP"],
+            "SEMI_FINALS": ["ESP"],
+            "FINAL": ["ESP"],
+        }
+        pts, _ = score_knockout(user, actual)
+        # 1 + 1 + 2 + 3 + 5 = 12
+        assert pts == 12.0
+
+    def test_knockout_stages_config_point_values(self):
+        """Canonical check: each stage has the documented point value."""
+        expected = {
+            "ROUND_OF_32": 1,
+            "LAST_16": 1,
+            "QUARTER_FINALS": 2,
+            "SEMI_FINALS": 3,
+            "FINAL": 5,
+        }
+        for api_name, _display, pts in KNOCKOUT_STAGES:
+            assert pts == expected[api_name], (
+                f"{api_name}: expected {expected[api_name]} pts, got {pts}"
+            )
+
+    def test_detail_has_all_required_keys(self):
+        user = {"round_of_32": ["ESP"]}
+        actual = {"ROUND_OF_32": ["ESP"]}
+        _, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        assert {"stage", "display", "team", "points", "note"} <= detail[0].keys()
+
+    def test_stage_display_name_in_detail(self):
+        user = {"quarter_finals": ["ESP"]}
+        actual = {"QUARTER_FINALS": ["ESP"]}
+        _, detail = score_knockout(user, actual, [("QUARTER_FINALS", "Cuartos de Final", 2)])
+        assert detail[0]["display"] == "Cuartos de Final"
+
+    def test_missing_user_stage_yields_no_entries(self):
+        """If a stage key is missing from user_knockout, that stage has 0 entries."""
+        user = {"final": ["ESP"]}  # only final; other stages absent
+        actual = {
+            "ROUND_OF_32": ["ESP"],
+            "LAST_16": ["ESP"],
+            "QUARTER_FINALS": ["ESP"],
+            "SEMI_FINALS": ["ESP"],
+            "FINAL": ["ESP"],
+        }
+        pts, detail = score_knockout(user, actual)
+        # Only final stage has a team entry
+        stages_in_detail = {d["stage"] for d in detail}
+        assert stages_in_detail == {"FINAL"}
+        assert pts == 5.0

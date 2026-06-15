@@ -1,0 +1,32 @@
+{
+  "agents": {
+    "lead": {
+      "persistent_name": "Pirlo",
+      "universe": "Football Legends",
+      "created_at": "2026-06-15T11:37:45+02:00",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "backend": {
+      "persistent_name": "Kanté",
+      "universe": "Football Legends",
+      "created_at": "2026-06-15T11:37:45+02:00",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "devops": {
+      "persistent_name": "Maldini",
+      "universe": "Football Legends",
+      "created_at": "2026-06-15T11:37:45+02:00",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "tester": {
+      "persistent_name": "Buffon",
+      "universe": "Football Legends",
+      "created_at": "2026-06-15T11:37:45+02:00",
+      "legacy_named": false,
+      "status": "active"
+    }
+  }
+}
