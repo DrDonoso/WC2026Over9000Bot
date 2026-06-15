@@ -639,6 +639,175 @@ class TestGetFinishedGroups:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FootballDataClient — get_started_groups
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetStartedGroups:
+    @resp_lib.activate
+    def test_empty_matches_returns_empty_set(self):
+        resp_lib.add(resp_lib.GET, WC_MATCHES, json={"matches": []}, status=200)
+        client = _fresh_client()
+        assert client.get_started_groups() == set()
+
+    @resp_lib.activate
+    def test_group_with_at_least_one_finished_match_is_included(self):
+        """A group with ≥1 FINISHED match is returned even if others are SCHEDULED."""
+        resp_lib.add(
+            resp_lib.GET,
+            WC_MATCHES,
+            json={
+                "matches": [
+                    {
+                        "id": 1, "utcDate": "2026-06-15T18:00:00Z",
+                        "status": "FINISHED", "stage": "GROUP_STAGE", "group": "Group A",
+                        "homeTeam": {"tla": "GER", "name": "Germany"},
+                        "awayTeam": {"tla": "ESP", "name": "Spain"},
+                        "score": {"fullTime": {"home": 2, "away": 1}, "winner": "HOME_TEAM"},
+                    },
+                    {
+                        "id": 2, "utcDate": "2026-06-20T18:00:00Z",
+                        "status": "SCHEDULED", "stage": "GROUP_STAGE", "group": "Group A",
+                        "homeTeam": {"tla": "BRA", "name": "Brazil"},
+                        "awayTeam": {"tla": "USA", "name": "USA"},
+                        "score": {"fullTime": {"home": None, "away": None}, "winner": None},
+                    },
+                ]
+            },
+            status=200,
+        )
+        client = _fresh_client()
+        assert "GROUP_A" in client.get_started_groups()
+
+    @resp_lib.activate
+    def test_group_with_only_scheduled_matches_excluded(self):
+        """A group with only SCHEDULED/TIMED matches (no FINISHED) is NOT returned."""
+        resp_lib.add(
+            resp_lib.GET,
+            WC_MATCHES,
+            json={
+                "matches": [
+                    {
+                        "id": 1, "utcDate": "2026-06-20T18:00:00Z",
+                        "status": "SCHEDULED", "stage": "GROUP_STAGE", "group": "Group B",
+                        "homeTeam": {"tla": "FRA", "name": "France"},
+                        "awayTeam": {"tla": "ARG", "name": "Argentina"},
+                        "score": {"fullTime": {"home": None, "away": None}, "winner": None},
+                    },
+                    {
+                        "id": 2, "utcDate": "2026-06-21T18:00:00Z",
+                        "status": "TIMED", "stage": "GROUP_STAGE", "group": "Group B",
+                        "homeTeam": {"tla": "ENG", "name": "England"},
+                        "awayTeam": {"tla": "MEX", "name": "Mexico"},
+                        "score": {"fullTime": {"home": None, "away": None}, "winner": None},
+                    },
+                ]
+            },
+            status=200,
+        )
+        client = _fresh_client()
+        assert "GROUP_B" not in client.get_started_groups()
+
+    @resp_lib.activate
+    def test_group_with_only_in_play_matches_excluded(self):
+        """A group with only IN_PLAY matches (no FINISHED) is NOT returned."""
+        resp_lib.add(
+            resp_lib.GET,
+            WC_MATCHES,
+            json={
+                "matches": [
+                    {
+                        "id": 1, "utcDate": "2026-06-20T18:00:00Z",
+                        "status": "IN_PLAY", "stage": "GROUP_STAGE", "group": "Group C",
+                        "homeTeam": {"tla": "POR", "name": "Portugal"},
+                        "awayTeam": {"tla": "NED", "name": "Netherlands"},
+                        "score": {"fullTime": {"home": None, "away": None}, "winner": None},
+                    },
+                ]
+            },
+            status=200,
+        )
+        client = _fresh_client()
+        assert "GROUP_C" not in client.get_started_groups()
+
+    @resp_lib.activate
+    def test_mixed_scenario_only_started_groups_returned(self):
+        """Group A has 1 FINISHED match (started); Group B has only SCHEDULED (not started)."""
+        resp_lib.add(
+            resp_lib.GET,
+            WC_MATCHES,
+            json={
+                "matches": [
+                    {
+                        "id": 1, "utcDate": "2026-06-15T18:00:00Z",
+                        "status": "FINISHED", "stage": "GROUP_STAGE", "group": "Group A",
+                        "homeTeam": {"tla": "GER", "name": "Germany"},
+                        "awayTeam": {"tla": "ESP", "name": "Spain"},
+                        "score": {"fullTime": {"home": 2, "away": 1}, "winner": "HOME_TEAM"},
+                    },
+                    {
+                        "id": 2, "utcDate": "2026-06-20T18:00:00Z",
+                        "status": "SCHEDULED", "stage": "GROUP_STAGE", "group": "Group B",
+                        "homeTeam": {"tla": "FRA", "name": "France"},
+                        "awayTeam": {"tla": "ARG", "name": "Argentina"},
+                        "score": {"fullTime": {"home": None, "away": None}, "winner": None},
+                    },
+                ]
+            },
+            status=200,
+        )
+        client = _fresh_client()
+        started = client.get_started_groups()
+        assert started == {"GROUP_A"}
+
+    @resp_lib.activate
+    def test_knockout_matches_ignored(self):
+        """Knockout matches (group=None) are not counted and never appear in the result."""
+        resp_lib.add(
+            resp_lib.GET,
+            WC_MATCHES,
+            json={
+                "matches": [
+                    {
+                        "id": 1, "utcDate": "2026-07-01T18:00:00Z",
+                        "status": "FINISHED", "stage": "LAST_16", "group": None,
+                        "homeTeam": {"tla": "ESP", "name": "Spain"},
+                        "awayTeam": {"tla": "FRA", "name": "France"},
+                        "score": {"fullTime": {"home": 1, "away": 0}, "winner": "HOME_TEAM"},
+                    }
+                ]
+            },
+            status=200,
+        )
+        client = _fresh_client()
+        assert client.get_started_groups() == set()
+
+    @resp_lib.activate
+    def test_group_identifiers_normalized_to_group_x(self):
+        """API returns 'Group L' (title case); result must contain 'GROUP_L'."""
+        resp_lib.add(
+            resp_lib.GET,
+            WC_MATCHES,
+            json={
+                "matches": [
+                    {
+                        "id": 1, "utcDate": "2026-06-15T18:00:00Z",
+                        "status": "FINISHED", "stage": "GROUP_STAGE", "group": "Group L",
+                        "homeTeam": {"tla": "PER", "name": "Peru"},
+                        "awayTeam": {"tla": "GHA", "name": "Ghana"},
+                        "score": {"fullTime": {"home": 1, "away": 0}, "winner": "HOME_TEAM"},
+                    }
+                ]
+            },
+            status=200,
+        )
+        client = _fresh_client()
+        started = client.get_started_groups()
+        assert "GROUP_L" in started
+        assert "Group L" not in started
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # FootballDataClient — get_finished_stages
 # ══════════════════════════════════════════════════════════════════════════════
 

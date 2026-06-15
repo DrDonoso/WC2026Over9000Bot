@@ -217,6 +217,15 @@ class FootballDataClient:
                 by_group.setdefault(m.group, []).append(m)
         return {g for g, ms in by_group.items() if ms and all(x.status == "FINISHED" for x in ms)}
 
+    def get_started_groups(self) -> set[str]:
+        """Return GROUP_X ids with at least one FINISHED group-stage match."""
+        matches = self.get_all_matches()
+        by_group: dict[str, list[Match]] = {}
+        for m in matches:
+            if m.group:
+                by_group.setdefault(m.group, []).append(m)
+        return {g for g, ms in by_group.items() if any(x.status == "FINISHED" for x in ms)}
+
     def get_finished_stages(self) -> set[str]:
         """Return knockout API stage names whose matches are ALL FINISHED."""
         from worldcup_bot.data.stages import KNOCKOUT_STAGES

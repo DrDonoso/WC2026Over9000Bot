@@ -184,6 +184,9 @@ def format_user_detail(detail: dict) -> str:
             lines.append(f"\n📋 Grupos cerrados: {finished_groups}/{total_groups} — solo cuentan los ya cerrados.")
             lines.append("ℹ️ Usa /listaaciertosactual para ver la provisional.")
     else:
+        started_groups = detail.get("started_groups")
+        if started_groups is not None and started_groups < detail["total_groups"]:
+            lines.append(f"\n📋 Grupos en juego: {started_groups}/{detail['total_groups']} — los grupos sin empezar aún no puntúan.")
         lines.append("\nℹ️ Provisional: posiciones en vivo, pueden cambiar. /listaaciertos = oficial (solo cerrados).")
 
     return "\n".join(lines)

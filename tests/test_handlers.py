@@ -24,7 +24,7 @@ from worldcup_bot.bot.handlers import (
     cmd_start,
 )
 from worldcup_bot.api.models import Standing
-from worldcup_bot.bot.formatters import participant_photo_url
+from worldcup_bot.bot.formatters import format_user_detail, participant_photo_url
 from worldcup_bot.config import Settings
 from worldcup_bot.porra.engine import UserRankEntry
 
@@ -42,6 +42,7 @@ _FAKE_DETAIL = {
     "knockout_detail": [],
     "official": False,
     "finished_groups": None,
+    "started_groups": 12,
     "total_groups": 12,
 }
 
@@ -56,6 +57,7 @@ _FAKE_DETAIL_OFFICIAL = {
     "knockout_detail": [],
     "official": True,
     "finished_groups": 1,
+    "started_groups": None,
     "total_groups": 12,
 }
 
@@ -916,3 +918,72 @@ class TestCmdGeneral:
         update.message.reply_text.assert_called_once()
         text = update.message.reply_text.call_args[0][0]
         assert "Grupos cerrados: 1/12" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# format_user_detail — provisional footer (started_groups)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFormatUserDetailProvisionalFooter:
+    def _base_detail(self, started: int, total: int = 12) -> dict:
+        return {
+            "username": "alice",
+            "display_name": "Alice",
+            "base_score": 0.0,
+            "group_score": 1.0,
+            "knockout_score": 0.0,
+            "total_score": 1.0,
+            "group_detail": [],
+            "knockout_detail": [],
+            "official": False,
+            "finished_groups": None,
+            "started_groups": started,
+            "total_groups": total,
+        }
+
+    def test_grupos_en_juego_footer_shown_when_not_all_started(self):
+        """Provisional with started_groups < total_groups shows the 'Grupos en juego' line."""
+        detail = self._base_detail(started=4, total=12)
+        text = format_user_detail(detail)
+        assert "📋 Grupos en juego: 4/12" in text
+        assert "los grupos sin empezar aún no puntúan" in text
+
+    def test_grupos_en_juego_footer_not_shown_when_all_started(self):
+        """Provisional with started_groups == total_groups does NOT show the 'Grupos en juego' line."""
+        detail = self._base_detail(started=12, total=12)
+        text = format_user_detail(detail)
+        assert "Grupos en juego" not in text
+
+    def test_grupos_en_juego_footer_not_shown_when_started_groups_none(self):
+        """Provisional with started_groups=None (missing key) does not crash and no footer."""
+        detail = self._base_detail(started=0)
+        detail["started_groups"] = None
+        text = format_user_detail(detail)
+        assert "Grupos en juego" not in text
+
+    def test_provisional_hint_always_present(self):
+        """The base provisional hint line is always present regardless of started_groups."""
+        for started in (0, 4, 12):
+            detail = self._base_detail(started=started)
+            text = format_user_detail(detail)
+            assert "ℹ️ Provisional" in text
+
+    def test_official_mode_does_not_show_grupos_en_juego_footer(self):
+        """Official mode footer is unaffected by started_groups."""
+        detail = {
+            "username": "alice",
+            "display_name": "Alice",
+            "base_score": 0.0,
+            "group_score": 1.0,
+            "knockout_score": 0.0,
+            "total_score": 1.0,
+            "group_detail": [],
+            "knockout_detail": [],
+            "official": True,
+            "finished_groups": 1,
+            "started_groups": None,
+            "total_groups": 12,
+        }
+        text = format_user_detail(detail)
+        assert "Grupos en juego" not in text

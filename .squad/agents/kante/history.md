@@ -108,7 +108,20 @@
 - Valid letter but no data → "No hay clasificación disponible para el Grupo X todavía."
 - Help text and README updated. 5 new handler tests (`TestCmdClasificacion`). Total: 212 → 217 (all green).
 
-### 2026-06-15T16:52+02:00 — /actual & /general now send top-3 photo album
+### 2026-06-15T17:24+02:00 — Provisional group scoring gated to started groups
+
+**Bug fixed:** `/listaaciertosactual`, `/actual`, `/porra` were awarding group aciertos for groups that hadn't played a single match yet. football-data.org returns a seeded standings table (0 played, meaningless order) for not-yet-started groups, so provisional scoring was incorrectly counting those positions.
+
+**Fix:** Provisional mode now gates group scoring to "started" groups (≥1 FINISHED match), mirroring how official mode gates to "finished" groups (all matches FINISHED).
+
+**Key details:**
+- `client.get_started_groups()` added (mirrors `get_finished_groups`; uses `any(x.status == "FINISHED")` instead of `all`). Same TTL-cached `get_all_matches()` call → no extra HTTP request.
+- `compute_general_ranking(official=False)` now calls `get_started_groups()` and passes result as `only_groups` to `_build_actual_standings`. Groups not started fall through `score_groups`' `no_data` branch → 0 pts / ⏳.
+- `compute_user_detail(official=False)` does the same; returns new key `"started_groups": len(started_groups)`. Official mode returns `"started_groups": None`. `"finished_groups"` key unchanged.
+- `format_user_detail` provisional footer now shows `"📋 Grupos en juego: N/12 — los grupos sin empezar aún no puntúan."` when `started_groups < total_groups`.
+- Official path unchanged. Knockout scoring unchanged in both modes.
+- **New tests:** `TestGetStartedGroups` (7 tests in `test_api_client.py`), new provisional tests in `TestComputeGeneralRankingProvisional` (3 new) and `TestComputeUserDetailProvisional` (4 new), `TestFormatUserDetailProvisionalFooter` (5 tests in `test_handlers.py`). Total: 243 → 261 (all green).
+
 
 - **`/actual`** and **`/general`** now send a Telegram photo album (`sendMediaGroup`) with the top-3 ranked participants' photos instead of a single winner photo.
 - Photos fetched from `{PHOTO_BASE_URL}/{username}.png` (default `http://victorsaez.cat`). `username` = the lowercase predictions.yml key (e.g. `crispavon`, `dsantosmerino`).

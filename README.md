@@ -42,7 +42,7 @@ docker compose pull && docker compose up -d
 |---|---|
 | `/start` | Welcome message |
 | `/clasificacion` | Group stage standings (optional letter A–L for a single group, e.g. `/clasificacion L`) |
-| `/actual` | Provisional leaderboard (live standings, all groups) — sends top-3 photo album |
+| `/actual` | Provisional leaderboard (live standings; only groups with ≥1 finished match score, so un-started groups award 0 pts) — sends top-3 photo album |
 | `/general` | Official leaderboard (only fully finished groups score) — sends top-3 photo album |
 | `/porra` | Alias of `/actual` |
 | `/hoy` | Matches in the current football day (09:00–09:00 local window) |
@@ -50,7 +50,7 @@ docker compose pull && docker compose up -d
 | `/siguiente` | Next upcoming match |
 | `/endirecto` | Matches currently live |
 | `/listaaciertos` | Official picks breakdown (only closed groups/rounds count) |
-| `/listaaciertosactual` | Provisional picks breakdown (live standings, a día de hoy) |
+| `/listaaciertosactual` | Provisional picks breakdown (live standings; only groups with ≥1 finished match score) |
 | `/mispredicciones` | Your full prediction sheet |
 | `/participantes` | List of participants |
 | `/tongo` | Easter egg 🤫 |

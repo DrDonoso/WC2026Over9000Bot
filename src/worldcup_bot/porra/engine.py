@@ -106,7 +106,8 @@ def compute_general_ranking(
         finished = client.get_finished_groups()
         actual_standings = _build_actual_standings(client, only_groups=finished)
     else:
-        actual_standings = _build_actual_standings(client)
+        started = client.get_started_groups()
+        actual_standings = _build_actual_standings(client, only_groups=started)
     actual_winners = _build_actual_winners(client)
     participants = predictions.get("participants", {})
     rows: list[UserRankEntry] = []
@@ -159,6 +160,8 @@ def compute_user_detail(
     if udata is None:
         return None
 
+    started_groups: set[str] | None = None  # set only in provisional mode
+
     if official:
         finished_groups = client.get_finished_groups()
         finished_stages = client.get_finished_stages()
@@ -173,7 +176,8 @@ def compute_user_detail(
         ko_pts, ko_detail = score_knockout(user_ko, actual_winners)
     else:
         finished_groups = None
-        actual_standings = _build_actual_standings(client)
+        started_groups = client.get_started_groups()
+        actual_standings = _build_actual_standings(client, only_groups=started_groups)
         actual_winners = _build_actual_winners(client)
         ko_pts, ko_detail = score_knockout(udata.get("knockout", {}), actual_winners)
 
@@ -191,6 +195,7 @@ def compute_user_detail(
         "knockout_detail": ko_detail,
         "official": official,
         "finished_groups": len(finished_groups) if official else None,
+        "started_groups": len(started_groups) if started_groups is not None else None,
         "total_groups": len(GROUPS),
     }
 

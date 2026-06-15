@@ -28,12 +28,14 @@ def _make_client(
     finished_groups: set[str] | None = None,
     ko_results: dict[str, list[str]] | None = None,
     finished_stages: set[str] | None = None,
+    started_groups: set[str] | None = None,
 ) -> MagicMock:
     client = MagicMock()
     client.get_standings.return_value = standings or []
     client.get_finished_groups.return_value = finished_groups if finished_groups is not None else set()
     client.get_knockout_results.return_value = ko_results if ko_results is not None else _ko_empty()
     client.get_finished_stages.return_value = finished_stages if finished_stages is not None else set()
+    client.get_started_groups.return_value = started_groups if started_groups is not None else set()
     return client
 
 
@@ -72,13 +74,26 @@ class TestComputeGeneralRankingProvisional:
         assert len(rows) == 1
         assert rows[0].username == "alice"
 
-    def test_live_standings_counted_regardless_of_finished_groups(self):
-        """official=False: group A scores even if finished_groups is empty."""
-        client = _make_client(standings=_GROUP_A_STANDINGS, finished_groups=set())
+    def test_live_standings_counted_for_started_groups(self):
+        """official=False: group A scores from live standings when it IS in started_groups."""
+        client = _make_client(standings=_GROUP_A_STANDINGS, started_groups={"GROUP_A"})
         rows = compute_general_ranking(_ONE_USER_PREDICTIONS, client, official=False)
         # All 3 exact → 3.0 group pts
         assert rows[0].group_score == 3.0
         assert rows[0].total_score == 3.0
+
+    def test_not_started_group_scores_zero(self):
+        """official=False: group A NOT in started_groups → group score = 0."""
+        client = _make_client(standings=_GROUP_A_STANDINGS, started_groups=set())
+        rows = compute_general_ranking(_ONE_USER_PREDICTIONS, client, official=False)
+        assert rows[0].group_score == 0.0
+        assert rows[0].total_score == 0.0
+
+    def test_get_started_groups_is_called_in_provisional_mode(self):
+        """get_started_groups is called for official=False."""
+        client = _make_client(standings=_GROUP_A_STANDINGS, started_groups={"GROUP_A"})
+        compute_general_ranking(_ONE_USER_PREDICTIONS, client, official=False)
+        client.get_started_groups.assert_called_once()
 
     def test_get_finished_groups_not_called_in_unofficial_mode(self):
         """get_finished_groups is not needed for official=False."""
@@ -88,12 +103,39 @@ class TestComputeGeneralRankingProvisional:
 
     def test_official_false_is_default(self):
         """Default call (no official kwarg) == explicit official=False."""
-        client1 = _make_client(standings=_GROUP_A_STANDINGS, finished_groups=set())
-        client2 = _make_client(standings=_GROUP_A_STANDINGS, finished_groups=set())
+        client1 = _make_client(standings=_GROUP_A_STANDINGS, started_groups={"GROUP_A"})
+        client2 = _make_client(standings=_GROUP_A_STANDINGS, started_groups={"GROUP_A"})
         rows_default = compute_general_ranking(_ONE_USER_PREDICTIONS, client1)
         rows_explicit = compute_general_ranking(_ONE_USER_PREDICTIONS, client2, official=False)
         assert rows_default[0].group_score == rows_explicit[0].group_score
         assert rows_default[0].total_score == rows_explicit[0].total_score
+
+    def test_partial_started_only_started_group_scores(self):
+        """Two groups: A started (scores), B not started (0)."""
+        standings = _GROUP_A_STANDINGS + [
+            _make_standing("GROUP_B", 1, "FRA"),
+            _make_standing("GROUP_B", 2, "ARG"),
+            _make_standing("GROUP_B", 3, "ENG"),
+            _make_standing("GROUP_B", 4, "MEX"),
+        ]
+        predictions = {
+            "participants": {
+                "bob": {
+                    "display_name": "Bob",
+                    "base_score": 0.0,
+                    "groups": {"A": ["GER", "ESP", "BRA"], "B": ["FRA", "ARG", "ENG"]},
+                    "knockout": {
+                        "round_of_32": [], "round_of_16": [],
+                        "quarter_finals": [], "semi_finals": [], "final": [],
+                    },
+                }
+            }
+        }
+        # Only Group A has started
+        client = _make_client(standings=standings, started_groups={"GROUP_A"})
+        rows = compute_general_ranking(predictions, client, official=False)
+        # Group A (3 exact → 3.0), Group B (not started → 0)
+        assert rows[0].group_score == 3.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -239,12 +281,33 @@ class TestComputeUserDetailProvisional:
         assert result is not None
         assert result["username"] == "alice"
 
-    def test_group_score_uses_live_standings(self):
-        """official=False: group A scores from live standings regardless of finished_groups."""
-        client = _make_client(standings=_GROUP_A_STANDINGS, finished_groups=set())
+    def test_group_score_uses_live_standings_for_started_groups(self):
+        """official=False: group A scores from live standings when it IS in started_groups."""
+        client = _make_client(standings=_GROUP_A_STANDINGS, started_groups={"GROUP_A"})
         result = compute_user_detail("alice", _DETAIL_PREDICTIONS, client)
         # Alice predicted GER/ESP/BRA exactly → 3.0 pts
         assert result["group_score"] == 3.0
+
+    def test_not_started_group_scores_zero_with_no_data(self):
+        """official=False, group NOT in started_groups → group_score=0, entries have note 'no_data'."""
+        client = _make_client(standings=_GROUP_A_STANDINGS, started_groups=set())
+        result = compute_user_detail("alice", _DETAIL_PREDICTIONS, client)
+        assert result["group_score"] == 0.0
+        for entry in result["group_detail"]:
+            if entry.get("note") != "wildcard":
+                assert entry["note"] == "no_data", f"Expected no_data, got {entry['note']}"
+
+    def test_started_groups_key_reflects_started_count(self):
+        """started_groups key = len(get_started_groups()) in provisional mode."""
+        client = _make_client(standings=_GROUP_A_STANDINGS, started_groups={"GROUP_A", "GROUP_B"})
+        result = compute_user_detail("alice", _DETAIL_PREDICTIONS, client)
+        assert result["started_groups"] == 2
+
+    def test_started_groups_key_is_none_in_official_mode(self):
+        """started_groups key is None when official=True."""
+        client = _make_client(standings=_GROUP_A_STANDINGS, finished_groups={"GROUP_A"}, finished_stages=set())
+        result = compute_user_detail("alice", _DETAIL_PREDICTIONS, client, official=True)
+        assert result["started_groups"] is None
 
     def test_official_key_is_false(self):
         client = _make_client(standings=_GROUP_A_STANDINGS)
