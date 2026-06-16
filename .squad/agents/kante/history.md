@@ -9,6 +9,22 @@
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 
+### 2026-06-16 (Phase 20) — /tongo now sends GIFs from data/tongo_gifs/
+
+**Summary:** `/tongo` 2/3 pool now mixes `Path` objects (GIFs) alongside phrase strings. Each GIF file in `data/tongo_gifs/` (`.gif`, `.mp4`, `.webp`) gets the same individual weight as each phrase — more GIFs means higher GIF probability within the 2/3 block. `SANCHEZ_ENS_ROBA` stays fixed at 1/3. The folder is hot-reload: each `/tongo` call re-scans the directory, so adding a GIF on the server takes effect immediately without restart. GIF send failure degrades gracefully to a random phrase via `reply_text`.
+
+**Key implementations:**
+- `src/worldcup_bot/data/gifs.py` (new): `list_tongo_gifs(gifs_dir: Path) -> list[Path]` — sorted, never raises, filters by `.gif`/`.mp4`/`.webp` (case-insensitive suffix).
+- `src/worldcup_bot/config.py`: Added `tongo_gifs_dir: str = ""` field; `load_settings` reads `TONGO_GIFS_DIR` env var (empty = derive from `predictions_path.parent / "tongo_gifs"`).
+- `src/worldcup_bot/bot/handlers.py`: `cmd_tongo` rewritten — Sanchez path returns early; else-branch resolves `gifs_dir`, calls `list_tongo_gifs`, builds `pool = FRASES + [frase_argentino(gender)] + gifs`, `isinstance(choice, Path)` dispatch to `context.bot.send_animation` or `update.message.reply_text`. Added `from pathlib import Path` and `list_tongo_gifs` imports.
+- `data/tongo_gifs/.gitkeep`: folder committed so the bind-mount target exists in the image even when empty.
+- `.gitignore`: added note that `data/tongo_gifs/` is NOT ignored (user can version factory GIFs if desired).
+- `tests/test_tongo.py`: Added `TestListTongoGifs` (6 tests — gif+mp4 returned, txt excluded, sorted, nonexistent dir=[], empty dir=[], webp included, uppercase suffix).
+- `tests/test_handlers.py`: Added `TestCmdTongoGifs` (6 tests — gif sends animation, phrase uses reply_text, failure falls back, gifs in pool, empty dir no paths, nonexistent dir no paths). Added `from pathlib import Path` import. Added `context.bot.send_animation = AsyncMock()` to `_make_context`.
+- **502 tests passing. Smoke: list_tongo_gifs importable, nonexistent dir → []. Container rebuilt, State=running, RestartCount=0, /app/data/tongo_gifs mounted with .gitkeep.**
+
+
+
 ### 2026-06-16 (Phase 19) — /tongo: 3 new phrases + gender-aware argentino phrase
 
 **Summary:** Added 3 simple phrases to `FRASES` and a new gender-aware phrase "Que tongo ni que tongo, eres mas pesad_ que un_ argentin_" that adapts to the Telegram user's gender (inferred offline from first_name via `gender-guesser`). The dynamic phrase is included in the 2/3 random pool alongside all static phrases. `SANCHEZ_ENS_ROBA` retains its exact 1/3 probability guarantee.

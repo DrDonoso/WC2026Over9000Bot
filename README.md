@@ -29,6 +29,8 @@ docker compose -f docker-compose.local.yml up --build
 
 **Hot-reload predictions** — just edit `./data/predictions.yml` on the server. No rebuild, no restart. The bot re-reads the file on every command.
 
+**Hot-reload `/tongo` GIFs** — drop `.gif`, `.mp4`, or `.webp` files into `./data/tongo_gifs/` on the server. They are picked up immediately on the next `/tongo` with the same individual weight as each phrase (more GIFs → higher chance of a GIF in the 2/3 pool; "Sanchez ens roba" is unaffected at 1/3). Optionally override the scan folder with `TONGO_GIFS_DIR` in `.env`.
+
 **Update the image** — the GitHub Action builds and pushes on every push to `main` (needs repo secrets `DOCKER_USERNAME` / `DOCKER_PASSWORD`). To pull the latest on the server:
 ```bash
 docker compose pull && docker compose up -d
@@ -53,7 +55,7 @@ docker compose pull && docker compose up -d
 | `/listaaciertosactual` | Provisional picks breakdown (live standings; only groups with ≥1 finished match score) |
 | `/mispredicciones` | Your full prediction sheet |
 | `/participantes` | List of participants |
-| `/tongo` | Easter egg 🤫 |
+| `/tongo` | Easter egg 🤫 — drop `.gif` / `.mp4` files into `data/tongo_gifs/` (hot-reload, no rebuild) to mix animations into the phrase pool |
 
 ---
 

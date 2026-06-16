@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import logging
 import random
+from pathlib import Path
 
 import requests as _requests
 
@@ -31,6 +32,7 @@ from worldcup_bot.config import Settings
 from worldcup_bot.data.stages import GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
 from worldcup_bot.data.tongo import FRASES, SANCHEZ_ENS_ROBA, frase_argentino
 from worldcup_bot.data.gender import infer_gender
+from worldcup_bot.data.gifs import list_tongo_gifs
 from worldcup_bot.porra import engine, predictions as pred_loader
 from worldcup_bot.reddit.clip_finder import find_goal_clip
 from worldcup_bot.reddit.downloader import MediaDownloader
@@ -425,14 +427,32 @@ async def cmd_siguiente(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if random.random() < 1 / 3:
-        frase = SANCHEZ_ENS_ROBA
+        await update.message.reply_text(SANCHEZ_ENS_ROBA)
+        return
+
+    settings: Settings = context.bot_data["settings"]
+    if settings.tongo_gifs_dir:
+        gifs_dir = Path(settings.tongo_gifs_dir)
     else:
-        user = update.effective_user
-        first_name = user.first_name if user else None
-        gender = infer_gender(first_name)
-        candidatas = FRASES + [frase_argentino(gender)]
-        frase = random.choice(candidatas)
-    await update.message.reply_text(frase)
+        gifs_dir = Path(settings.predictions_path).parent / "tongo_gifs"
+
+    gifs = list_tongo_gifs(gifs_dir)
+    user = update.effective_user
+    gender = infer_gender(user.first_name if user else None)
+    pool = FRASES + [frase_argentino(gender)] + gifs
+    choice = random.choice(pool)
+
+    if isinstance(choice, Path):
+        try:
+            with open(choice, "rb") as f:
+                await context.bot.send_animation(
+                    chat_id=update.effective_chat.id, animation=f
+                )
+        except Exception as exc:
+            log.warning("Could not send tongo GIF %s: %s", choice, exc)
+            await update.message.reply_text(random.choice(FRASES))
+    else:
+        await update.message.reply_text(choice)
 
 
 async def cmd_mis_predicciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

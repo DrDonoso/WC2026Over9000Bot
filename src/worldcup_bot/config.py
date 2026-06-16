@@ -26,6 +26,7 @@ class Settings:
     photo_base_url: str = "http://victorsaez.cat"
     goal_poll_interval_seconds: int = 60
     reddit_user_agent: str = field(default=_DEFAULT_REDDIT_UA)
+    tongo_gifs_dir: str = ""
 
 
 def load_settings() -> Settings:
@@ -64,4 +65,5 @@ def load_settings() -> Settings:
         photo_base_url=os.getenv("PHOTO_BASE_URL", "http://victorsaez.cat"),
         goal_poll_interval_seconds=int(os.getenv("GOAL_POLL_INTERVAL_SECONDS", "60")),
         reddit_user_agent=os.getenv("REDDIT_USER_AGENT", _DEFAULT_REDDIT_UA),
+        tongo_gifs_dir=os.getenv("TONGO_GIFS_DIR", ""),
     )

@@ -24,5 +24,10 @@ venv/
 # Runtime data — git-ignored; populated at runtime from predictions.example.yml
 data/predictions.yml
 
+# Tongo GIFs — runtime media, NEVER commit (folder kept via .gitkeep).
+# Drop .gif/.mp4 into data/tongo_gifs/ on the server (mounted, hot-reload, no rebuild).
+data/tongo_gifs/*
+!data/tongo_gifs/.gitkeep
+
 # Corporate CA bundle for SSL-inspection remediation — generated locally, never committed
 certs/

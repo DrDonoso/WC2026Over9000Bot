@@ -6,6 +6,7 @@ so no network calls or real files are needed.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -122,6 +123,7 @@ def _make_context(settings: Settings, args: list[str] | None = None) -> MagicMoc
     context.args = args or []
     context.bot.send_photo = AsyncMock()
     context.bot.send_media_group = AsyncMock()
+    context.bot.send_animation = AsyncMock()
     return context
 
 
@@ -1887,3 +1889,116 @@ class TestCmdTongo:
         assert text == expected
         pool = mock_random.choice.call_args[0][0]
         assert expected in pool
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_tongo — GIF / animation paths
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCmdTongoGifs:
+    """Tests for the GIF branch of cmd_tongo."""
+
+    def _gif_settings(self, gifs_dir: str) -> Settings:
+        return Settings(
+            telegram_bot_token="fake-token",
+            football_data_api_key="fake-api-key",
+            predictions_path="fake_predictions.yml",
+            tongo_gifs_dir=gifs_dir,
+        )
+
+    async def test_gif_chosen_sends_animation(self, tmp_path):
+        """When random.choice returns a Path, send_animation is awaited and reply_text not called."""
+        gif_file = tmp_path / "funny.gif"
+        gif_file.write_bytes(b"GIF89a")
+
+        update = _make_update()
+        context = _make_context(self._gif_settings(str(tmp_path)))
+
+        with patch("worldcup_bot.bot.handlers.random") as mock_random:
+            mock_random.random.return_value = 0.9
+            mock_random.choice.return_value = gif_file
+            await cmd_tongo(update, context)
+
+        context.bot.send_animation.assert_awaited_once()
+        call_kwargs = context.bot.send_animation.call_args
+        assert call_kwargs.kwargs["chat_id"] == 12345
+        update.message.reply_text.assert_not_called()
+
+    async def test_phrase_chosen_does_not_send_animation(self, fake_settings):
+        """When random.choice returns a string phrase, reply_text is called and send_animation is not."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        known_phrase = "La culpa es de Suñé"
+
+        with patch("worldcup_bot.bot.handlers.random") as mock_random:
+            mock_random.random.return_value = 0.9
+            mock_random.choice.return_value = known_phrase
+            await cmd_tongo(update, context)
+
+        update.message.reply_text.assert_called_once_with(known_phrase)
+        context.bot.send_animation.assert_not_called()
+
+    async def test_gif_send_failure_falls_back_to_phrase(self, tmp_path):
+        """If send_animation raises, a fallback phrase is sent via reply_text."""
+        gif_file = tmp_path / "broken.gif"
+        gif_file.write_bytes(b"GIF89a")
+
+        update = _make_update()
+        context = _make_context(self._gif_settings(str(tmp_path)))
+        context.bot.send_animation = AsyncMock(side_effect=Exception("Telegram error"))
+        fallback_phrase = "Aguacate?"
+
+        with patch("worldcup_bot.bot.handlers.random") as mock_random:
+            mock_random.random.return_value = 0.9
+            mock_random.choice.side_effect = [gif_file, fallback_phrase]
+            await cmd_tongo(update, context)
+
+        context.bot.send_animation.assert_awaited_once()
+        update.message.reply_text.assert_called_once_with(fallback_phrase)
+
+    async def test_gifs_in_pool_when_dir_has_files(self, tmp_path):
+        """GIF Paths are added to the pool when the gifs_dir contains supported files."""
+        (tmp_path / "a.gif").write_bytes(b"GIF89a")
+        (tmp_path / "b.mp4").write_bytes(b"\x00\x00\x00")
+
+        update = _make_update()
+        context = _make_context(self._gif_settings(str(tmp_path)))
+        known_phrase = "Aguacate?"
+
+        with patch("worldcup_bot.bot.handlers.random") as mock_random:
+            mock_random.random.return_value = 0.9
+            mock_random.choice.return_value = known_phrase
+            await cmd_tongo(update, context)
+
+        pool = mock_random.choice.call_args[0][0]
+        gif_paths = [p for p in pool if isinstance(p, Path)]
+        assert len(gif_paths) == 2
+
+    async def test_empty_gifs_dir_pool_has_no_paths(self, tmp_path):
+        """If gifs_dir is empty, pool contains only strings."""
+        update = _make_update()
+        context = _make_context(self._gif_settings(str(tmp_path)))
+        known_phrase = "Aguacate?"
+
+        with patch("worldcup_bot.bot.handlers.random") as mock_random:
+            mock_random.random.return_value = 0.9
+            mock_random.choice.return_value = known_phrase
+            await cmd_tongo(update, context)
+
+        pool = mock_random.choice.call_args[0][0]
+        assert all(isinstance(item, str) for item in pool)
+
+    async def test_nonexistent_gifs_dir_pool_has_no_paths(self, fake_settings):
+        """Non-existent gifs_dir is tolerated; pool contains only strings."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        known_phrase = "Aguacate?"
+
+        with patch("worldcup_bot.bot.handlers.random") as mock_random:
+            mock_random.random.return_value = 0.9
+            mock_random.choice.return_value = known_phrase
+            await cmd_tongo(update, context)
+
+        pool = mock_random.choice.call_args[0][0]
+        assert all(isinstance(item, str) for item in pool)
