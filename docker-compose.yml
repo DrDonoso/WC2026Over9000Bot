@@ -19,8 +19,8 @@ services:
       # --- Timezone for match time display ---
       TIMEZONE: "${TIMEZONE:-Europe/Madrid}"
 
-      # --- Optional: restrict bot to a specific Telegram group ---
-      TELEGRAM_GROUP_ID: "${TELEGRAM_GROUP_ID:-}"
+      # --- Telegram group/channel ID for live goal notifications (REQUIRED) ---
+      TELEGRAM_GROUP_ID: "${TELEGRAM_GROUP_ID}"
 
     volumes:
       # Mount the host ./data directory; edit ./data/predictions.yml on the host (or server)

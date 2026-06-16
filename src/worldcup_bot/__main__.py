@@ -55,7 +55,7 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Repeating job: discover new Reddit match-thread goals and notify the group.
 
     Scheduled every settings.goal_poll_interval_seconds seconds.
-    TELEGRAM_GROUP_ID must be set; if not, the job is never scheduled.
+    TELEGRAM_GROUP_ID is guaranteed set by load_settings (RuntimeError if missing).
 
     Dedup strategy: on the FIRST poll for a thread, all current goal keys are
     seeded into the notified set WITHOUT sending — prevents spamming goals that
@@ -223,23 +223,17 @@ def main() -> None:
 
     app = build_app(settings)
 
-    # Schedule the goal-notifier polling job if a group is configured
-    if settings.telegram_group_id:
-        log.info(
-            "Goal notifier enabled — polling Reddit every %ds for group %s",
-            settings.goal_poll_interval_seconds,
-            settings.telegram_group_id,
-        )
-        app.job_queue.run_repeating(
-            poll_goals_job,
-            interval=settings.goal_poll_interval_seconds,
-            first=10,
-            name="poll_goals",
-        )
-    else:
-        log.warning(
-            "Goal notifier DISABLED — set TELEGRAM_GROUP_ID to enable live goal notifications."
-        )
+    log.info(
+        "Goal notifier enabled — polling Reddit every %ds for group %s",
+        settings.goal_poll_interval_seconds,
+        settings.telegram_group_id,
+    )
+    app.job_queue.run_repeating(
+        poll_goals_job,
+        interval=settings.goal_poll_interval_seconds,
+        first=10,
+        name="poll_goals",
+    )
 
     app.run_polling()
 

@@ -9,6 +9,16 @@
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 
+### 2026-06-16 (Phase 18) — TELEGRAM_GROUP_ID made required in load_settings
+
+**Summary:** `TELEGRAM_GROUP_ID` is now a required env var enforced by `load_settings()` (raises `RuntimeError` if missing/empty). The `Settings` dataclass field default (`str | None = None`) was intentionally kept so that `Settings(...)` test constructors remain unaffected. `__main__.py` always schedules `poll_goals_job` — the conditional `if settings.telegram_group_id` guard and the `DISABLED` warning branch were removed as dead code. Note: Maldini updated `docker-compose.yml` and `.env.example` in parallel.
+
+**Key implementations:**
+- `config.py`: Added group_id check after api_key check; `telegram_group_id=group_id` (no longer `or None`).
+- `__main__.py`: Removed `if/else` around `run_repeating`; job is unconditionally scheduled; stale docstring in `poll_goals_job` updated.
+- `tests/test_config.py`: All 6 existing `TestLoadSettings` tests patched with `TELEGRAM_GROUP_ID=-100123`. Two new tests: `test_missing_telegram_group_id_raises` and `test_telegram_group_id_reads_from_env`.
+- **473 tests passing (+2). Smoke: raises without group id: OK; with group id: -100123.**
+
 ### 2026-06-16 (Phase 17) — /simulagol hidden from /start + /tongo probability rework
 
 **Summary:** `/simulagol` removed from the `/start` visible help (command still registered and functional in `__main__.py`). `/tongo` reworked to use explicit 1/3 probability for `SANCHEZ_ENS_ROBA` instead of 25 duplicate list entries; 13 new phrases added to `FRASES`.

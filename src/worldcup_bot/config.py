@@ -44,13 +44,21 @@ def load_settings() -> Settings:
             "Set it in the environment or in .env before starting the bot."
         )
 
+    group_id = os.getenv("TELEGRAM_GROUP_ID", "")
+    if not group_id:
+        raise RuntimeError(
+            "❌ TELEGRAM_GROUP_ID is not set. "
+            "It is required for live goal notifications. "
+            "Set it in the environment or in .env before starting the bot."
+        )
+
     return Settings(
         telegram_bot_token=token,
         football_data_api_key=api_key,
         predictions_path=os.getenv("PREDICTIONS_PATH", "data/predictions.yml"),
         competition_code=os.getenv("COMPETITION_CODE", "WC"),
         timezone=os.getenv("TIMEZONE", "Europe/Madrid"),
-        telegram_group_id=os.getenv("TELEGRAM_GROUP_ID") or None,
+        telegram_group_id=group_id,
         football_cache_ttl=float(os.getenv("FOOTBALL_CACHE_TTL", "60")),
         football_day_start_hour=int(os.getenv("FOOTBALL_DAY_START_HOUR", "9")),
         photo_base_url=os.getenv("PHOTO_BASE_URL", "http://victorsaez.cat"),

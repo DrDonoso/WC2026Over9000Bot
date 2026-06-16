@@ -100,6 +100,13 @@ Note: `truststore.inject_into_ssl()` does NOT help inside the container — it r
 
 ## Learnings
 
+### 2026-06-16T12:24+02:00 — TELEGRAM_GROUP_ID promoted to REQUIRED
+
+- `TELEGRAM_GROUP_ID` promoted to REQUIRED in both `docker-compose.yml` and `docker-compose.local.yml`: dropped `:-}` empty-default so Compose passes through whatever is set (and emits a warning if unset — desired signal). Comment updated to "Telegram group/channel ID for live goal notifications (REQUIRED)".
+- `.env.example`: moved `TELEGRAM_GROUP_ID` out of the `# Optional — Override defaults` block, uncommented it, and placed it in its own `# Required` block after `FOOTBALL_DATA_API_KEY`. Hard validation lives in Kanté's `load_settings()`.
+- `.env` (git-ignored, user's real values) was NOT modified.
+- Rationale: the live goal notifier depends on the group ID being present; the app will fail fast at startup without it (Kanté's responsibility). Compose-level signal (warning on unset var) reinforces the contract for operators.
+
 - `apt-get install -y --no-install-recommends ffmpeg` added as first `RUN` layer in Dockerfile (right after `FROM python:3.12-slim AS base`, before user creation). This gives both `ffmpeg` and `ffprobe` binaries to the `app` non-root user.
 - Layer is placed early (before any `COPY`/pip steps) so it's cached independently — system deps rarely change, Python deps change often.
 - yt-dlp comes via `pyproject.toml` (Kanté's responsibility); it is NOT installed via apt or a separate pip call in the Dockerfile.
