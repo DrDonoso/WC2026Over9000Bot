@@ -5,6 +5,7 @@ Builds the Telegram Application, registers all handlers, starts polling.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 from datetime import datetime, time as dtime
@@ -14,7 +15,9 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from worldcup_bot.api.client import FootballAPIError
 from worldcup_bot.ai.client import AIClient
+from worldcup_bot.ai.commentators import generate_porra_commentary, pick_commentator
 from worldcup_bot.ai.daily_update import generate_daily_update
+from worldcup_bot.bot.formatters import bold_person_names
 from worldcup_bot.bot.handlers import (
     _goal_token,
     cmd_actual,
@@ -36,6 +39,11 @@ from worldcup_bot.bot.handlers import (
     make_client,
 )
 from worldcup_bot.config import Settings, ai_enabled, load_settings
+from worldcup_bot.espn.client import ESPNClient
+from worldcup_bot.espn.formatter import format_match_stats
+from worldcup_bot.porra import predictions as pred_loader
+from worldcup_bot.porra.engine import compute_general_ranking
+from worldcup_bot.porra.live import build_state, diff_live, load_live, render_changes_text, save_live
 from worldcup_bot.reddit.notifier import (
     _is_silent_hour,
     build_goal_keyboard,
@@ -177,6 +185,163 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("poll_goals_job: unexpected error (will retry next tick): %s", exc)
 
 
+# ── finished-match stats + porra commentary job ───────────────────────────────
+
+
+async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Repeating job: detect newly-finished matches, post stats card + porra commentary.
+
+    Dedup strategy: on the FIRST run, all currently-finished match ids are seeded
+    into finished_seen WITHOUT sending — prevents re-firing for pre-existing finished
+    matches on startup.  On subsequent runs, each newly-finished id triggers:
+      Part A — ESPN stats card (HTML)
+      Part B — porra ranking diff + AI commentary (if AI enabled)
+    """
+    try:
+        settings: Settings = context.bot_data["settings"]
+
+        # Lazy-init ESPN client
+        if context.bot_data.get("espn_client") is None:
+            context.bot_data["espn_client"] = ESPNClient(
+                league_slug=settings.espn_league_slug
+            )
+        espn_client: ESPNClient = context.bot_data["espn_client"]
+
+        # Lazy-init scanner (shared with goal-notifier)
+        if context.bot_data.get("reddit_scanner") is None:
+            context.bot_data["reddit_scanner"] = RedditMatchScanner(
+                user_agent=settings.reddit_user_agent
+            )
+        scanner: RedditMatchScanner = context.bot_data["reddit_scanner"]
+
+        client = make_client(settings)
+        try:
+            all_matches = client.get_all_matches()
+        except FootballAPIError as exc:
+            log.warning("poll_finished_matches_job: could not get matches: %s", exc)
+            return
+
+        finished_ids = {m.id for m in all_matches if m.status == "FINISHED"}
+
+        # ── seed on first run ─────────────────────────────────────────────────
+        if "finished_seen" not in context.bot_data:
+            context.bot_data["finished_seen"] = set(finished_ids)
+            log.info(
+                "poll_finished_matches_job: seeded %d already-finished matches (no sends)",
+                len(finished_ids),
+            )
+            return
+
+        finished_seen: set = context.bot_data["finished_seen"]
+        new_ids = finished_ids - finished_seen
+
+        if not new_ids:
+            return
+
+        matches_by_id = {m.id: m for m in all_matches}
+        live_path = f"{settings.state_dir}/porra_live.json"
+
+        for match_id in new_ids:
+            try:
+                match = matches_by_id.get(match_id)
+                if match is None:
+                    finished_seen.add(match_id)
+                    continue
+
+                stats_text: str | None = None
+                commentary_text: str | None = None
+
+                # ── Part A: ESPN stats card ───────────────────────────────────
+                try:
+                    game_id = await asyncio.to_thread(
+                        scanner.get_espn_game_id, match.home_name, match.away_name
+                    )
+                    if game_id:
+                        stats = await asyncio.to_thread(espn_client.get_match_stats, game_id)
+                        if stats:
+                            stats_text = format_match_stats(match, stats)
+                            log.info(
+                                "Fetched ESPN stats for match %d (%s vs %s)",
+                                match_id,
+                                match.home_name,
+                                match.away_name,
+                            )
+                        else:
+                            log.info(
+                                "No ESPN stats for match %d (game_id=%s)", match_id, game_id
+                            )
+                    else:
+                        log.info(
+                            "No ESPN game_id found for match %d (%s vs %s)",
+                            match_id,
+                            match.home_name,
+                            match.away_name,
+                        )
+                except Exception as exc:
+                    log.error("Part A failed for match %d: %s", match_id, exc)
+
+                # ── Part B: porra ranking diff + AI commentary ────────────────
+                try:
+                    predictions = pred_loader.load(settings.predictions_path)
+                    ranking = compute_general_ranking(predictions, client, official=False)
+                    participant_names = [e.display_name for e in ranking]
+                    new_state = build_state(ranking)
+                    old_state = load_live(live_path)
+                    live_diff = diff_live(old_state, new_state)
+
+                    if live_diff.changed and ai_enabled(settings):
+                        ai = AIClient(
+                            settings.openai_api_key,
+                            settings.openai_base_url,
+                            settings.openai_model,
+                        )
+                        persona = pick_commentator()
+                        changes_text = render_changes_text(live_diff)
+                        raw_commentary = await generate_porra_commentary(ai, persona, changes_text)
+                        commentary_text = bold_person_names(raw_commentary, participant_names)
+                        log.info(
+                            "Generated porra commentary (%s) for match %d", persona, match_id
+                        )
+
+                    save_live(live_path, new_state)
+
+                except Exception as exc:
+                    log.error("Part B failed for match %d: %s", match_id, exc)
+
+                # ── Combine and send ONE message ──────────────────────────────
+                if stats_text and commentary_text:
+                    combined = stats_text + "\n\n----\n\n" + commentary_text
+                elif stats_text:
+                    combined = stats_text
+                elif commentary_text:
+                    combined = commentary_text
+                else:
+                    combined = None
+
+                if combined:
+                    await context.bot.send_message(
+                        chat_id=settings.telegram_group_id,
+                        text=combined,
+                        parse_mode="HTML",
+                    )
+                    log.info(
+                        "Sent match-finish message for match %d (%s vs %s)",
+                        match_id,
+                        match.home_name,
+                        match.away_name,
+                    )
+
+            except Exception as exc:
+                log.error("poll_finished_matches_job: error processing match %d: %s", match_id, exc)
+            finally:
+                finished_seen.add(match_id)
+
+        context.bot_data["finished_seen"] = finished_seen
+
+    except Exception as exc:
+        log.exception("poll_finished_matches_job: unexpected error: %s", exc)
+
+
 # ── app builder ───────────────────────────────────────────────────────────────
 
 
@@ -195,6 +360,8 @@ def build_app(settings: Settings) -> Application:
     app.bot_data["vergol_inflight"] = set()
     # Telegram file_id cache: media_url → file_id (skip re-upload on repeat sends)
     app.bot_data["clip_file_ids"] = {}
+    # finished-match tracker: seeded on first poll_finished_matches_job run
+    app.bot_data["espn_client"] = None
 
     handlers = [
         CommandHandler("start", cmd_start),
@@ -277,6 +444,19 @@ def main() -> None:
     else:
         log.info(
             "Daily AI update DISABLED — set OPENAI_API_KEY/OPENAI_BASE_URL/OPENAI_MODEL to enable."
+        )
+
+    if settings.telegram_group_id:
+        app.job_queue.run_repeating(
+            poll_finished_matches_job,
+            interval=settings.finished_poll_interval_seconds,
+            first=15,
+            name="poll_finished_matches",
+        )
+        log.info(
+            "Finished-match notifier enabled — polling every %ds for group %s",
+            settings.finished_poll_interval_seconds,
+            settings.telegram_group_id,
         )
 
     app.run_polling()

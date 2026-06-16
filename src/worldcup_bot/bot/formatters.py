@@ -5,13 +5,42 @@ Depends only on data/tla_map — never imports api/ or porra/.
 
 from __future__ import annotations
 
+import html
+import re
 from datetime import datetime, timezone
+from typing import Iterable
 
 import flag as flag_lib
 import pytz
 
 from worldcup_bot.api.models import Match, Standing
 from worldcup_bot.data.tla_map import tla_to_iso
+
+# ── person-name bolding ───────────────────────────────────────────────────────
+
+
+def bold_person_names(text: str, names: Iterable[str]) -> str:
+    """HTML-escape *text* and wrap each known participant name in <b>…</b>.
+
+    Matching rules:
+    - Names are tried longest-first to prevent shorter names from shadowing
+      multi-word names (e.g. "Alice" won't eat into "Alice Smith").
+    - Unicode word boundaries (``(?<!\\w)`` / ``(?!\\w)``) so accented names
+      like Peñalver or Tarragó and multi-word names like "Maria Tarrago" match
+      correctly, while substrings inside other words are NOT bolded.
+    - A single regex pass prevents double-wrapping within one call.
+    - Input *text* is HTML-escaped before matching; the returned string is
+      HTML-safe and ready for ``parse_mode="HTML"``.
+    """
+    escaped = html.escape(text, quote=False)
+    clean = sorted({n.strip() for n in names if n and n.strip()}, key=len, reverse=True)
+    if not clean:
+        return escaped
+    esc_names = [html.escape(n, quote=False) for n in clean]
+    alt = "|".join(re.escape(n) for n in esc_names)
+    pattern = re.compile(rf"(?<!\w)({alt})(?!\w)", re.UNICODE)
+    return pattern.sub(r"<b>\1</b>", escaped)
+
 
 # ── flag rendering ────────────────────────────────────────────────────────────
 
@@ -104,63 +133,68 @@ def participant_photo_url(username: str, base_url: str) -> str:
 
 
 def format_general_ranking(rows: list, title: str = "🏆 Ranking General:") -> str:
-    """Format a list of UserRankEntry into a message string."""
+    """Format a list of UserRankEntry into an HTML message string."""
     if not rows:
         return "No hay datos de ranking aún."
 
     lines = [title, ""]
     for i, row in enumerate(rows, start=1):
-        lines.append(f"{i}. {row.display_name}: {row.total_score:.1f} pts")
+        dname_esc = html.escape(row.display_name, quote=False)
+        lines.append(f"{i}. <b>{dname_esc}</b>: {row.total_score:.1f} pts")
 
     top_score = rows[0].total_score
     leaders = [r for r in rows if r.total_score == top_score]
 
     if len(leaders) == 1:
         winner = leaders[0]
-        lines.append(f"\n🏆 Líder: {winner.display_name} — {top_score:.1f} pts 🏆")
+        dname_esc = html.escape(winner.display_name, quote=False)
+        lines.append(f"\n🏆 Líder: <b>{dname_esc}</b> — {top_score:.1f} pts 🏆")
     else:
-        names = ", ".join(r.display_name for r in leaders)
+        names = ", ".join(f"<b>{html.escape(r.display_name, quote=False)}</b>" for r in leaders)
         lines.append(f"\n🏆 Empate en primer lugar: {names} — {top_score:.1f} pts 🏆")
 
     return "\n".join(lines)
 
 
 def format_user_detail(detail: dict) -> str:
-    """Format per-user scoring detail for /listaaciertos (official) or /listaaciertosactual (provisional)."""
-    is_official = detail.get("official", False)
-    display_name = detail["display_name"]
-    if is_official:
-        lines = [f"📊 Aciertos (oficial) de {display_name}:", ""]
-    else:
-        lines = [f"📊 Aciertos (provisional, a día de hoy) de {display_name}:", ""]
+    """Format per-user scoring detail for /listaaciertos (official) or /listaaciertosactual (provisional).
 
-    lines.append("*Fase de Grupos:*")
+    Returns HTML-safe text (ready for parse_mode="HTML").
+    """
+    is_official = detail.get("official", False)
+    display_name = html.escape(detail["display_name"], quote=False)
+    if is_official:
+        lines = [f"📊 Aciertos (oficial) de <b>{display_name}</b>:", ""]
+    else:
+        lines = [f"📊 Aciertos (provisional, a día de hoy) de <b>{display_name}</b>:", ""]
+
+    lines.append("<b>Fase de Grupos:</b>")
     group_detail = sorted(detail.get("group_detail", []), key=lambda d: (d.get("group", ""), d.get("predicted_pos", 0)))
     for d in group_detail:
         if d.get("note") == "wildcard":
             continue
-        team = d["team"]
+        team = html.escape(str(d["team"]), quote=False)
         f = team_flag(team)
         pred = d.get("predicted_pos", "?")
         actual = d.get("actual_pos") or "?"
         pts = d.get("points", 0)
         note_map = {"exacto": "✅ +1", "clasifica": "🔶 +0.5", "fallo": "❌ 0", "no_data": "⏳ 0"}
         note = note_map.get(d.get("note", ""), "")
-        lines.append(f"  Grupo {d['group']} {f}{team}: pred={pred} real={actual} {note} ({pts}pt)")
+        lines.append(f"  Grupo {html.escape(str(d['group']), quote=False)} {f}{team}: pred={pred} real={actual} {note} ({pts}pt)")
 
-    lines.append(f"\n*Total grupos:* {detail['group_score']:.1f} pts")
+    lines.append(f"\n<b>Total grupos:</b> {detail['group_score']:.1f} pts")
     lines.append("")
 
     if detail.get("knockout_detail"):
         from worldcup_bot.data.stages import KNOCKOUT_STAGES, STAGE_YAML_KEYS
 
-        lines.append("*Fases eliminatorias:*")
+        lines.append("<b>Fases eliminatorias:</b>")
         current_stage = ""
         for d in detail.get("knockout_detail", []):
             stg = d.get("stage", "")
             if stg != current_stage:
                 current_stage = stg
-                display = d.get("display") or stg
+                display = html.escape(str(d.get("display") or stg), quote=False)
                 lines.append(f"  {display}:")
             team = d["team"]
             if team == "**":
@@ -169,12 +203,12 @@ def format_user_detail(detail: dict) -> str:
             note_map2 = {"acierto": "✅", "fallo": "❌", "wildcard": ""}
             note = note_map2.get(d.get("note", ""), "")
             pts = d.get("points", 0)
-            lines.append(f"    {f}{team} {note} ({pts}pt)")
+            lines.append(f"    {f}{html.escape(str(team), quote=False)} {note} ({pts}pt)")
 
-        lines.append(f"\n*Total eliminatorias:* {detail['knockout_score']:.1f} pts")
+        lines.append(f"\n<b>Total eliminatorias:</b> {detail['knockout_score']:.1f} pts")
         lines.append("")
 
-    lines.append(f"*TOTAL: {detail['total_score']:.1f} pts*")
+    lines.append(f"<b>TOTAL: {detail['total_score']:.1f} pts</b>")
 
     # Mode-specific footer
     finished_groups = detail.get("finished_groups")

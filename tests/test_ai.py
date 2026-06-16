@@ -484,6 +484,26 @@ class TestRenderMessage:
         result = render_message([], [], "Europe/Madrid", {}, "líder <Alice> & amigos")
         assert "líder &lt;Alice&gt; &amp; amigos" in result
 
+    def test_participant_names_bolded_in_standings_comment(self):
+        """Known participant names in standings_comment get wrapped in <b>.</b>."""
+        result = render_message(
+            [], [], "Europe/Madrid", {},
+            "Alice sube al 1er puesto y Bob baja.",
+            participant_names=["Alice", "Bob"],
+        )
+        assert "<b>Alice</b>" in result
+        assert "<b>Bob</b>" in result
+
+    def test_unknown_names_not_bolded_in_standings_comment(self):
+        """Words that are NOT in participant_names are NOT bolded."""
+        result = render_message(
+            [], [], "Europe/Madrid", {},
+            "Great game today.",
+            participant_names=["Alice"],
+        )
+        assert "<b>Great</b>" not in result
+        assert "<b>game</b>" not in result
+
     def test_three_sections_separated_by_blank_lines(self):
         m_y = _make_match("Spain", "France", 1, 0, "FINISHED", winner="HOME_TEAM")
         m_t = _make_match("Germany", "Brazil", status="SCHEDULED", utc_date="2026-06-15T18:00:00Z", home_tla="GER", away_tla="BRA")

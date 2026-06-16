@@ -32,6 +32,8 @@ class Settings:
     openai_model: str = ""
     daily_update_hour: int = 9
     state_dir: str = "/app/state"
+    espn_league_slug: str = "fifa.world"
+    finished_poll_interval_seconds: int = 120
 
 
 def ai_enabled(settings: "Settings") -> bool:
@@ -85,4 +87,6 @@ def load_settings() -> Settings:
         openai_model=os.getenv("OPENAI_MODEL", ""),
         daily_update_hour=int(os.getenv("DAILY_UPDATE_HOUR", "9")),
         state_dir=os.getenv("STATE_DIR", "/app/state"),
+        espn_league_slug=os.getenv("ESPN_LEAGUE_SLUG", "fifa.world"),
+        finished_poll_interval_seconds=int(os.getenv("FINISHED_POLL_INTERVAL_SECONDS", "120")),
     )

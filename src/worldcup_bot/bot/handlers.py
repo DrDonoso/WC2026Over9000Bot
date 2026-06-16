@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import html
 import logging
 import random
 from pathlib import Path
@@ -157,7 +158,7 @@ async def _send_ranking_with_top3_photos(
 ) -> None:
     """Send a ranking text as a top-3 photo album, or fall back to plain text."""
     if not rows:
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, parse_mode="HTML")
         return
 
     top3 = rows[:3]
@@ -174,21 +175,21 @@ async def _send_ranking_with_top3_photos(
             pass
 
     if not valid_urls:
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, parse_mode="HTML")
         return
 
     caption = text[:1024]
-    media = [InputMediaPhoto(media=valid_urls[0], caption=caption)]
+    media = [InputMediaPhoto(media=valid_urls[0], caption=caption, parse_mode="HTML")]
     for url in valid_urls[1:]:
         media.append(InputMediaPhoto(media=url))
 
     try:
         await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
         if len(text) > 1024:
-            await update.message.reply_text(text)
+            await update.message.reply_text(text, parse_mode="HTML")
     except Exception:
         log.warning("send_media_group failed, falling back to text.")
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, parse_mode="HTML")
 
 
 async def cmd_clasificacion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -317,7 +318,7 @@ async def _send_user_detail(
         await update.message.reply_text(_MSG_USER_NOT_FOUND.format(name=target_username))
         return
 
-    await update.message.reply_text(format_user_detail(detail), parse_mode="Markdown")
+    await update.message.reply_text(format_user_detail(detail), parse_mode="HTML")
 
 
 async def cmd_lista_aciertos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -516,10 +517,12 @@ async def cmd_participantes(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     lines = ["👥 Participantes registrados:", ""]
     for uname, udata in sorted(participants.items()):
         dname = udata.get("display_name") or ""
-        display = f"@{uname}" + (f" ({dname})" if dname else "")
+        uname_esc = html.escape(uname, quote=False)
+        dname_esc = html.escape(dname, quote=False)
+        display = f"@{uname_esc}" + (f" (<b>{dname_esc}</b>)" if dname else "")
         lines.append(f"• {display}")
 
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 # ── "Ver gol" callback handler ────────────────────────────────────────────────

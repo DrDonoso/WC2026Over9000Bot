@@ -165,6 +165,8 @@ _TITLE_RE = re.compile(r'<a\s+class="[^"]*title[^"]*"[^>]*>(?P<title>[^<]+)</a>'
 
 _SELFTEXT_DATA_RE = re.compile(r'data-selftext="(.*?)"(?=\s)', re.DOTALL)
 
+_ESPN_GAME_ID_RE = re.compile(r"gameId=(\d+)")
+
 # Search-result listings use a different structure: the link has class="search-title"
 # and the full old.reddit.com URL in href.
 _SEARCH_RESULT_LINK_RE = re.compile(
@@ -390,6 +392,32 @@ class RedditMatchScanner:
         if body is None:
             body = self._fetch_thread_body_html(permalink)
         return body
+
+    def get_espn_game_id(self, home: str, away: str) -> str | None:
+        """Find the ESPN game ID embedded in the r/soccer match thread.
+
+        Searches for the match thread (works for finished matches too), fetches
+        the full thread HTML, and extracts the first ``gameId=`` query parameter
+        (e.g. from the "MATCH EVENTS | via ESPN" header link).
+
+        Returns the game ID string (e.g. "401866598") or None on any failure.
+        """
+        try:
+            permalink = self.find_match_thread(home, away)
+            if permalink is None:
+                log.warning("get_espn_game_id: no match thread found for %s vs %s", home, away)
+                return None
+            url = f"{_REDDIT_OLD_BASE}{permalink}"
+            resp = self._session.get(url, timeout=15)
+            resp.raise_for_status()
+            m = _ESPN_GAME_ID_RE.search(resp.text)
+            if m:
+                return m.group(1)
+            log.warning("get_espn_game_id: no gameId found in thread HTML for %s vs %s", home, away)
+            return None
+        except Exception as exc:
+            log.warning("get_espn_game_id(%s vs %s) failed: %s", home, away, exc)
+            return None
 
     # ── main scan ─────────────────────────────────────────────────────────────
 

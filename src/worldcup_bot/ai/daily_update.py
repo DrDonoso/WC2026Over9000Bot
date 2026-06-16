@@ -31,7 +31,7 @@ from worldcup_bot.ai.client import AIClient
 from worldcup_bot.ai.snapshot import Movement
 from worldcup_bot.api.client import FootballDataClient
 from worldcup_bot.api.models import Match
-from worldcup_bot.bot.formatters import team_flag
+from worldcup_bot.bot.formatters import bold_person_names, team_flag
 from worldcup_bot.config import Settings
 from worldcup_bot.porra import engine, predictions as pred_loader
 from worldcup_bot.porra.engine import UserRankEntry
@@ -228,10 +228,12 @@ def render_message(
     standings_comment: str,
     scenario: str = "normal",
     next_date_str: str | None = None,
+    participant_names: list[str] | None = None,
 ) -> str:
     """Assemble the final HTML Telegram message. Pure function — no I/O.
 
     Uses html.escape() on all variable content; own <b>/<i> tags are literal.
+    Person names in standings_comment are bolded via bold_person_names().
 
     Section rules:
     - "Resultados de ayer": only included when yesterday is non-empty.
@@ -239,6 +241,7 @@ def render_message(
       a pause notice is shown instead.
     - "La porra": always present.
     """
+    _participant_names: list[str] = participant_names or []
     sections: list[str] = []
 
     # ── Section 1: yesterday (omit entirely when empty) ───────────────────────
@@ -294,7 +297,7 @@ def render_message(
     # ── Section 3: porra ──────────────────────────────────────────────────────
     lines = ["📊 <b>La porra</b>"]
     if standings_comment:
-        lines.append(html.escape(standings_comment, quote=False))
+        lines.append(bold_person_names(standings_comment, _participant_names))
     sections.append("\n".join(lines))
 
     return "\n\n".join(sections)
@@ -395,6 +398,7 @@ async def generate_daily_update(
         today_notes, standings_comment = {}, ""
 
     # 5. Render HTML
+    participant_names = [r.display_name for r in ranking]
     return render_message(
         yesterday,
         today,
@@ -403,4 +407,5 @@ async def generate_daily_update(
         standings_comment,
         scenario=scenario,
         next_date_str=next_date_str,
+        participant_names=participant_names,
     )

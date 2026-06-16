@@ -724,7 +724,7 @@ class TestSendRankingWithTop3Photos:
             await _send_ranking_with_top3_photos(update, context, "fallback text", _TOP5_ROWS, fake_settings)
 
         context.bot.send_media_group.assert_not_called()
-        update.message.reply_text.assert_called_once_with("fallback text")
+        update.message.reply_text.assert_called_once_with("fallback text", parse_mode="HTML")
 
     async def test_fallback_when_requests_raises(self, fake_settings):
         """Network error during URL validation → skip that URL gracefully."""
@@ -735,7 +735,7 @@ class TestSendRankingWithTop3Photos:
             await _send_ranking_with_top3_photos(update, context, "fallback text", _TOP5_ROWS, fake_settings)
 
         context.bot.send_media_group.assert_not_called()
-        update.message.reply_text.assert_called_once_with("fallback text")
+        update.message.reply_text.assert_called_once_with("fallback text", parse_mode="HTML")
 
     async def test_fallback_when_send_media_group_raises(self, fake_settings):
         """If send_media_group itself raises, reply_text is used instead."""
@@ -746,7 +746,7 @@ class TestSendRankingWithTop3Photos:
         with patch("worldcup_bot.bot.handlers._requests.get", return_value=_mock_requests_all_valid()):
             await _send_ranking_with_top3_photos(update, context, "fallback text", _TOP5_ROWS, fake_settings)
 
-        update.message.reply_text.assert_called_once_with("fallback text")
+        update.message.reply_text.assert_called_once_with("fallback text", parse_mode="HTML")
 
     async def test_empty_rows_sends_text_only(self, fake_settings):
         """Empty rows → reply_text called immediately, no URL checks."""
@@ -758,7 +758,7 @@ class TestSendRankingWithTop3Photos:
 
         mock_get.assert_not_called()
         context.bot.send_media_group.assert_not_called()
-        update.message.reply_text.assert_called_once_with("no data")
+        update.message.reply_text.assert_called_once_with("no data", parse_mode="HTML")
 
     async def test_fewer_than_3_rows_sends_what_exists(self, fake_settings):
         """With only 2 rows, album has 2 items (not 3)."""
@@ -793,8 +793,8 @@ class TestSendRankingWithTop3Photos:
 
         _, kwargs = context.bot.send_media_group.call_args
         assert len(kwargs["media"][0].caption) == 1024
-        # Full text sent as follow-up
-        update.message.reply_text.assert_called_once_with(long_text)
+        # Full text sent as follow-up with HTML parse_mode
+        update.message.reply_text.assert_called_once_with(long_text, parse_mode="HTML")
 
     async def test_uses_custom_photo_base_url(self, fake_settings):
         """photo_base_url from settings is used to build URLs."""
