@@ -5,17 +5,19 @@
 - **Stack:** Python (python-telegram-bot), football-data.org API, Docker + compose, GitHub Actions → Docker Hub.
 - **Created:** 2026-06-15
 
-## Recent Accomplishments (Phases 1–21)
+## Recent Accomplishments (Phases 1–23)
 
-**2026-06-16:** OpenAI daily update feature verified live (real LiteLLM instance). All 10 inbox decisions merged. 538 tests green.
+**2026-06-16:** Match-finish stats + porra commentary feature (ESPN API client, Reddit gameId extraction, commentators pool, live ranking tracker, poll_finished_matches_job with dedup) — 702 tests green. Refinement: combined message (stats + "----" + commentary), persona hidden (style-only via system prompt), bold_person_names helper applied to all participant displays — 733 tests green. Verified live in container with combined message to test group.
 
-**Core features:** YAML-driven predictions (hot-reload), official/provisional rankings, football-day rolling window (/hoy/ayer, 09:00→09:00 local), Reddit live goal notifier with "Ver gol" button (multi-host downloader + ffmpeg compression + ffprobe dimension fix), gender-aware /tongo phrases (gender-guesser), /tongo GIF pool (hot-reload), /simulagol random goals (E2E testing), OpenAI-compatible daily 9 AM Spanish recap (self-disables gracefully when vars unset).
+**2026-06-16 (earlier):** OpenAI daily update feature verified live (real LiteLLM instance). All 10 inbox decisions merged. 538 tests green.
 
-**Architecture:** Shared process-wide TTLCache (fixes HTTP 429), goal tokens (SHA1[:12]), non-blocking inflight set, two-level file_id cache, SSL remediation for corporate networks, photo album rankings (top-3 URLs).
+**Core features:** YAML-driven predictions (hot-reload), official/provisional rankings, football-day rolling window (/hoy/ayer, 09:00→09:00 local), Reddit live goal notifier with "Ver gol" button (multi-host downloader + ffmpeg compression + ffprobe dimension fix), gender-aware /tongo phrases (gender-guesser), /tongo GIF pool (hot-reload), /simulagol random goals (E2E testing), OpenAI-compatible daily 9 AM Spanish recap (self-disables gracefully when vars unset), match-finish ESPN stats card + porra commentary with combined messaging and bold names.
 
-**Test status:** 594 passing (538 original + 56 new). Docker container running, State=healthy, RestartCount=0.
+**Architecture:** Shared process-wide TTLCache (fixes HTTP 429), goal tokens (SHA1[:12]), non-blocking inflight set, two-level file_id cache, SSL remediation for corporate networks, photo album rankings (top-3 URLs), ESPN integration (thin client + formatter), live porra state tracking (separate from daily snapshot).
 
-## Learnings
+**Test status:** 733 passing (702 match-finish round A + 31 bold-names round B). Docker container running, State=healthy, RestartCount=0.
+
+## Summary of Recent Work (Condensed)
 
 ### Daily Update: 4 Scenarios + None=skip contract (2026-06-16)
 
@@ -48,6 +50,24 @@ With 12 porra participants + match notes + standings narrative, the AI JSON resp
 - `⚽ <b>Partidos de hoy</b>` — both team names in `<b></b>`, flag placement same.  Optional `   <i>{note}</i>` indented line ONLY when AI note is non-empty.
 - `📊 <b>La porra</b>` — AI standings comment (HTML-escaped).
 Always escape user/AI-provided strings with `html.escape(s, quote=False)` before inserting into the template.
+
+### Combined match-finish message, persona hidden, bold_person_names (2026-06-16)
+
+**Combined match-finish message** — `poll_finished_matches_job` now sends **one** `parse_mode="HTML"` message per finished match, combining ESPN stats card (Part A) and porra commentary (Part B) with a `\n\n----\n\n` separator.  Logic:
+- Both available → `stats_text + "\n\n----\n\n" + commentary_text`
+- Only stats → `stats_text` (no separator)
+- Only commentary → `commentary_text` (no separator)
+- Neither → no `send_message` call at all
+
+**Persona style-only, name hidden** — `pick_commentator()` still selects a random persona to drive the generation style, but its name is never shown in the sent message.  The `🎙️ {persona}:` prefix is gone.  Added to `build_commentary_messages` system prompt: *"No firmes ni menciones tu propio nombre."* so the model also suppresses self-identification.
+
+**`bold_person_names(text, names)` helper** — added to `bot/formatters.py`.  HTML-escapes `text` then wraps each known participant display_name in `<b>…</b>`.  Matching rules: longest-name-first alternation (prevents partial overlap), Unicode word boundaries `(?<!\w)…(?!\w)`, single regex pass (no double-wrap).  Applied in:
+- `poll_finished_matches_job`: `bold_person_names(raw_commentary, participant_names)` before combining.
+- `render_message` (daily update): `bold_person_names(standings_comment, participant_names)` — `render_message` receives an optional `participant_names` list from `generate_daily_update`.
+
+**Ranking/detail formatters now return HTML** — `format_general_ranking` and `format_user_detail` in `bot/formatters.py` use `<b>…</b>` for display_names and section headers (replaces `*bold*` Markdown).  All `reply_text` / `InputMediaPhoto` calls in handlers that use these formatters now pass `parse_mode="HTML"`.  `cmd_participantes` also sends with `parse_mode="HTML"` and wraps display_names in `<b>`.
+
+**Final test count: 733 passing.**
 
 **JSON AI contract** — `ai.complete()` now returns STRICT JSON (no markdown):
 ```json
@@ -139,3 +159,31 @@ Added `TestSystemPromptContract` (5 tests). **Final test count: 619 passing.**
 
 **Files:** `src/worldcup_bot/ai/daily_update.py`, `__main__.py`, `bot/handlers.py` + tests.
 
+### Condensed: Match-Finish Rounds A & B (2026-06-16)
+
+**Scope:** When a WC match finishes, automatically post (A) an ESPN stats card and (B) an AI-generated porra-commentary in the voice of a random Spanish football commentator.
+
+**ESPN Summary API** — reachable from the container. Endpoint:
+`GET https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/summary?event={gameId}`
+Send `User-Agent: Mozilla/5.0` header. Response: `boxscore.teams[].{homeAway, team.displayName, statistics[{name, displayValue}]}`. Key stat names: `possessionPct` (already a %), `totalShots`, `shotsOnTarget`, `wonCorners`, `foulsCommitted`, `yellowCards`, `redCards`, `offsides`, `saves`, `passPct` (fraction 0-1 → ×100), `accuratePasses/totalPasses` (fallback for pass %).
+
+**gameId from Reddit match thread** — `find_match_thread(home, away)` returns a permalink; fetch full thread HTML from `old.reddit.com{permalink}`; regex `gameId=(\d+)` extracts the ESPN game ID.
+
+**poll_finished_matches_job** — repeating job (default 120s interval). Dedup: on first run, seed `finished_seen` = current finished IDs and return (no sends). On each subsequent run, newly-finished IDs (set diff) trigger Part A (ESPN stats) and Part B (porra diff + AI commentary). Each match wrapped in try/except — one failure never breaks others. Always `save_live` after Part B regardless of whether AI ran.
+
+**porra/live.py** — separate from daily `porra_snapshot.json`. State file: `{state_dir}/porra_live.json`. Schema: `{username: {pos, pts, name}}`. Functions: `load_live`, `save_live`, `build_state(ranking)`, `diff_live(old, new) → LiveDiff`, `render_changes_text(diff) → str`. `LiveDiff.changed=False` when nothing meaningful changed (pts delta < 0.001 and no pos change and no new users).
+
+**Commentators pool** (`ai/commentators.py`) — `COMMENTATORS = ["Manolo Lama", "Julio Maldini", "Andrés Montes"]`. Per-persona style hints. `pick_commentator(rng=None)`, `build_commentary_messages(persona, changes_text) → (system, user)`, `async generate_porra_commentary(ai, persona, changes_text) → str`. Uses `max_completion_tokens=400`.
+
+**Config additions** — `espn_league_slug` (env `ESPN_LEAGUE_SLUG`, default `"fifa.world"`), `finished_poll_interval_seconds` (env `FINISHED_POLL_INTERVAL_SECONDS`, default `120`). Both have safe defaults — no compose changes needed.
+
+**Key file paths:**
+- `src/worldcup_bot/espn/__init__.py`, `espn/client.py`, `espn/formatter.py` — new ESPN package
+- `src/worldcup_bot/ai/commentators.py` — new commentators module
+- `src/worldcup_bot/porra/live.py` — new live tracker
+- `src/worldcup_bot/reddit/scanner.py` — added `get_espn_game_id()`
+- `src/worldcup_bot/__main__.py` — added `poll_finished_matches_job` + scheduling
+- `src/worldcup_bot/config.py` — added `espn_league_slug`, `finished_poll_interval_seconds`
+- `tests/test_espn_client.py`, `test_espn_formatter.py`, `test_espn_scanner.py`, `test_commentators.py`, `test_porra_live.py`, `test_poll_finished_job.py` — 83 new tests
+
+**Final test count: 702 passing (619 + 83 new).**

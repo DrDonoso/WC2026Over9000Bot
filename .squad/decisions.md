@@ -2077,3 +2077,147 @@ Added `TestSystemPromptContract` (5 tests) asserting:
 **Final test count: 619 passing** (614 existing + 5 new).
 
 
+
+
+## Decision: Match-Finish Stats Card + Porra Commentary
+
+**Author:** Kanté (Backend)
+**Date:** 2026-06-16
+**Status:** COMPLETE — 702 tests green.
+
+### Context
+
+When a WC match finishes, the Telegram group should automatically receive:
+- **Part A** — A rich match-stats card sourced from ESPN's public summary API, translated to Spanish.
+- **Part B** — A short AI commentary (≤4 lines) about porra ranking changes, delivered in the voice of a randomly chosen Spanish football commentator.
+
+### Decisions
+
+#### 1. ESPN Stats API
+
+- Endpoint: `GET https://site.api.espn.com/apis/site/v2/sports/soccer/{league}/summary?event={gameId}`
+- League slug `fifa.world` works for WC2026 events; configurable via `ESPN_LEAGUE_SLUG`.
+- `ESPNClient` is a thin sync `requests` wrapper; callers use `asyncio.to_thread` in the async job.
+- `get_match_stats()` returns `None` on any error (log warning); callers degrade gracefully.
+- Stat units: `possessionPct` already a %; `passPct` is a fraction 0-1 (×100 for display).
+- Formatter omits rows whose stat is absent in both sides; omits red-cards row if both are 0.
+
+#### 2. ESPN game ID via Reddit thread
+
+- `RedditMatchScanner.get_espn_game_id(home, away)` reuses the existing `find_match_thread()` search, fetches the full thread HTML, and regexes `gameId=(\d+)` from the ESPN link embedded in the thread body.
+- Returns `None` on any failure; job continues with Part B even if Part A has no game ID.
+
+#### 3. Commentators pool
+
+- `COMMENTATORS = ["Manolo Lama", "Julio Maldini", "Andrés Montes"]` — easily extensible list.
+- Per-persona style hints embedded in the system prompt so the model mimics the persona's recognisable voice.
+- `max_completion_tokens=400` (follows codebase rule: never `max_tokens`).
+
+#### 4. Live ranking tracker (`porra/live.py`)
+
+- State file: `{state_dir}/porra_live.json` — **different from** `porra_snapshot.json` (daily).
+- Schema: `{username: {"pos": int, "pts": float, "name": str}}`.
+- `diff_live(old, new)` returns a `LiveDiff` dataclass with `changed` bool, `movements` list, and `new_entries` list.
+- Pts delta threshold for change detection: `> 0.001` (avoids float noise).
+- Always `save_live()` after processing a finished match, even when AI is disabled, so the next match diffs against the latest state.
+
+#### 5. `poll_finished_matches_job` dedup pattern
+
+- On **first run**: seed `finished_seen` = all currently-finished IDs → return without sending. Mirrors goal-notifier seeding pattern.
+- On **subsequent runs**: set diff (`current_finished - finished_seen`) yields newly-finished IDs.
+- Each match is try/except isolated — one failure never breaks others.
+- `espn_client` and `reddit_scanner` lazily initialised in `bot_data` (same pattern as goal notifier scanner).
+
+#### 6. Config changes
+
+Both new env vars have safe defaults so prod works without `docker-compose` changes (Maldini's domain):
+- `ESPN_LEAGUE_SLUG` → default `"fifa.world"`
+- `FINISHED_POLL_INTERVAL_SECONDS` → default `120`
+
+### Files Changed / Created
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/espn/__init__.py` | New package |
+| `src/worldcup_bot/espn/client.py` | New — ESPN HTTP client |
+| `src/worldcup_bot/espn/formatter.py` | New — HTML stats card builder |
+| `src/worldcup_bot/ai/commentators.py` | New — commentators pool + prompt builder |
+| `src/worldcup_bot/porra/live.py` | New — live ranking tracker |
+| `src/worldcup_bot/reddit/scanner.py` | Added `get_espn_game_id()` |
+| `src/worldcup_bot/__main__.py` | Added `poll_finished_matches_job` + scheduling |
+| `src/worldcup_bot/config.py` | Added `espn_league_slug`, `finished_poll_interval_seconds` |
+| `tests/test_espn_client.py` | New — 11 tests |
+| `tests/test_espn_formatter.py` | New — 18 tests |
+| `tests/test_espn_scanner.py` | New — 6 tests |
+| `tests/test_commentators.py` | New — 13 tests |
+| `tests/test_porra_live.py` | New — 20 tests |
+| `tests/test_poll_finished_job.py` | New — 15 tests |
+
+**Final test count: 702 passing (619 baseline + 83 new).**
+
+---
+
+## Decision: Combined match-finish message, persona hidden, bold_person_names
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-16  
+**Status:** IMPLEMENTED  
+
+### Context
+
+Three UX improvements requested for the porra bot's match-finish notification and participant-name display:
+
+1. ESPN stats card and porra commentary were sent as two separate Telegram messages; user wants one combined message.
+2. The `🎙️ Manolo Lama:` prefix was exposing which AI persona narrated the commentary; user wants the style to be hidden.
+3. Participant display_names appear in multiple views (commentary, daily standings, ranking/detail commands) without visual emphasis; user wants them in bold across all outputs.
+
+### Decisions
+
+#### 1. Combined match-finish message
+
+`poll_finished_matches_job` collects `stats_text` (Part A, from ESPN) and `commentary_text` (Part B, from AI) separately, then sends **one** `send_message(parse_mode="HTML")` call with:
+
+```
+{stats_text}
+
+----
+
+{commentary_text}
+```
+
+If only one part is available, send it alone (no separator). If neither is available, send nothing.
+
+**Rationale:** Keeps the chat cleaner (one notification per match instead of two) and makes the `----` separator visually group the two sections as a single atomic post.
+
+#### 2. Persona hidden — style-only
+
+- Removed the `🎙️ {persona}:` prefix from the sent message.
+- Added `"No firmes ni menciones tu propio nombre."` to `build_commentary_messages` system prompt so the model doesn't self-identify either.
+- `pick_commentator()` is still called: the selected persona drives the **style** of generation but its name is never surfaced.
+
+**Rationale:** The persona is an internal style directive, not content the user needs to see; hiding it removes clutter and avoids confusion about imaginary commentators.
+
+#### 3. `bold_person_names` helper + HTML everywhere
+
+Added `bold_person_names(text: str, names: Iterable[str]) -> str` to `bot/formatters.py`:
+- HTML-escapes the input text.
+- Sorts names by length descending (longest-first, prevents partial overlaps).
+- Matches with `(?<!\w)…(?!\w)` Unicode word boundaries to handle accented names (Peñalver, Tarragó) and multi-word names ("Maria Tarrago") correctly.
+- Single regex pass → no double-wrapping.
+
+Applied to:
+- `poll_finished_matches_job`: commentary bolded before combining.
+- `render_message` (daily update): `standings_comment` bolded; `participant_names` passed in from `generate_daily_update`.
+- `format_general_ranking`: display_names in `<b>…</b>` directly in the formatter.
+- `format_user_detail`: display_name header in `<b>…</b>`; Markdown `*…*` replaced with HTML `<b>…</b>`.
+- `cmd_participantes`: display_names wrapped in `<b>…</b>`, `parse_mode="HTML"`.
+- `_send_ranking_with_top3_photos`: all `reply_text` calls and `InputMediaPhoto` captions use `parse_mode="HTML"`.
+- `_send_user_detail`: changed `parse_mode="Markdown"` → `parse_mode="HTML"`.
+
+**Rationale:** HTML is already used by the daily update; unifying all user-facing messages to HTML simplifies the mental model and enables safe name bolding without the ambiguity of Telegram's Markdown V1 escaping rules.
+
+### Test impact
+
+- 702 baseline → **733 passing** after adding 31 new tests.
+- New file: `tests/test_formatters.py` (25 `bold_person_names` tests).
+- Updated: `test_poll_finished_job.py`, `test_handlers.py`, `test_ai.py`, `test_commentators.py`.
