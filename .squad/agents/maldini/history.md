@@ -96,3 +96,14 @@ Note: `truststore.inject_into_ssl()` does NOT help inside the container — it r
 
 **On a non-inspected network (CI, production server):** no cert remediation needed; `docker-compose.yml` (prod) has no `certs/` mount and no `SSL_CERT_FILE` override — it works as-is.
 
+### 2026-06-16 — ffmpeg added to image for goal-clip ("Ver gol") feature
+
+## Learnings
+
+- `apt-get install -y --no-install-recommends ffmpeg` added as first `RUN` layer in Dockerfile (right after `FROM python:3.12-slim AS base`, before user creation). This gives both `ffmpeg` and `ffprobe` binaries to the `app` non-root user.
+- Layer is placed early (before any `COPY`/pip steps) so it's cached independently — system deps rarely change, Python deps change often.
+- yt-dlp comes via `pyproject.toml` (Kanté's responsibility); it is NOT installed via apt or a separate pip call in the Dockerfile.
+- Temporary video downloads use Python's `tempfile` (default `/tmp`). `/tmp` is world-writable in debian-slim by default — no extra `chmod` or dedicated mount needed for the non-root `app` user.
+- docker-compose files unchanged; no new mounts or env vars required for this feature.
+- Verified build (`docker compose -f docker-compose.local.yml build`) and binary presence: `ffmpeg version 7.1.4-0+deb13u1`, `ffprobe version 7.1.4-0+deb13u1`. yt-dlp not yet present (Kanté's pyproject change pending).
+

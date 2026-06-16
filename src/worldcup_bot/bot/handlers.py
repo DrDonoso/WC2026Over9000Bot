@@ -7,6 +7,8 @@ Spanish user-facing strings throughout.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import random
 
@@ -27,8 +29,15 @@ from worldcup_bot.bot.formatters import (
 )
 from worldcup_bot.config import Settings
 from worldcup_bot.data.stages import GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
-from worldcup_bot.data.tongo import FRASES
+from worldcup_bot.data.tongo import FRASES, SANCHEZ_ENS_ROBA
 from worldcup_bot.porra import engine, predictions as pred_loader
+from worldcup_bot.reddit.clip_finder import find_goal_clip
+from worldcup_bot.reddit.downloader import MediaDownloader
+from worldcup_bot.reddit.models import GoalEvent
+from worldcup_bot.reddit.notifier import build_goal_keyboard, format_goal_notification
+from worldcup_bot.reddit.parser import parse_goal_events
+from worldcup_bot.reddit.scanner import RedditMatchScanner, _teams_match
+from worldcup_bot.reddit.video import VideoTooLargeError, compress_if_needed, probe_video
 
 log = logging.getLogger(__name__)
 
@@ -414,7 +423,11 @@ async def cmd_siguiente(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(random.choice(FRASES))
+    if random.random() < 1 / 3:
+        frase = SANCHEZ_ENS_ROBA
+    else:
+        frase = random.choice(FRASES)
+    await update.message.reply_text(frase)
 
 
 async def cmd_mis_predicciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -480,3 +493,372 @@ async def cmd_participantes(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         lines.append(f"• {display}")
 
     await update.message.reply_text("\n".join(lines))
+
+
+# ── "Ver gol" callback handler ────────────────────────────────────────────────
+
+
+def _goal_token(key: str) -> str:
+    """Derive a short stable token from a goal event key (sha1[:12])."""
+    return hashlib.sha1(key.encode()).hexdigest()[:12]
+
+
+async def cmd_ver_gol_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle 'Ver gol' inline button — find, download and send the goal clip."""
+    query = update.callback_query
+    token = query.data.split(":", 1)[1] if ":" in query.data else ""
+
+    goal_clips: dict = context.bot_data.get("goal_clips", {})
+    info: dict | None = goal_clips.get(token)
+
+    if info is None:
+        await query.answer("No tengo los datos de ese gol.", show_alert=True)
+        return
+
+    # Status guards (belt)
+    if info["status"] == "sending":
+        await query.answer("Ya estoy enviando el vídeo…")
+        return
+    if info["status"] == "sent":
+        await query.answer("El vídeo ya se envió.")
+        return
+
+    # Explicit non-blocking in-flight lock (suspenders) — atomic check-and-add
+    # (no await between check and add, so safe on the single-threaded event loop)
+    inflight: set = context.bot_data.setdefault("vergol_inflight", set())
+    if token in inflight:
+        await query.answer("Ya estoy enviando el vídeo…")
+        return
+    inflight.add(token)
+    info["status"] = "sending"
+
+    await query.answer("⏳ Buscando el vídeo del gol…")
+
+    chat_id = query.message.chat_id
+    msg_id = query.message.message_id
+
+    clip_file_ids: dict = context.bot_data.setdefault("clip_file_ids", {})
+
+    downloaded_path = None
+    compressed_path = None
+    media_url: str | None = None
+
+    try:
+        # ── Fast path A: cached file_id on this specific goal ──────────────────
+        cached_fid = info.get("file_id")
+        if cached_fid:
+            try:
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=cached_fid,
+                    reply_to_message_id=msg_id,
+                    supports_streaming=True,
+                )
+                info["status"] = "sent"
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception as exc:
+                    log.debug("Could not remove keyboard from goal message: %s", exc)
+                return
+            except Exception as exc:
+                log.warning(
+                    "cmd_ver_gol_callback: cached file_id %s is stale, evicting: %s",
+                    cached_fid,
+                    exc,
+                )
+                info.pop("file_id", None)
+                # Also evict from global map if present
+                for url, fid in list(clip_file_ids.items()):
+                    if fid == cached_fid:
+                        clip_file_ids.pop(url, None)
+                        break
+                info["status"] = "pending"
+                raise
+
+        # Reuse shared scanner instance if available
+        scanner: RedditMatchScanner | None = context.bot_data.get("reddit_scanner")
+        if scanner is None:
+            settings: Settings = context.bot_data["settings"]
+            scanner = RedditMatchScanner(user_agent=settings.reddit_user_agent)
+            context.bot_data["reddit_scanner"] = scanner
+
+        # Parse minute (strip stoppage-time suffix, e.g. "45+2" → 45)
+        minute_raw = info.get("minute_text", "0")
+        try:
+            minute = int(minute_raw.split("+")[0].rstrip("'"))
+        except (ValueError, IndexError):
+            minute = 0
+
+        media_url = await asyncio.to_thread(
+            find_goal_clip,
+            scanner,
+            info["home_team"],
+            info["away_team"],
+            info["home_score"],
+            info["away_score"],
+            info["scorer"],
+            minute,
+        )
+
+        if media_url is None:
+            info["status"] = "pending"  # allow retry
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⏳ El clip aún no está disponible en r/soccer, inténtalo en un minuto.",
+                reply_to_message_id=msg_id,
+            )
+            return
+
+        # ── Fast path B: cached file_id for this media URL ────────────────────
+        if media_url in clip_file_ids:
+            cached_url_fid = clip_file_ids[media_url]
+            try:
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=cached_url_fid,
+                    reply_to_message_id=msg_id,
+                    supports_streaming=True,
+                )
+                info["file_id"] = cached_url_fid
+                info["status"] = "sent"
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception as exc:
+                    log.debug("Could not remove keyboard from goal message: %s", exc)
+                return
+            except Exception as exc:
+                log.warning(
+                    "cmd_ver_gol_callback: cached url file_id %s is stale, evicting: %s",
+                    cached_url_fid,
+                    exc,
+                )
+                clip_file_ids.pop(media_url, None)
+                info.pop("file_id", None)
+                info["status"] = "pending"
+                raise
+
+        # Download
+        downloader = MediaDownloader()
+        downloaded_path = await downloader.download(media_url)
+        if downloaded_path is None:
+            info["status"] = "pending"
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ No pude descargar el vídeo del gol.",
+                reply_to_message_id=msg_id,
+            )
+            return
+
+        # Compress if needed
+        try:
+            send_path = await compress_if_needed(downloaded_path)
+            if send_path != downloaded_path:
+                compressed_path = send_path
+        except VideoTooLargeError as exc:
+            log.warning("Video too large / uncompressible: %s", exc)
+            info["status"] = "pending"
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ El vídeo es demasiado grande para Telegram.",
+                reply_to_message_id=msg_id,
+            )
+            return
+
+        # Probe dimensions and send; capture returned message to store file_id
+        meta = await probe_video(send_path)
+        with open(send_path, "rb") as f:
+            sent_msg = await context.bot.send_video(
+                chat_id=chat_id,
+                video=f,
+                reply_to_message_id=msg_id,
+                supports_streaming=True,
+                read_timeout=120,
+                write_timeout=120,
+                connect_timeout=30,
+                **meta,
+            )
+
+        # Cache the Telegram file_id for future instant re-sends
+        if sent_msg and sent_msg.video:
+            fid = sent_msg.video.file_id
+            info["file_id"] = fid
+            if media_url:
+                clip_file_ids[media_url] = fid
+
+        info["status"] = "sent"
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as exc:
+            log.debug("Could not remove keyboard from goal message: %s", exc)
+
+    except Exception as exc:
+        log.exception("cmd_ver_gol_callback: unexpected error: %s", exc)
+        info["status"] = "pending"
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Error inesperado al obtener el vídeo. Inténtalo de nuevo.",
+                reply_to_message_id=msg_id,
+            )
+        except Exception:
+            pass
+
+    finally:
+        inflight.discard(token)
+        if downloaded_path is not None:
+            try:
+                downloaded_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        if compressed_path is not None:
+            try:
+                compressed_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+# ── /simulagol — test command ─────────────────────────────────────────────────
+
+_FALLBACK_GOAL = GoalEvent(
+    minute_text="60",
+    minute_sort=60.0,
+    scorer="Viktor Gyökeres",
+    scoring_team="Sweden",
+    home_team="Sweden",
+    away_team="Tunisia",
+    home_score=3,
+    away_score=1,
+    raw="(simulado)",
+    key="SIM:sweden-tunisia-3-1-60-gyokeres",
+)
+_FALLBACK_HOME_TLA = "SWE"
+_FALLBACK_AWAY_TLA = "TUN"
+
+
+def _pick_random_goal(
+    client: FootballDataClient,
+    scanner: RedditMatchScanner,
+    max_candidates: int = 6,
+) -> tuple[GoalEvent, str, str] | None:
+    """Sync helper: pick a random goal from a finished WC fixture via Reddit.
+
+    Tries up to *max_candidates* shuffled finished matches.  Returns
+    ``(goal, home_tla, away_tla)`` on success or ``None`` if no goal found.
+    """
+    try:
+        matches = client.get_all_matches()
+    except Exception as exc:
+        log.warning("_pick_random_goal: get_all_matches failed: %s", exc)
+        return None
+
+    finished = [m for m in matches if m.status == "FINISHED"]
+    if not finished:
+        log.info("_pick_random_goal: no finished matches available")
+        return None
+
+    random.shuffle(finished)
+
+    for m in finished[:max_candidates]:
+        try:
+            permalink = scanner.find_match_thread(m.home_name, m.away_name)
+            if permalink is None:
+                log.debug(
+                    "_pick_random_goal: no thread for %s vs %s", m.home_name, m.away_name
+                )
+                continue
+
+            parts = permalink.strip("/").split("/")
+            post_id = parts[3] if len(parts) > 3 else ""
+
+            body = scanner.get_thread_body(permalink)
+            goals = parse_goal_events(body, post_id=post_id)
+            if not goals:
+                log.debug(
+                    "_pick_random_goal: no goals in thread for %s vs %s",
+                    m.home_name,
+                    m.away_name,
+                )
+                continue
+
+            goal = random.choice(goals)
+
+            # Align TLAs to the fixture (Reddit title home/away may differ from API)
+            if _teams_match(goal.home_team, m.home_name):
+                home_tla, away_tla = m.home_tla, m.away_tla
+            elif _teams_match(goal.home_team, m.away_name):
+                home_tla, away_tla = m.away_tla, m.home_tla
+            else:
+                home_tla, away_tla = m.home_tla, m.away_tla
+
+            return goal, home_tla, away_tla
+
+        except Exception as exc:
+            log.warning(
+                "_pick_random_goal: error processing %s vs %s: %s",
+                m.home_name,
+                m.away_name,
+                exc,
+            )
+            continue
+
+    return None
+
+
+async def cmd_simula_gol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fire a simulated goal notification with a random WC goal.
+
+    Picks a random goal from any finished WC fixture (via Reddit match thread).
+    Falls back to the fixed Sweden 3-1 Tunisia, Gyökeres 60' goal if no random
+    goal can be found, so the command never fully fails.
+
+    Stores goal context in bot_data["goal_clips"] so the 'Ver gol' inline button
+    works exactly as it does for real goals from poll_goals_job.
+    """
+    settings: Settings = context.bot_data["settings"]
+    client = make_client(settings)
+
+    scanner: RedditMatchScanner | None = context.bot_data.get("reddit_scanner")
+    if scanner is None:
+        scanner = RedditMatchScanner(user_agent=settings.reddit_user_agent)
+        context.bot_data["reddit_scanner"] = scanner
+
+    await update.message.reply_text("⏳ Eligiendo un gol al azar del Mundial…")
+
+    picked = await asyncio.to_thread(_pick_random_goal, client, scanner)
+
+    if picked is not None:
+        goal, home_tla, away_tla = picked
+    else:
+        log.warning(
+            "cmd_simula_gol: dynamic pick failed, falling back to fixed Sweden-Tunisia goal"
+        )
+        goal = _FALLBACK_GOAL
+        home_tla = _FALLBACK_HOME_TLA
+        away_tla = _FALLBACK_AWAY_TLA
+
+    token = _goal_token(goal.key)
+
+    context.bot_data.setdefault("goal_clips", {})[token] = {
+        "home_team": goal.home_team,
+        "away_team": goal.away_team,
+        "home_score": goal.home_score,
+        "away_score": goal.away_score,
+        "scorer": goal.scorer,
+        "minute_text": goal.minute_text,
+        "scoring_team": goal.scoring_team,
+        "home_tla": home_tla,
+        "away_tla": away_tla,
+        "status": "pending",
+    }
+
+    text = format_goal_notification(goal, home_tla, away_tla)
+    keyboard = build_goal_keyboard(token)
+
+    log.info("Simulated goal fired (token=%s): %s", token, goal.key)
+
+    await update.message.reply_text(
+        f"🧪 [SIMULACIÓN]\n{text}",
+        reply_markup=keyboard,
+    )

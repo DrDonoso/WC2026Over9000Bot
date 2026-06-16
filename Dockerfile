@@ -1,5 +1,11 @@
 FROM python:3.12-slim AS base
 
+# Install system dependencies (ffmpeg provides ffmpeg + ffprobe for goal-clip feature)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 # Create non-root user
 RUN groupadd --gid 1000 app && \
     useradd --uid 1000 --gid app --create-home app

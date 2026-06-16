@@ -9,7 +9,76 @@
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 
-### 2026-06-15 — /actual (provisional) vs /general (official) split + /porra alias
+### 2026-06-16 (Phase 17) — /simulagol hidden from /start + /tongo probability rework
+
+**Summary:** `/simulagol` removed from the `/start` visible help (command still registered and functional in `__main__.py`). `/tongo` reworked to use explicit 1/3 probability for `SANCHEZ_ENS_ROBA` instead of 25 duplicate list entries; 13 new phrases added to `FRASES`.
+
+**Key implementations:**
+- `cmd_start` in `handlers.py`: removed the `/simulagol — (test) …` line from the help string. The command remains registered via `build_app`.
+- `tongo.py`: introduced `SANCHEZ_ENS_ROBA = "Sanchez ens roba"` constant; `FRASES` now holds only the 15 original non-Sanchez sarcasm phrases plus 13 new phrases (mix of Spanish/Catalan) = 28 total. No duplicates.
+- `cmd_tongo` in `handlers.py`: `if random.random() < 1/3: frase = SANCHEZ_ENS_ROBA else: frase = random.choice(FRASES)`. Exact 1/3 probability, no double-counting.
+- New test file `tests/test_tongo.py` (data integrity: Sanchez not in FRASES, all 13 new phrases present, constant value).
+- New `TestCmdTongo` class in `test_handlers.py` (Sanchez path at 0.1, FRASES path at 0.9 with mock).
+- `TestCmdStart` extended: asserts "simulagol" NOT in help text; asserts "/tongo" and "/hoy" still present.
+- **471 tests passing. Smoke: sanchez not in FRASES=True, frases count=28, new phrase present=True. Container rebuilt, State=running, RestartCount=0.**
+
+### 2026-06-16 (Phase 16) — Ver-gol concurrency hardened + file_id cache
+
+**Summary:** `cmd_ver_gol_callback` hardened with a non-blocking in-flight token set (2nd concurrent click answers immediately with a toast — no double download, no 15s Telegram spinner) and a two-level file_id cache so repeat sends skip download/upload entirely.
+
+**Key implementations:**
+- `vergol_inflight: set` in `bot_data` (initialised in `build_app`): atomic check-and-add (no await between check and add) prevents concurrent overlap even if future edits introduce awaits between the status check and set. Belt-and-suspenders with the existing `status` field.
+- `clip_file_ids: dict[str,str]` in `bot_data` (initialised in `build_app`): maps `media_url → file_id`. Per-goal `info["file_id"]` shortcut for instant re-send of the same goal without even calling `find_goal_clip`.
+- Fast path A: if `info["file_id"]` is set, resend via `send_video(video=file_id)` immediately — no Reddit search, no download.
+- Fast path B: if `clip_file_ids[media_url]` is set after `find_goal_clip`, resend via cached id — no download.
+- Fresh send path: captures `sent_msg.video.file_id` after a real upload and stores in both caches.
+- Bad file_id fallback: if a fast-path `send_video` raises, the stale file_id is evicted from both `info` and `clip_file_ids`, `status` reset to `"pending"`, and the exception propagates through the outer handler (user sees the generic error toast and can retry).
+- `inflight.discard(token)` always runs in `finally` so the guard is never stuck.
+- `build_app` now eagerly initialises `vergol_inflight = set()` and `clip_file_ids = {}`.
+- **449 tests passing (6 new). Smoke ok. Container rebuilt, State=running, RestartCount=0.**
+
+### 2026-06-16 (Phase 15) — /simulagol random goal from finished WC fixtures
+
+**Summary:** `/simulagol` now picks a random goal from any FINISHED WC fixture instead of always firing the fixed Sweden-Tunisia Gyökeres 60' goal. Falls back to the fixed goal if no dynamic goal can be found, so the command never fails completely.
+
+**Key implementations:**
+- `RedditMatchScanner.find_match_thread(home_name, away_name) -> str | None`: New method that queries Reddit HTML search (`/r/soccer/search?q=...&t=week`) and matches results using the `class="search-title"` link format (NOT the `/new/` listing `data-fullname`/`data-permalink` format which is absent on search pages). Uses `_SEARCH_RESULT_LINK_RE` regex. Filters by `_is_match_thread` + `_teams_match` (both directions). Returns first matching permalink or None.
+- `_pick_random_goal(client, scanner, max_candidates=6) -> tuple[GoalEvent, str, str] | None`: Sync helper in handlers.py. Gets FINISHED matches from football-data, shuffles them, tries up to 6 candidates calling `find_match_thread` → `get_thread_body` → `parse_goal_events` → `random.choice`. Aligns TLAs to the API fixture (handles Reddit title home/away reversal). Returns None if no goal found.
+- `cmd_simula_gol`: Sends ⏳ message first; runs `_pick_random_goal` via `asyncio.to_thread`; stores result (or fixed fallback) in `bot_data["goal_clips"]` with same shape as `poll_goals_job`. "Ver gol" button flow unchanged.
+- **Critical discovery:** Reddit search results page uses `class="search-title"` links (not `data-fullname`/`data-timestamp`/`data-permalink` attributes used by `/r/soccer/new/`). `_parse_html_posts` does NOT work for search; added `_SEARCH_RESULT_LINK_RE` constant for this purpose.
+- **443 tests passing (17 new). Live E2E: 3 different random goals from real WC threads (Côte d'Ivoire 1-0 Ecuador: Amad Diallo 90', Saudi Arabia 1-1 Uruguay: Araújo 80', Sweden 2-0 Tunisia: Isak 30').**
+
+
+
+### 2026-06-15 (Phase 1–11) — Architecture, Core Porra Features, and Command Surface Refinement (SUMMARIZED)
+
+**Summary:** Complete rewrite from legacy Euro 2024 bot. YAML-driven predictions (hot-reloaded, username-keyed), WC2026 config-driven structure (12 groups A–L, knockout stages). Core commands: `/start`, `/clasificacion`, `/actual`/`/porra` (provisional), `/general` (official, closed-groups-only), `/listaaciertos`/`/listaaciertosactual` (official/provisional detail), `/hoy`/`/ayer` (football-day rolling window 09:00→09:00), `/siguiente`, `/endirecto`, `/participantes`, `/tongo`.
+
+**Key implementations:**
+- Shared process-wide `TTLCache` in `FootballDataClient` (fixed HTTP 429 rate limits).
+- Official vs provisional split: only finished groups/stages count officially; only started groups provisionally (avoids seeded-standings scoring).
+- Football-day rolling window: 24h block anchored at `09:00` local (configurable, DST-safe).
+- Photo album feature: top-3 rankings with `participant_photo_url` helper; `PHOTO_BASE_URL` env var.
+- Removed `/ronda32`–`/final` + `/resultados` (premature for group stage; documented restore procedure).
+- `/clasificacion` accepts optional letter A–L.
+- **243 tests passing; local Docker verified; SSL remediation for corporate network.**
+
+### 2026-06-16 (Phases 12–14) — Reddit Live Goal Notifier + "Ver gol" Clip Download (SUMMARIZED)
+
+**Summary:** Implemented Reddit live goal notifier (polls r/soccer Match Threads for new goals, sends Telegram notifications with "Ver gol" button). "Ver gol" button enables full clip download: multi-host downloader (streamff/streamin/streamain + yt-dlp fallback), ffprobe dimension probe (square-video fix), ffmpeg compression for >50 MB files. HTML fallback hardening for datacenter IP JSON 403 blocks.
+
+**Key implementations:**
+- `src/worldcup_bot/reddit/` package: `models.py`, `parser.py` (goal extraction), `scanner.py` (thread matching + fetching), `notifier.py` (formatting + keyboard).
+- `poll_goals_job` JobQueue task: seeds on first poll to avoid notification spam, silent hours 00:00–08:59 (no waking sleeping users), 60-second polling interval.
+- `clip_finder.py`: r/soccer search by team+scoreline+scorer/minute±2, JSON + HTML search fallback.
+- `downloader.py`: host-specific CDN resolvers (streamff/streamin) + embed scrapers (streamain) + yt-dlp subprocess fallback (v.redd.it/streamable/dubz/unknown). Async-safe via `asyncio.to_thread`.
+- `video.py`: `probe_video` (ffprobe dimensions to fix square-rendering), `compress_if_needed` (two-pass ffmpeg for >50 MB).
+- Handler: token-based context (SHA1[:12]), concurrency guards, keyboard removal on success, error handling + temp cleanup.
+- Dependencies: `yt-dlp>=2024.0` added; ffmpeg/ffprobe in Docker image.
+- **420 tests passing; E2E verified in container: 10/10 clips (Sweden-Tunisia 6, Netherlands-Japan 4, zero failures).**
+- **HTML fallback hardening:** `_html_to_goaltext` for goal extraction from HTML (no `data-selftext`), `_parse_search_results_html` for search result structure (`class="search-link"`).
+
+### 2026-06-15 — /actual (provisional) vs /general (official) split + /porra alias (DETAILED)
 
 **Implemented as user-approved design:**
 
@@ -135,3 +204,100 @@
 - `.env.example` updated with commented `# PHOTO_BASE_URL=http://victorsaez.cat` line.
 - README documents the photo album behavior and the `PHOTO_BASE_URL` env var.
 - **26 new tests** (4 config, 4 url helper, 10 helper, 4 cmd_actual, 4 cmd_general, minus 0 removed). Total: 217 → 243 (all green).
+
+### 2026-06-16T08:45+02:00 — Reddit Live Goal Notifier
+
+**Implemented as user-approved design:**
+
+- **New package `src/worldcup_bot/reddit/`** with four modules:
+  - `models.py`: `GoalEvent`, `ThreadInfo`, `MatchThreadResult` dataclasses.
+  - `parser.py`: `parse_goal_events(selftext, post_id) -> list[GoalEvent]` — regex-based extraction of goal events from r/soccer Match Thread selftexts (MATCH EVENTS | via ESPN section). Handles: goals, own goals (scoring_team inverted), disallowed/VAR/penalty-missed lines (skipped), cards/subs (skipped). `compute_new_goals(thread_id, events, notified_set, seeded_set)` — pure dedup function.
+  - `scanner.py`: `RedditMatchScanner` class — fetches old.reddit.com JSON search (browser UA + `Cookie: over18=1`), falls back to HTML scraping on 403; matches threads to football-data live fixtures via fuzzy team-name matching (accent-insensitive, alias map for WC teams); fetches each thread body (JSON → HTML fallback); parses goals. Accepts injected `requests.Session` for testability.
+  - `notifier.py`: `format_goal_notification(event, home_tla, away_tla)` — r/soccer bracket convention for scoring side; `_is_silent_hour(now_local)` — returns True for hours [00:00, 09:00) local; `build_goal_keyboard()` — "Ver gol" placeholder InlineKeyboardMarkup with `callback_data="vergol:noop"`.
+
+- **`config.py`** gained `goal_poll_interval_seconds: int = 60` (env `GOAL_POLL_INTERVAL_SECONDS`) and `reddit_user_agent: str` (env `REDDIT_USER_AGENT`, default Chrome 131 UA).
+
+- **`pyproject.toml`** changed `python-telegram-bot>=21` → `python-telegram-bot[job-queue]>=21,<22` to enable APScheduler-backed `JobQueue`. **Maldini must rebuild the Docker image** after this change.
+
+- **`__main__.py`** redesigned:
+  - `build_app()` initialises `bot_data["notified_goal_keys"]` (set), `bot_data["seeded_threads"]` (set), `bot_data["reddit_scanner"]` (None, lazily init in job).
+  - `poll_goals_job(context)` — async PTB JobQueue job: gets live matches from football-data, scans Reddit threads, calls `compute_new_goals` per thread (seed-on-first-poll dedup), sends Telegram notifications with goal keyboard. Per-goal send errors are caught and logged. Whole job body wrapped in try/except to survive any failure.
+  - `_noop_vergol_callback` — answers "Ver gol" button presses with "🔜 Próximamente" toast.
+  - `CallbackQueryHandler` registered for `r"^vergol:"`.
+  - Job is scheduled only when `settings.telegram_group_id` is set; otherwise a WARNING is logged (feature is gracefully disabled).
+
+- **Seed-on-first-poll dedup**: on the first time a thread is polled, all existing goal keys are added to the notified set WITHOUT sending notifications — prevents spamming goals that pre-dated the bot's startup.
+
+- **Night silent window** 00:00–08:59 local (Madrid TZ): sends with `disable_notification=True` so users sleeping through US-time matches are not woken up.
+
+- **Tests** (335 total, all green; +79 new):
+  - `tests/test_reddit_parser.py` (31): parse, dedup, ordering, disallowed, own goal, key stability.
+  - `tests/test_reddit_scanner.py` (32): `_is_match_thread`, `_parse_thread_teams`, team fuzzy match, JSON path, HTML fallback path.
+  - `tests/test_reddit_notifier.py` (16): bracket side, scorer/minute text, silent hour, keyboard shape.
+
+### 2026-06-16T09:45+02:00 — "Ver gol" inline button: clip finder, multi-host downloader, ffprobe fix
+
+**Implemented as user-approved design:**
+
+- **`clip_finder.py`**: `find_goal_clip(scanner, home_team, away_team, home_score, away_score, scorer, minute) -> str | None`. Searches r/soccer via JSON search (q=`home away`, restrict_sr, sort=new, t=day) or HTML fallback. Parses each post title with `GOAL_TITLE_PATTERN` (ported from RedditSoccerGoals). Matches by: teams fuzzy (reuses `_teams_match`/`_normalize_team` from scanner.py), exact scoreline, AND scorer-fuzzy OR minute ±2. Returns the first matching post's external URL (streamff/streamin/streamable/etc). Synchronous — callers use `asyncio.to_thread`.
+
+- **`downloader.py`**: `MediaDownloader` class. Host-specific resolvers: `_download_streamff` (CDN id → `cdn.streamff.one/{id}.mp4`, else page scrape), `_download_streamin` (CDN id → `c-cdn.streamin.top/uploads/{id}.mp4`, else embed scrape), `_download_streamain` (embed scrape → cdn.streamain.com mp4). yt-dlp subprocess fallback (`asyncio.create_subprocess_exec`) for v.redd.it, streamable.com, dubz.link, and anything else. Uses `requests` (sync) in `asyncio.to_thread` for HTTP downloads. Writes to system temp dir (`tempfile.gettempdir()`).
+
+- **`video.py`**: `probe_video(path) -> dict` (ffprobe → `{width, height, duration}`). `compress_if_needed(path) -> Path` (returns original if ≤50 MB; re-encodes with ffmpeg two-pass bitrate budget otherwise; raises `VideoTooLargeError` on failure). Passing `width`/`height` to `bot.send_video` prevents Telegram from rendering the video square.
+
+- **`notifier.py`**: `build_goal_keyboard(token: str)` now accepts a 12-hex-char token → `callback_data=f"vergol:{token}"`. Token = `hashlib.sha1(event.key)[:12]`.
+
+- **`handlers.py`**: `cmd_ver_gol_callback` handles the full flow: look up token in `bot_data["goal_clips"]`; concurrency guard (status "sending"/"sent"); `find_goal_clip` via `asyncio.to_thread`; `MediaDownloader.download`; `compress_if_needed`; `probe_video`; `bot.send_video(**meta)`; `query.edit_message_reply_markup(None)` to remove keyboard. All temp files cleaned up in `finally`. `_goal_token(key)` helper exported.
+
+- **`__main__.py`**: `poll_goals_job` now computes token, stores `goal_clips[token]` with goal context before sending. `build_app` initialises `bot_data["goal_clips"] = {}`. `CallbackQueryHandler` now registers `cmd_ver_gol_callback` (real handler) replacing the old no-op.
+
+- **`pyproject.toml`**: added `yt-dlp>=2024.0` — needed for the yt-dlp fallback.
+
+- **Design decisions**: goal_clips is in-memory (lost on restart — acceptable v1); token is sha1(key)[:12] which fits the 64-byte callback_data limit with room to spare; keyboard is removed only on success (kept on failure so user can retry).
+
+- **Tests** (407 total, all green; +72 new):
+  - `tests/test_clip_finder.py`: GOAL_TITLE_PATTERN, _extract_media_url, _scorer_matches, _match_post (7 cases), find_goal_clip (6 cases incl. ±2 minute tolerance + Holland/Netherlands fuzzy match + HTML fallback), _parse_clip_posts_html.
+  - `tests/test_downloader.py`: _find_downloaded_file, _download_streamff (CDN + scrape + failure), _download_streamin (CDN + embed), _download_streamain (embed scrape + no slug), yt-dlp fallback (success + failure + not found + routing).
+  - `tests/test_video.py`: probe_video (full, nonzero rc, exception, partial, format fallback), compress_if_needed (small=passthrough, large=compress, no duration, too long, ffmpeg fail, ffmpeg missing).
+  - `tests/test_handlers.py`: TestGoalToken (3), TestCmdVerGolCallback (unknown token, sending guard, sent guard, clip not found, download failure, happy path with width/height meta, reply_to_message_id).
+
+### 2026-06-16T10:05+02:00 — Reddit HTML fallback hardened (JSON 403 from datacenter IPs)
+
+**Diagnosis confirmed inside container:**
+- `old.reddit.com/.../.json` → **HTTP 403** (blocked from datacenter/corporate IPs).
+- `old.reddit.com/r/soccer/search.json?...` → **HTTP 403** (blocked).
+- Thread HTML (200) has **NO `data-selftext`** attribute. Post body rendered as `<p><strong>7&#39;</strong> ⚽ <strong>Goal! Sweden 1, Tunisia 0. ...</strong></p>`.
+- Old `_MD_DIV_RE` (non-greedy `.*?`) stopped at first `</div>` → 1363 chars → 0 goals parsed.
+- Search results HTML (`/r/soccer/search?q=...`) returns 200 but uses a completely different structure from `/new/` listing: external clip URL is in footer `<a class="search-link" href="https://streamin.link/v/...">`, NOT a `data-url` attribute.
+
+**FIX 1 — `get_thread_body` HTML fallback (`scanner.py`):**
+- Removed broken `_MD_DIV_RE`.
+- Added `_html_to_goaltext(html)`: replaces `<strong>`/`</strong>`/`<b>`/`</b>` → `**`, `</p>`/`<br>`/`</tr>`/`</li>` → `\n`, strips remaining tags, `html.unescape()`, collapses 3+ newlines.
+- Updated `_fetch_thread_body_html`: try `data-selftext` first (legacy), then cut HTML at `<div class="commentarea"` (excludes comment-section Goals), then apply `_html_to_goaltext`. Yields `**7'** ⚽ **Goal! Sweden 1, Tunisia 0. Scorer (Team)...**` which parse_goal_events handles.
+
+**FIX 2 — `find_goal_clip` HTML search fallback (`clip_finder.py`):**
+- Added `_REDDIT_SEARCH_HTML` constant (`/r/soccer/search?q=...&restrict_sr=on&sort=new&include_over_18=on`).
+- Added `_parse_search_results_html(html)`: parses search results structure using `class="search-title"` (title) and `class="search-link"` (external media URL). Skips blocks without `search-title` to avoid false positives on listing-format HTML.
+- Added `_fetch_html_search_posts(scanner, home, away)` using the new parser.
+- Updated `find_goal_clip` fallback chain: (1) JSON search, (2) HTML search by teams, (3) `/new/` HTML listing.
+
+**Tests (+13 new, 420 total, all green):**
+- `test_reddit_scanner.py`: `TestScannerThreadBodyHtmlFallback` (3): JSON 403 → HTML → 4 goals extracted, comment-section goals excluded, minutes correct. `TestHtmlToGoaltext` (4): strong→**, paragraph→newline, entity unescape, br→newline.
+- `test_clip_finder.py`: `TestParseSearchResultsHtml` (3): title+link extraction, skip non-search format, self-post fallback. `TestFindGoalClipHtmlSearch` (3): JSON 403 → HTML search correct clip, decoy not returned, falls through to /new/ when search empty.
+
+**E2E inside container (RESUMEN: 10 OK | 0 fallos | 0 sin clip):**
+- Sweden vs Tunisia (1u62p01): 6 goals parsed from HTML; 6 clips downloaded (streamin.link, 1920×1080, 17–20 MB each).
+- Netherlands vs Japan (1u5uc8w): 4 goals parsed; 4 clips downloaded (streamin.link + streamff.link, 1536×864/1920×1080).
+
+### 2026-06-16T10:48+02:00 — /simulagol test command for end-to-end "Ver gol" testing
+
+Added `/simulagol` — a utility command that fires a **real goal notification** (Sweden 3-1 Tunisia, Viktor Gyökeres 60') with full goal context stored in `bot_data["goal_clips"]`, so the "Ver gol" inline button works end-to-end without any live WC matches.
+
+**Key details:**
+- `cmd_simula_gol` in `handlers.py`: builds a `GoalEvent` with the Sweden-Tunisia fixed data, computes `token = _goal_token("SIM:sweden-tunisia-3-1-60-gyokeres")`, stores the EXACT dict shape used by `poll_goals_job` (home_team, away_team, home_score, away_score, scorer, minute_text, scoring_team, home_tla, away_tla, status="pending"), then calls `format_goal_notification` + `build_goal_keyboard` and replies with a `[SIMULACIÓN]`-prefixed message.
+- `__main__.py`: added `CommandHandler("simulagol", cmd_simula_gol)` and import.
+- `/start` help text updated with `/simulagol — (test) simula un gol para probar el botón Ver gol`.
+- **Imports added to handlers.py**: `GoalEvent` from `reddit.models`; `build_goal_keyboard`, `format_goal_notification` from `reddit.notifier` (previously used only in `__main__.py`).
+- **No admin restriction** — harmless test; can be made admin-only or removed once live testing is complete.
+- **6 new tests** in `TestCmdSimulaGol` (`test_handlers.py`): shape verification, reply_text called once with keyboard, token matches `_goal_token(key)`, initialises `goal_clips` when absent, reply contains SIMULACIÓN marker, `simulagol` registered in app. **426 tests total, all green.**
+- Container rebuilt + restarted; `State=running RestartCount=0`, `container has simulagol` confirmed.

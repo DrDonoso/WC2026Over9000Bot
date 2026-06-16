@@ -6,6 +6,13 @@ import os
 from dataclasses import dataclass, field
 
 
+_DEFAULT_REDDIT_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+
 @dataclass
 class Settings:
     telegram_bot_token: str
@@ -17,6 +24,8 @@ class Settings:
     football_cache_ttl: float = 60.0
     football_day_start_hour: int = 9
     photo_base_url: str = "http://victorsaez.cat"
+    goal_poll_interval_seconds: int = 60
+    reddit_user_agent: str = field(default=_DEFAULT_REDDIT_UA)
 
 
 def load_settings() -> Settings:
@@ -45,4 +54,6 @@ def load_settings() -> Settings:
         football_cache_ttl=float(os.getenv("FOOTBALL_CACHE_TTL", "60")),
         football_day_start_hour=int(os.getenv("FOOTBALL_DAY_START_HOUR", "9")),
         photo_base_url=os.getenv("PHOTO_BASE_URL", "http://victorsaez.cat"),
+        goal_poll_interval_seconds=int(os.getenv("GOAL_POLL_INTERVAL_SECONDS", "60")),
+        reddit_user_agent=os.getenv("REDDIT_USER_AGENT", _DEFAULT_REDDIT_UA),
     )

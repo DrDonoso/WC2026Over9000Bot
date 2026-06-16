@@ -1045,6 +1045,192 @@ No Docker rebuild is required — the default is baked in. If the photo host cha
 
 ---
 
+## 11. Decision: "Ver gol" inline button — clip finder + multi-host downloader
+
+**Date:** 2026-06-16T09:45+02:00  
+**Author:** Kanté  
+**Status:** Implemented  
+
+### Context
+
+Users requested that the "Ver gol" inline button (shown on each goal notification) actually
+fetches and sends the goal video clip instead of showing a placeholder toast.
+
+### Design
+
+#### A — Clip finder (`reddit/clip_finder.py`)
+
+- `find_goal_clip(scanner, home_team, away_team, home_score, away_score, scorer, minute) -> str | None`
+- Searches r/soccer via JSON endpoint (q=`home away`, restrict_sr, sort=new, t=day, limit=100) with HTML fallback.
+- Parses each post title with `GOAL_TITLE_PATTERN` (ported from the proven RedditSoccerGoals repo).
+- Match criteria: fuzzy team names (reuses `_teams_match` from scanner.py) + exact scoreline + (scorer fuzzy OR minute ±2).
+- Returns the first matching post's external media URL, or `None`.
+- **Synchronous** — callers wrap in `await asyncio.to_thread(find_goal_clip, ...)`.
+
+#### B — Downloader (`reddit/downloader.py`)
+
+`MediaDownloader` with host-specific resolvers, all using `requests` (sync) in `asyncio.to_thread`:
+
+| Host | Strategy |
+|------|----------|
+| streamff.link / streamff.com | CDN id → `cdn.streamff.one/{id}.mp4`, else page scrape |
+| streamin.link / streamin.me | CDN id → `c-cdn.streamin.top/uploads/{id}.mp4`, else embed scrape |
+| streamain.com | Embed page scrape → `cdn.streamain.com/*.mp4` |
+| v.redd.it, streamable.com, dubz.link, unknown | **yt-dlp subprocess fallback** |
+
+Writes to system temp dir (`tempfile.gettempdir()`).
+
+#### C — Video helpers (`reddit/video.py`)
+
+- `probe_video(path) -> dict` — ffprobe JSON → `{width, height, duration}`.  
+  **Without width/height Telegram renders video square.** This is the key fix.
+- `compress_if_needed(path) -> Path` — returns original if ≤ 50 MB; ffmpeg two-pass bitrate re-encode otherwise.  
+  Raises `VideoTooLargeError` if duration unknown, required bitrate < 200 kbps, ffmpeg fails, or ffmpeg times out.
+
+#### D — Callback data / token
+
+- `build_goal_keyboard(token: str)` — token = `hashlib.sha1(event.key)[:12]` (12 hex chars; well within 64-byte limit).
+- Token → `bot_data["goal_clips"][token]` dict (in-memory, lost on restart — **acceptable for v1**).
+  A future v2 could persist to SQLite.
+
+#### E — Handler flow (`cmd_ver_gol_callback`)
+
+1. Parse token from `query.data`.
+2. Look up goal context; unknown token → alert, return.
+3. Concurrency guard: "sending" → toast; "sent" → toast; else set "sending".
+4. `query.answer("⏳ Buscando…")` (single answer call allowed by Telegram).
+5. `find_goal_clip` via `asyncio.to_thread`.
+6. `MediaDownloader.download(media_url)`.
+7. `compress_if_needed(path)`.
+8. `probe_video(send_path)` → `bot.send_video(**meta)`.
+9. On success: `status="sent"`, `query.edit_message_reply_markup(None)` removes keyboard.
+10. On any failure: `status="pending"` (allow retry), send error message, keep keyboard.
+11. `finally`: unlink temp files.
+
+### Dependencies introduced
+
+| Dependency | Rationale |
+|-----------|-----------|
+| `yt-dlp>=2024.0` (added to `pyproject.toml`) | Subprocess fallback downloader for unsupported hosts |
+| `ffprobe` (system binary) | Video dimension probe — prevents square video in Telegram |
+| `ffmpeg` (system binary) | Video compression for files > 50 MB |
+
+### Tests
+
+72 new tests (407 total, all green):
+- `tests/test_clip_finder.py` — GOAL_TITLE_PATTERN, URL extraction, _match_post (7 cases), find_goal_clip (6 cases), _parse_clip_posts_html.
+- `tests/test_downloader.py` — CDN URL resolution for streamff + streamin, streamain embed scrape, yt-dlp fallback paths.
+- `tests/test_video.py` — probe_video (5 cases), compress_if_needed (6 cases).
+- `tests/test_handlers.py` — TestGoalToken (3), TestCmdVerGolCallback (8 cases: unknown token, concurrency guards, clip not found, download failure, happy path with correct meta, reply_to_message_id).
+
+---
+
+## 12. Decision: Reddit HTML Fallback Hardening (JSON 403 from Datacenter IPs)
+
+**Author:** Kanté (Backend Developer)
+**Date:** 2026-06-16T10:05+02:00
+**Status:** IMPLEMENTED
+
+### Context
+
+The "Ver gol" download pipeline was confirmed working (17 MB, 1920×1080, ffprobe dims correct). However the Reddit READ path was fragile: `old.reddit.com` JSON endpoints (`/.../.json`, `/r/soccer/search.json`) return **HTTP 403** from datacenter/corporate IPs including the user's production LXC. The existing HTML fallback in `get_thread_body` returned only 1363 chars (0 goals parsed) and `find_goal_clip` had no HTML search fallback at all.
+
+### Diagnosis
+
+Measured inside the running Docker container:
+
+| Endpoint | Status | Notes |
+|---|---|---|
+| `old.reddit.com/.../.json` | **403** | Blocked from datacenter IPs |
+| `old.reddit.com/r/soccer/search.json` | **403** | Blocked from datacenter IPs |
+| `old.reddit.com/...thread.../` (HTML) | **200** | 681 KB, contains goals |
+| `old.reddit.com/r/soccer/search?q=...` (HTML) | **200** | Contains clip posts |
+
+The match-thread HTML has **no `data-selftext`** attribute. Goals are rendered as:
+```html
+<p><strong>7&#39;</strong> ⚽ <strong>Goal! Sweden 1, Tunisia 0. Yasin Ayari (Sweden) right footed shot...</strong></p>
+```
+
+The old `_MD_DIV_RE` (non-greedy `.*?`) stopped at the first `</div>` inside the post body, capturing only 1363 chars. There are 181 `class="md"` divs (post + every comment).
+
+The search results HTML (`/r/soccer/search?q=...`) uses a completely different structure from `/new/` listing pages: the external clip URL is in a footer anchor `<a class="search-link" href="https://streamin.link/v/...">` — there is **no `data-url` attribute**.
+
+### Decisions
+
+#### 1. `get_thread_body` HTML fallback (`scanner.py`)
+
+**Remove** `_MD_DIV_RE`. **Add** `_html_to_goaltext(html)`:
+- `<strong>`/`</strong>`/`<b>`/`</b>` → `**` (bold markers for parse_goal_events)
+- `</p>`/`<br>`/`</tr>`/`</li>` → `\n` (one event per line)
+- Strip all remaining HTML tags
+- `html.unescape()` (converts `&#39;` → `'`, `&amp;` → `&`, etc.)
+- Collapse 3+ newlines to 2
+
+**Update** `_fetch_thread_body_html`:
+1. Try `data-selftext` attribute first (legacy/non-match threads may have it)
+2. Cut HTML at `<div class="commentarea"` → excludes comment-section Goal! lines
+3. Apply `_html_to_goaltext` to pre-commentarea HTML
+
+Result: `**7'** ⚽ **Goal! Sweden 1, Tunisia 0. Yasin Ayari (Sweden) right footed shot...**` which `parse_goal_events` handles normally.
+
+#### 2. `find_goal_clip` HTML search fallback (`clip_finder.py`)
+
+**Add** `_REDDIT_SEARCH_HTML` endpoint: `https://old.reddit.com/r/soccer/search?q={query}&restrict_sr=on&sort=new&include_over_18=on`
+
+**Add** `_parse_search_results_html(html)`:
+- Splits by `data-fullname="t3_"` blocks
+- Extracts title from `<a class="search-title ...">Title</a>`
+- Extracts external media URL from `<a class="search-link ..." href="https://streamin.link/v/...">` footer anchor
+- Skips blocks without `search-title` (to avoid false positives on listing-format pages)
+
+**Updated fallback chain** in `find_goal_clip`:
+1. JSON search (`search.json?q=...`) — skip on 403
+2. **HTML search** (`search?q=...`) — new, parses `search-link` footer URLs
+3. `/new/` HTML listing — existing last resort
+
+### Results
+
+E2E inside container: **10 OK | 0 fallos | 0 sin clip**
+- **Sweden vs Tunisia** (1u62p01): 6 goals parsed from HTML; 6 clips downloaded (streamin.link, 1920×1080, 17–20 MB)
+- **Netherlands vs Japan** (1u5uc8w): 4 goals parsed; 4 clips downloaded (streamin.link + streamff.link)
+
+Unit tests: 420 total, all green (+13 new).
+
+---
+
+## 13. Decision: ffmpeg shipped in the drdonoso/worldcup2026 image
+
+**Date:** 2026-06-16  
+**Author:** Maldini (DevOps agent)  
+**Status:** Applied
+
+### Context
+
+The "Ver gol" feature (goal-clip download + Telegram delivery) requires `ffmpeg` and `ffprobe` as system binaries inside the container. `ffmpeg` is available in Debian's package repos (`ffmpeg` package ships both binaries). The Python `yt-dlp` library (which calls `ffmpeg`/`ffprobe` internally) is added to `pyproject.toml` by Kanté and installed via the existing `pip install .` layer.
+
+### Decision
+
+Add a single `RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && apt-get clean && rm -rf /var/lib/apt/lists/*` layer to the Dockerfile, placed immediately after `FROM python:3.12-slim AS base` and before any user-creation or `COPY`/pip steps.
+
+### Rationale
+
+- **Cache efficiency:** System deps (apt) change far less often than Python deps. Placing the apt layer first means Python dep changes (e.g., adding `yt-dlp` to `pyproject.toml`) do not invalidate the apt cache layer.
+- **Minimal image surface:** `--no-install-recommends` keeps image size small; cleanup of apt lists reclaims ~20 MB.
+- **No new mounts or env vars:** `/tmp` is world-writable in debian-slim by default, so the non-root `app` user can write temporary video files without any extra Docker configuration.
+- **Mirrors sibling repo:** `Z:/Repos/Personal/RedditSoccerGoals/Dockerfile` uses the identical pattern (ffmpeg via apt, yt-dlp via pip/pyproject).
+
+### Verification
+
+```
+ffmpeg version 7.1.4-0+deb13u1 Copyright (c) 2000-2026 the FFmpeg developers
+ffprobe version 7.1.4-0+deb13u1 Copyright (c) 2007-2026 the FFmpeg developers
+yt-dlp: not yet in image (pending Kanté's pyproject.toml change)
+```
+
+Build: `docker compose -f docker-compose.local.yml build` → exit 0.
+
+---
+
 ## Governance
 
 - All meaningful changes require team consensus
