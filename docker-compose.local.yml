@@ -23,11 +23,20 @@ services:
       # --- Telegram group/channel ID for live goal notifications (REQUIRED) ---
       TELEGRAM_GROUP_ID: "${TELEGRAM_GROUP_ID}"
 
+      # --- OpenAI-compatible AI (self-hosted LiteLLM) for the daily update ---
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-}"
+      DAILY_UPDATE_HOUR: "${DAILY_UPDATE_HOUR:-9}"
+
       # Corporate SSL inspection fix: combined system+corporate CA bundle.
       # Needed on networks with a corporate SSL-inspecting proxy.
       # The bundle is generated locally and is git-ignored.
       SSL_CERT_FILE: /certs/combined-ca-bundle.pem
       REQUESTS_CA_BUNDLE: /certs/combined-ca-bundle.pem
+
+      # --- Persistent state directory for porra snapshot ---
+      STATE_DIR: /app/state
 
     volumes:
       # Mount the host ./data directory; edit ./data/predictions.yml on the host (or server)
@@ -35,3 +44,8 @@ services:
       - ./data:/app/data:ro
       # Corporate CA bundle for SSL-inspection remediation (git-ignored, local dev only)
       - ./certs:/certs:ro
+      # Named volume for persistent state (porra snapshot) across container restarts
+      - bot_state:/app/state
+
+volumes:
+  bot_state:

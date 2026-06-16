@@ -16,6 +16,7 @@ dependencies = [
     "truststore>=0.9",
     "yt-dlp>=2024.0",
     "gender-guesser>=0.4",
+    "openai>=1.40",
 ]
 
 [project.optional-dependencies]

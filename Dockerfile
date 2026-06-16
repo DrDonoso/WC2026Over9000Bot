@@ -21,8 +21,8 @@ RUN mkdir -p src/worldcup_bot && touch src/worldcup_bot/__init__.py && \
 COPY src/ ./src/
 RUN pip install --no-cache-dir --no-deps .
 
-# Create writable directory for the data mount
-RUN mkdir -p /app/data && chown -R app:app /app/data
+# Create writable directories for the data mount + persistent state volume
+RUN mkdir -p /app/data /app/state && chown -R app:app /app/data /app/state
 
 USER app
 

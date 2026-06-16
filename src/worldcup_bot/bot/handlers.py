@@ -28,7 +28,9 @@ from worldcup_bot.bot.formatters import (
     participant_photo_url,
     team_flag,
 )
-from worldcup_bot.config import Settings
+from worldcup_bot.ai.client import AIClient
+from worldcup_bot.ai.daily_update import generate_daily_update
+from worldcup_bot.config import Settings, ai_enabled
 from worldcup_bot.data.stages import GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
 from worldcup_bot.data.tongo import FRASES, SANCHEZ_ENS_ROBA, frase_argentino
 from worldcup_bot.data.gender import infer_gender
@@ -887,3 +889,48 @@ async def cmd_simula_gol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"🧪 [SIMULACIÓN]\n{text}",
         reply_markup=keyboard,
     )
+
+
+# ── /updatediario — hidden AI daily update trigger ────────────────────────────
+
+
+async def cmd_update_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hidden manual trigger for the AI daily update. /updatediario
+
+    Sends the AI-generated Spanish recap to the current chat so it can be
+    tested before the 9 AM scheduled job fires.  Not listed in /start help.
+    """
+    settings: Settings = context.bot_data["settings"]
+
+    if not ai_enabled(settings):
+        await update.message.reply_text(
+            "⚠️ La integración de IA no está configurada (faltan OPENAI_*)."
+        )
+        return
+
+    await update.message.reply_text("⏳ Generando el resumen del día…")
+
+    client = make_client(settings)
+    ai = AIClient(
+        settings.openai_api_key,
+        settings.openai_base_url,
+        settings.openai_model,
+    )
+
+    try:
+        text = await generate_daily_update(client, ai, settings)
+        if text is None:
+            await update.message.reply_text(
+                "🤷 No hay partidos ni ayer ni hoy, no hay nada que comentar."
+            )
+            return
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=text,
+            parse_mode="HTML",
+        )
+    except Exception:
+        log.exception("cmd_update_diario: error generating update")
+        await update.message.reply_text(
+            "❌ Error al generar el resumen. Revisa los logs."
+        )

@@ -7,12 +7,14 @@ from __future__ import annotations
 
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, time as dtime
 
 import pytz
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from worldcup_bot.api.client import FootballAPIError
+from worldcup_bot.ai.client import AIClient
+from worldcup_bot.ai.daily_update import generate_daily_update
 from worldcup_bot.bot.handlers import (
     _goal_token,
     cmd_actual,
@@ -29,10 +31,11 @@ from worldcup_bot.bot.handlers import (
     cmd_simula_gol,
     cmd_start,
     cmd_tongo,
+    cmd_update_diario,
     cmd_ver_gol_callback,
     make_client,
 )
-from worldcup_bot.config import Settings, load_settings
+from worldcup_bot.config import Settings, ai_enabled, load_settings
 from worldcup_bot.reddit.notifier import (
     _is_silent_hour,
     build_goal_keyboard,
@@ -46,6 +49,28 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger(__name__)
+
+
+# ── daily AI update job ───────────────────────────────────────────────────────
+
+
+async def daily_update_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily job: post AI-generated Spanish recap to the Telegram group."""
+    try:
+        settings: Settings = context.bot_data["settings"]
+        client = make_client(settings)
+        ai = AIClient(
+            settings.openai_api_key,
+            settings.openai_base_url,
+            settings.openai_model,
+        )
+        text = await generate_daily_update(client, ai, settings)
+        if text is None:
+            log.info("Daily update skipped: no matches yesterday or today")
+            return
+        await context.bot.send_message(chat_id=settings.telegram_group_id, text=text, parse_mode="HTML")
+    except Exception:
+        log.exception("daily_update_job failed")
 
 
 # ── polling job ───────────────────────────────────────────────────────────────
@@ -191,6 +216,7 @@ def build_app(settings: Settings) -> Application:
         CallbackQueryHandler(cmd_ver_gol_callback, pattern=r"^vergol:"),
         # Test / utility
         CommandHandler("simulagol", cmd_simula_gol),
+        CommandHandler("updatediario", cmd_update_diario),
     ]
 
     for handler in handlers:
@@ -234,6 +260,24 @@ def main() -> None:
         first=10,
         name="poll_goals",
     )
+
+    if ai_enabled(settings) and settings.telegram_group_id:
+        tz = pytz.timezone(settings.timezone)
+        app.job_queue.run_daily(
+            daily_update_job,
+            time=dtime(hour=settings.daily_update_hour, minute=0, tzinfo=tz),
+            name="daily_update",
+        )
+        log.info(
+            "Daily AI update enabled — posting at %02d:00 %s to group %s",
+            settings.daily_update_hour,
+            settings.timezone,
+            settings.telegram_group_id,
+        )
+    else:
+        log.info(
+            "Daily AI update DISABLED — set OPENAI_API_KEY/OPENAI_BASE_URL/OPENAI_MODEL to enable."
+        )
 
     app.run_polling()
 

@@ -22,7 +22,21 @@ services:
       # --- Telegram group/channel ID for live goal notifications (REQUIRED) ---
       TELEGRAM_GROUP_ID: "${TELEGRAM_GROUP_ID}"
 
+      # --- OpenAI-compatible AI (self-hosted LiteLLM) for the daily update ---
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-}"
+      DAILY_UPDATE_HOUR: "${DAILY_UPDATE_HOUR:-9}"
+
+      # --- Persistent state directory for porra snapshot ---
+      STATE_DIR: /app/state
+
     volumes:
       # Mount the host ./data directory; edit ./data/predictions.yml on the host (or server)
       # and the bot picks it up on the next command (hot-reload by mtime). Read-only inside the container.
       - ./data:/app/data:ro
+      # Named volume for persistent state (porra snapshot) across container restarts
+      - bot_state:/app/state
+
+volumes:
+  bot_state:

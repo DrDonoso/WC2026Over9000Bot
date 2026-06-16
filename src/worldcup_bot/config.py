@@ -27,6 +27,20 @@ class Settings:
     goal_poll_interval_seconds: int = 60
     reddit_user_agent: str = field(default=_DEFAULT_REDDIT_UA)
     tongo_gifs_dir: str = ""
+    openai_api_key: str = ""
+    openai_base_url: str = ""
+    openai_model: str = ""
+    daily_update_hour: int = 9
+    state_dir: str = "/app/state"
+
+
+def ai_enabled(settings: "Settings") -> bool:
+    """Return True only when all three OpenAI env vars are non-empty."""
+    return bool(
+        settings.openai_api_key
+        and settings.openai_base_url
+        and settings.openai_model
+    )
 
 
 def load_settings() -> Settings:
@@ -66,4 +80,9 @@ def load_settings() -> Settings:
         goal_poll_interval_seconds=int(os.getenv("GOAL_POLL_INTERVAL_SECONDS", "60")),
         reddit_user_agent=os.getenv("REDDIT_USER_AGENT", _DEFAULT_REDDIT_UA),
         tongo_gifs_dir=os.getenv("TONGO_GIFS_DIR", ""),
+        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
+        openai_base_url=os.getenv("OPENAI_BASE_URL", ""),
+        openai_model=os.getenv("OPENAI_MODEL", ""),
+        daily_update_hour=int(os.getenv("DAILY_UPDATE_HOUR", "9")),
+        state_dir=os.getenv("STATE_DIR", "/app/state"),
     )

@@ -1,0 +1,392 @@
+"""AI-powered daily update: Spanish recap of yesterday + today's fixtures + porra.
+
+Key design points:
+- render_message() is a pure, deterministic HTML builder — easy to unit-test.
+- parse_ai_json() parses the AI JSON response with graceful degradation.
+- build_ai_user_message() is a pure function — builds the AI prompt.
+- generate_daily_update() is the orchestrator: fetches data, calls AI, returns HTML or None.
+
+Message is sent with parse_mode="HTML".  All AI-provided strings are escaped with
+html.escape() before insertion.
+
+Scenarios
+---------
+"normal"      - matches yesterday AND today  → full recap + preview.
+"pausa"       - matches yesterday, none today → recap + standings-frozen notice.
+"reanudacion" - no matches yesterday, today yes → competition resumes framing.
+None return   - no matches either day → generate_daily_update returns None (caller skips post).
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import logging
+from datetime import datetime, timezone
+
+import pytz
+
+from worldcup_bot.ai import snapshot as _snapshot
+from worldcup_bot.ai.client import AIClient
+from worldcup_bot.ai.snapshot import Movement
+from worldcup_bot.api.client import FootballDataClient
+from worldcup_bot.api.models import Match
+from worldcup_bot.bot.formatters import team_flag
+from worldcup_bot.config import Settings
+from worldcup_bot.porra import engine, predictions as pred_loader
+from worldcup_bot.porra.engine import UserRankEntry
+
+log = logging.getLogger(__name__)
+
+_DIAS_ES = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+_MESES_ES = [
+    "enero", "febrero", "marzo", "abril", "mayo", "junio",
+    "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre",
+]
+
+_SYSTEM = (
+    "Eres el comentarista del grupo de Telegram de una porra del Mundial 2026 entre amigos. "
+    "Para today_notes: incluye una nota CORTA solo si los dos países comparten una rivalidad "
+    "notable o — ESPECIALMENTE — un conflicto armado actual o histórico entre ellos, u otro dato "
+    "genuinamente interesante; en caso contrario devuelve una CADENA VACÍA para ese partido. "
+    "Con tacto. Nunca inventes resultados. "
+    "Para standings_comment: dado el ranking actual de la porra y cómo han cambiado las "
+    "posiciones desde ayer, adapta el comentario al ESCENARIO indicado en el mensaje del usuario:\n"
+    "  - 'normal': repasa ayer y presenta hoy; narra el movimiento de la porra desde ayer "
+    "y qué puede pasar hoy (los partidos de hoy pueden cerrar grupos y agitar la tabla).\n"
+    "  - 'pausa': hubo partidos ayer pero hoy no; comenta el resultado/movimiento y deja "
+    "claro que la clasificación queda CONGELADA/intacta hasta que se reanude la competición "
+    "(la fecha la pone el sistema, no la inventes).\n"
+    "  - 'reanudacion': ayer no hubo partidos y hoy SÍ; comenta que VUELVE la competición "
+    "y cómo PODRÍA moverse la porra hoy — menciona rivales que están cerca en la tabla y que "
+    "los resultados de los grupos de hoy pueden cambiar posiciones "
+    "(NO inventes las predicciones concretas de cada usuario; háblalo en términos de cercanía en puntos).\n"
+    "Emojis moderados, conciso. Máximo 4-5 frases cortas. "
+    "Devuelve ÚNICAMENTE el objeto JSON, sin marcas de código ni nada más. "
+    'Formato exacto: {"today_notes": {"TLA1-TLA2": "nota o cadena vacía"}, '
+    '"standings_comment": "narrativa corta"}'
+)
+
+
+def format_spanish_date(utc_date: str, tz_name: str) -> str | None:
+    """Return a Spanish-formatted local date, e.g. 'el sábado 20 de junio', or None on error."""
+    try:
+        utc_dt = datetime.strptime(utc_date, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        local_dt = utc_dt.astimezone(pytz.timezone(tz_name))
+        day_name = _DIAS_ES[local_dt.weekday()]
+        month_name = _MESES_ES[local_dt.month - 1]
+        return f"el {day_name} {local_dt.day} de {month_name}"
+    except Exception:
+        return None
+
+
+def _format_kickoff(utc_date: str, tz_name: str) -> str:
+    """Return local HH:MM for a UTC ISO-8601 kickoff timestamp."""
+    try:
+        utc_dt = datetime.strptime(utc_date, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        local_tz = pytz.timezone(tz_name)
+        return utc_dt.astimezone(local_tz).strftime("%H:%M")
+    except Exception:
+        return "?"
+
+
+# ── pure helpers ──────────────────────────────────────────────────────────────
+
+
+def build_ai_user_message(
+    yesterday: list[Match],
+    today: list[Match],
+    ranking: list[UserRankEntry],
+    movements: list[Movement],
+    tz_name: str,
+    first_snapshot: bool = False,
+    scenario: str = "normal",
+    next_match: Match | None = None,
+    next_date_str: str | None = None,
+) -> str:
+    """Build the user message string sent to the AI model. Pure function — no I/O."""
+    # Yesterday's results
+    if yesterday:
+        results_lines = [
+            f"- {m.home_name} {m.home_score}-{m.away_score} {m.away_name}"
+            for m in yesterday
+        ]
+        results_block = "\n".join(results_lines)
+    else:
+        results_block = "Sin partidos ayer."
+
+    # Today's fixtures — include TLA key so the model uses the right key
+    if today:
+        today_lines = [
+            f"- [{m.home_tla}-{m.away_tla}] {m.home_name} vs {m.away_name}"
+            f" ({_format_kickoff(m.utc_date, tz_name)})"
+            for m in today
+        ]
+        today_block = "\n".join(today_lines)
+    else:
+        today_block = "Sin partidos hoy."
+
+    # Current ranking
+    if ranking:
+        ranking_lines = [
+            f"{i + 1}. {r.display_name} — {r.total_score:.1f} pts"
+            for i, r in enumerate(ranking)
+        ]
+        ranking_block = "\n".join(ranking_lines)
+    else:
+        ranking_block = "Sin datos de porra."
+
+    # Position changes
+    if first_snapshot or not movements:
+        if first_snapshot:
+            movements_block = "(Primera instantánea — sin datos previos de posiciones)"
+        else:
+            movements_block = "Sin cambios de posición respecto a ayer."
+    else:
+        mov_lines: list[str] = []
+        for mv in movements:
+            if mv.delta > 0:
+                mov_lines.append(
+                    f"- {mv.display_name}: {mv.old_pos}º → {mv.new_pos}º"
+                    f" (subió {mv.delta})"
+                )
+            else:
+                mov_lines.append(
+                    f"- {mv.display_name}: {mv.old_pos}º → {mv.new_pos}º"
+                    f" (bajó {abs(mv.delta)})"
+                )
+        movements_block = "\n".join(mov_lines)
+
+    proximos_block = ""
+    if scenario == "pausa" and next_match is not None and next_date_str:
+        proximos_block = (
+            f"\n\nPROXIMOS PARTIDOS: {next_date_str}"
+            f" ({next_match.home_name} vs {next_match.away_name})"
+        )
+
+    return (
+        f"ESCENARIO: {scenario}\n\n"
+        f"RESULTADOS DE AYER:\n{results_block}\n\n"
+        f"PARTIDOS DE HOY:\n{today_block}\n\n"
+        f"CLASIFICACIÓN ACTUAL:\n{ranking_block}\n\n"
+        f"CAMBIOS DESDE AYER:\n{movements_block}"
+        f"{proximos_block}"
+    )
+
+
+def parse_ai_json(raw: str) -> tuple[dict, str]:
+    """Parse the AI JSON response into (today_notes, standings_comment).
+
+    Strips ```json ... ``` fences.  On any failure: returns ({}, "") and logs a warning.
+    The rendered message will still show all match lines — AI content is optional.
+    """
+    try:
+        text = raw.strip()
+        # Strip ```json...``` or ```...``` code fences
+        if text.startswith("```"):
+            text = text.lstrip("`")
+            if text.startswith("json"):
+                text = text[4:]
+            last_fence = text.rfind("```")
+            if last_fence != -1:
+                text = text[:last_fence]
+            text = text.strip()
+        data = json.loads(text)
+        today_notes = data.get("today_notes", {})
+        if not isinstance(today_notes, dict):
+            today_notes = {}
+        standings_comment = str(data.get("standings_comment", ""))
+        return today_notes, standings_comment
+    except Exception as exc:
+        log.warning("parse_ai_json failed (%s) | raw=%r", exc, raw[:300])
+        return {}, ""
+
+
+def render_message(
+    yesterday: list[Match],
+    today: list[Match],
+    tz_name: str,
+    today_notes: dict[str, str],
+    standings_comment: str,
+    scenario: str = "normal",
+    next_date_str: str | None = None,
+) -> str:
+    """Assemble the final HTML Telegram message. Pure function — no I/O.
+
+    Uses html.escape() on all variable content; own <b>/<i> tags are literal.
+
+    Section rules:
+    - "Resultados de ayer": only included when yesterday is non-empty.
+    - "Partidos de hoy": shown when today is non-empty; if empty and scenario=="pausa"
+      a pause notice is shown instead.
+    - "La porra": always present.
+    """
+    sections: list[str] = []
+
+    # ── Section 1: yesterday (omit entirely when empty) ───────────────────────
+    if yesterday:
+        lines: list[str] = ["📅 <b>Resultados de ayer</b>"]
+        for m in yesterday:
+            hf = team_flag(m.home_tla)
+            af = team_flag(m.away_tla)
+            hs = m.home_score if m.home_score is not None else 0
+            as_ = m.away_score if m.away_score is not None else 0
+            home_esc = html.escape(m.home_name, quote=False)
+            away_esc = html.escape(m.away_name, quote=False)
+            if m.winner == "HOME_TEAM":
+                home_str = f"<b>{home_esc}</b>"
+                away_str = away_esc
+            elif m.winner == "AWAY_TEAM":
+                home_str = home_esc
+                away_str = f"<b>{away_esc}</b>"
+            else:  # DRAW or None
+                home_str = home_esc
+                away_str = away_esc
+            lines.append(f"{hf} {home_str} {hs}-{as_} {away_str} {af}")
+        sections.append("\n".join(lines))
+
+    # ── Section 2: today ──────────────────────────────────────────────────────
+    if today:
+        lines = ["⚽ <b>Partidos de hoy</b>"]
+        for m in today:
+            hf = team_flag(m.home_tla)
+            af = team_flag(m.away_tla)
+            home_esc = html.escape(m.home_name, quote=False)
+            away_esc = html.escape(m.away_name, quote=False)
+            kickoff = _format_kickoff(m.utc_date, tz_name)
+            lines.append(
+                f"{hf} <b>{home_esc}</b> vs <b>{away_esc}</b> {af} — {kickoff}"
+            )
+            key = f"{m.home_tla}-{m.away_tla}"
+            note = today_notes.get(key, "").strip()
+            if note:
+                lines.append(f"   <i>{html.escape(note, quote=False)}</i>")
+        sections.append("\n".join(lines))
+    elif scenario == "pausa":
+        body = (
+            "La clasificación de la porra se mantiene intacta hasta que "
+            "se reanude la competición"
+        )
+        if next_date_str:
+            body += f" {next_date_str}."
+        else:
+            body += "."
+        sections.append(f"⏸️ <b>Hoy no hay partidos</b>\n{body}")
+
+    # ── Section 3: porra ──────────────────────────────────────────────────────
+    lines = ["📊 <b>La porra</b>"]
+    if standings_comment:
+        lines.append(html.escape(standings_comment, quote=False))
+    sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)
+
+
+# ── orchestrator ──────────────────────────────────────────────────────────────
+
+
+async def generate_daily_update(
+    client: FootballDataClient,
+    ai: AIClient,
+    settings: Settings,
+) -> str | None:
+    """Fetch football data + porra, call AI, return HTML message string or None.
+
+    Returns None when there are no matches yesterday or today — caller should skip posting.
+    """
+    # 1. Football data
+    yesterday_raw = client.get_football_day_matches(
+        settings.timezone,
+        day_offset=-1,
+        anchor_hour=settings.football_day_start_hour,
+    )
+    yesterday = [m for m in yesterday_raw if m.status == "FINISHED"]
+
+    today = client.get_football_day_matches(
+        settings.timezone,
+        day_offset=0,
+        anchor_hour=settings.football_day_start_hour,
+    )
+
+    has_y = bool(yesterday)
+    has_t = bool(today)
+
+    if not has_y and not has_t:
+        return None
+
+    # Determine scenario and optional next-match info
+    if has_y and has_t:
+        scenario = "normal"
+        next_match = None
+        next_date_str = None
+    elif has_y and not has_t:
+        scenario = "pausa"
+        next_match = client.get_next_match(settings.timezone)
+        next_date_str = (
+            format_spanish_date(next_match.utc_date, settings.timezone)
+            if next_match
+            else None
+        )
+    else:  # not has_y and has_t → "reanudacion"
+        scenario = "reanudacion"
+        next_match = None
+        next_date_str = None
+
+    # 2. Porra ranking (degrade gracefully on error)
+    try:
+        predictions = pred_loader.load(settings.predictions_path)
+        ranking = engine.compute_general_ranking(predictions, client, official=False)
+    except Exception as exc:
+        log.warning("generate_daily_update: porra ranking failed: %s", exc)
+        ranking = []
+
+    current_positions = {r.username: i + 1 for i, r in enumerate(ranking)}
+    names = {r.username: r.display_name for r in ranking}
+
+    # 3. Snapshot / movements
+    today_local_date = datetime.now(pytz.timezone(settings.timezone)).strftime(
+        "%Y-%m-%d"
+    )
+    snapshot_path = f"{settings.state_dir}/porra_snapshot.json"
+    baseline, _ = _snapshot.update_and_diff(
+        snapshot_path, today_local_date, current_positions
+    )
+    movements = _snapshot.compute_movements(baseline or {}, current_positions, names)
+    first_snapshot = baseline is None
+
+    # 4. AI call
+    user_msg = build_ai_user_message(
+        yesterday,
+        today,
+        ranking,
+        movements,
+        settings.timezone,
+        first_snapshot,
+        scenario=scenario,
+        next_match=next_match,
+        next_date_str=next_date_str,
+    )
+    try:
+        raw = await ai.complete(_SYSTEM, user_msg, max_completion_tokens=1500)
+        today_notes, standings_comment = parse_ai_json(raw)
+    except Exception as exc:
+        log.warning(
+            "generate_daily_update: AI call failed: %s — rendering without AI content",
+            exc,
+        )
+        today_notes, standings_comment = {}, ""
+
+    # 5. Render HTML
+    return render_message(
+        yesterday,
+        today,
+        settings.timezone,
+        today_notes,
+        standings_comment,
+        scenario=scenario,
+        next_date_str=next_date_str,
+    )
