@@ -14,6 +14,7 @@ import pytest
 
 from worldcup_bot.ai.client import AIClient, AIError
 from worldcup_bot.ai.daily_update import (
+    _SYSTEM,
     build_ai_user_message,
     generate_daily_update,
     parse_ai_json,
@@ -1071,4 +1072,34 @@ class TestCmdUpdateDiarioNoneResult:
                 await cmd_update_diario(update, context)
 
         context.bot.send_message.assert_not_called()
+
+
+# ── _SYSTEM prompt contract ───────────────────────────────────────────────────
+
+
+class TestSystemPromptContract:
+    def test_system_prompt_references_armed_conflict_priority(self):
+        """_SYSTEM must explicitly prioritise naming armed conflicts."""
+        prompt_lower = _SYSTEM.lower()
+        assert "conflicto armado" in prompt_lower
+
+    def test_system_prompt_names_malvinas_as_example(self):
+        """_SYSTEM must cite the Malvinas/Falklands war as a concrete example."""
+        assert "Malvinas" in _SYSTEM or "malvinas" in _SYSTEM.lower()
+
+    def test_system_prompt_empty_string_rule_stated(self):
+        """_SYSTEM must instruct the model to return an empty string when nothing genuine."""
+        assert '""' in _SYSTEM or "cadena vacía" in _SYSTEM.lower() or "CADENA VACÍA" in _SYSTEM
+
+    def test_system_prompt_today_notes_rule_stated_unconditionally(self):
+        """today_notes rule must appear before scenario-specific standing_comment guidance."""
+        idx_today_notes = _SYSTEM.find("today_notes")
+        idx_standings = _SYSTEM.find("standings_comment")
+        assert idx_today_notes != -1
+        assert idx_standings != -1
+        assert idx_today_notes < idx_standings
+
+    def test_system_prompt_forbids_filler(self):
+        """_SYSTEM must explicitly forbid generic filler notes."""
+        assert "relleno" in _SYSTEM.lower() or "nunca inventes" in _SYSTEM.lower() or "NUNCA" in _SYSTEM
 
