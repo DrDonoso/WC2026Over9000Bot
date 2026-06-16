@@ -9,7 +9,21 @@
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 
-### 2026-06-16 (Phase 18) — TELEGRAM_GROUP_ID made required in load_settings
+### 2026-06-16 (Phase 19) — /tongo: 3 new phrases + gender-aware argentino phrase
+
+**Summary:** Added 3 simple phrases to `FRASES` and a new gender-aware phrase "Que tongo ni que tongo, eres mas pesad_ que un_ argentin_" that adapts to the Telegram user's gender (inferred offline from first_name via `gender-guesser`). The dynamic phrase is included in the 2/3 random pool alongside all static phrases. `SANCHEZ_ENS_ROBA` retains its exact 1/3 probability guarantee.
+
+**Key implementations:**
+- `pyproject.toml`: Added `gender-guesser>=0.4` to production dependencies.
+- `src/worldcup_bot/data/gender.py` (new): `infer_gender(first_name)` using `gender_guesser.detector.Detector(case_sensitive=False)`. Strips non-alpha chars from first token (handles emojis/extra words). Returns `'f'` for female/mostly_female, `'m'` for everything else (male/mostly_male/andy/unknown/None).
+- `src/worldcup_bot/data/tongo.py`: Appended 3 new static phrases ("Un conoooooo!! un cono!!!", "Por lo menos no somos italia.", "Ah, pero ChatGPT decia que si."). Added `frase_argentino(gender)` returning female or male variant (default male for unknown gender).
+- `src/worldcup_bot/bot/handlers.py`: `cmd_tongo` else-branch expanded: reads `update.effective_user.first_name`, calls `infer_gender`, builds `candidatas = FRASES + [frase_argentino(gender)]`, then `random.choice(candidatas)`. SANCHEZ_ENS_ROBA is NOT in the pool.
+- `tests/test_gender.py` (new): 8 tests — Laura→f, Maria→f, David→m, Juan→m, empty→m, None→m, unknown token→m, emoji prefix handled.
+- `tests/test_tongo.py`: Extended `_NEW_PHRASES` with 3 new static phrases, updated count test to `>= 16`, added `TestFraseArgentino` class (female/male/unknown/empty variants).
+- `tests/test_handlers.py`: Added `test_argentino_female_phrase_for_laura` and `test_argentino_male_phrase_for_david` — verify correct gendered phrase in candidate pool and sent as reply.
+- **490 tests passing. Smoke: Laura→f, David→m, fem=expected phrase, count=16. Container rebuilt, State=Up, RestartCount=0, gender_guesser confirmed in image.**
+
+
 
 **Summary:** `TELEGRAM_GROUP_ID` is now a required env var enforced by `load_settings()` (raises `RuntimeError` if missing/empty). The `Settings` dataclass field default (`str | None = None`) was intentionally kept so that `Settings(...)` test constructors remain unaffected. `__main__.py` always schedules `poll_goals_job` — the conditional `if settings.telegram_group_id` guard and the `DISABLED` warning branch were removed as dead code. Note: Maldini updated `docker-compose.yml` and `.env.example` in parallel.
 

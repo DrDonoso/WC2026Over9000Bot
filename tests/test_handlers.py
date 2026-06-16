@@ -1849,3 +1849,41 @@ class TestCmdTongo:
             await cmd_tongo(update, context)
 
         mock_random.choice.assert_called_once()
+
+    async def test_argentino_female_phrase_for_laura(self, fake_settings):
+        """Laura → female argentino phrase is in the candidate pool and sent."""
+        from worldcup_bot.data.tongo import frase_argentino
+
+        update = _make_update()
+        update.effective_user.first_name = "Laura"
+        context = _make_context(fake_settings)
+        expected = frase_argentino("f")
+
+        with patch("worldcup_bot.bot.handlers.random") as mock_random:
+            mock_random.random.return_value = 0.9
+            mock_random.choice.return_value = expected
+            await cmd_tongo(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert text == expected
+        pool = mock_random.choice.call_args[0][0]
+        assert expected in pool
+
+    async def test_argentino_male_phrase_for_david(self, fake_settings):
+        """David → male argentino phrase is in the candidate pool and sent."""
+        from worldcup_bot.data.tongo import frase_argentino
+
+        update = _make_update()
+        update.effective_user.first_name = "David"
+        context = _make_context(fake_settings)
+        expected = frase_argentino("m")
+
+        with patch("worldcup_bot.bot.handlers.random") as mock_random:
+            mock_random.random.return_value = 0.9
+            mock_random.choice.return_value = expected
+            await cmd_tongo(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert text == expected
+        pool = mock_random.choice.call_args[0][0]
+        assert expected in pool

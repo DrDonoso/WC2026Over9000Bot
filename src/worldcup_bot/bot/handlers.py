@@ -29,7 +29,8 @@ from worldcup_bot.bot.formatters import (
 )
 from worldcup_bot.config import Settings
 from worldcup_bot.data.stages import GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
-from worldcup_bot.data.tongo import FRASES, SANCHEZ_ENS_ROBA
+from worldcup_bot.data.tongo import FRASES, SANCHEZ_ENS_ROBA, frase_argentino
+from worldcup_bot.data.gender import infer_gender
 from worldcup_bot.porra import engine, predictions as pred_loader
 from worldcup_bot.reddit.clip_finder import find_goal_clip
 from worldcup_bot.reddit.downloader import MediaDownloader
@@ -426,7 +427,11 @@ async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if random.random() < 1 / 3:
         frase = SANCHEZ_ENS_ROBA
     else:
-        frase = random.choice(FRASES)
+        user = update.effective_user
+        first_name = user.first_name if user else None
+        gender = infer_gender(first_name)
+        candidatas = FRASES + [frase_argentino(gender)]
+        frase = random.choice(candidatas)
     await update.message.reply_text(frase)
 
 

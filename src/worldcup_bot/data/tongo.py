@@ -11,21 +11,6 @@ from __future__ import annotations
 SANCHEZ_ENS_ROBA = "Sanchez ens roba"
 
 FRASES: list[str] = [
-    "¡Qué sorpresa! Justo el resultado que nadie esperaba… (nótese el sarcasmo).",
-    "Sí, porque los favoritos nunca reciben una ayuda extra, ¿verdad?",
-    "Nada como una competencia donde el resultado está escrito antes de empezar.",
-    "¡Wow! Una victoria completamente inesperada… justo como todos anticipamos.",
-    "Es impresionante cómo siempre parece ganar el equipo más 'afortunado'.",
-    "Qué reconfortante es saber que todo es completamente 'justo' y equilibrado.",
-    "Me sorprende que aún llamen a esto competencia, cuando es claramente un arreglo.",
-    "Es fantástico ver cómo algunos siempre tienen 'suerte' en momentos cruciales.",
-    "Sí, porque los resultados nunca están manipulados de antemano, ¿verdad?",
-    "Nada mejor que ver una 'victoria merecida' que fue claramente un tongo.",
-    "Me encanta cómo el 'azar' siempre favorece a los que no deberían ganar.",
-    "Qué increíble ver cómo la 'justicia' se distribuye tan desigualmente.",
-    "¡Vaya! Todo salió justo como se planeó… desde el principio del tongo.",
-    "Nada como una 'sorpresa' que todo el mundo veía venir desde kilómetros de distancia.",
-    "Sí, seguro que no hubo ningún arreglo detrás de este 'resultado justo'.",
     # New phrases
     "Per robos el de Javi a Raona",
     "Que si quiere la bolsa",
@@ -40,4 +25,14 @@ FRASES: list[str] = [
     "Si, y Arbeloa es el jugador favorito de Laura. CAP17ÁN.",
     "Tongo es que Joan García no fue convocado con el Espanyol y vaya con el Barça, asi que a callar.",
     "Como va a ser tongo, si no te interesa ni el futbol.",
+    "Un conoooooo!! un cono!!!",
+    "Por lo menos no somos italia.",
+    "Ah, pero ChatGPT decia que si.",
 ]
+
+
+def frase_argentino(gender: str) -> str:
+    """Return the gender-aware argentino phrase ('f' for female, anything else for male)."""
+    if gender == "f":
+        return "Que tongo ni que tongo, eres mas pesada que una argentina."
+    return "Que tongo ni que tongo, eres mas pesado que un argentino."
