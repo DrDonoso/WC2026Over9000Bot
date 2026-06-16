@@ -101,6 +101,19 @@ Always escape user/AI-provided strings with `html.escape(s, quote=False)` before
 - Verified: full JSON received (no truncation), France-Senegal note present, other 3 matches noteless (no filler), porra movement narrative rendered, flags + HTML bold formatting rendered correctly.
 - 595 tests passing (56 new tests for snapshot + format + max_completion_tokens).
 
+### today_notes prioritises naming armed conflicts concretely (2026-06-16)
+
+`_SYSTEM` in `ai/daily_update.py` now instructs the model with an explicit three-tier priority for `today_notes`:
+1. **Armed conflict first:** if the two nations share a current/historical armed conflict → name it factually (e.g. "se enfrentaron en la Guerra de las Malvinas (1982)"). The word "conflicto armado" appears in the prompt, Malvinas cited as example.
+2. **Other genuine curiosity** (colonial history, territorial dispute, memorable WC match) if no conflict.
+3. **Empty string** if nothing genuine — filler explicitly forbidden ("NUNCA inventes", "nunca pongas relleno genérico").
+
+The `today_notes` rule is stated up-front and unconditionally before scenario-specific `standings_comment` guidance, so it fires in ALL scenarios (`normal`, `reanudacion`, `pausa`).
+
+`empty-string = no rendered note` behaviour preserved unchanged.
+
+Added `TestSystemPromptContract` (5 tests). **Final test count: 619 passing.**
+
 ### Scenario-Aware Daily Update — Live Verification (2026-06-16)
 
 **Status:** Implementation verified live; pending commit.

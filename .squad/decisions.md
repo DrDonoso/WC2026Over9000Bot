@@ -2027,3 +2027,53 @@ Extended with per-scenario `standings_comment` guidance: `"normal"` / `"pausa"` 
 
 **Final test count: 614 passing.**
 
+
+## Decision: Strengthen today_notes to name armed conflicts concretely
+
+# Decision: Strengthen today_notes to name armed conflicts concretely
+
+**Author:** Kanté  
+**Date:** 2026-06-16  
+**Status:** Implemented
+
+## Problem
+
+Live diagnostics revealed that the `today_notes` AI field produced soft, vague notes for historically sensitive matchups:
+- England vs Argentina → "rivalidad futbolera / mucha historia" — did NOT name the Falklands/Malvinas War.
+- Israel vs Palestine → "partido sensible por el conflicto, mejor con respeto" — unnamed, unanchored.
+
+The root cause was the `_SYSTEM` prompt treating armed conflicts as one optional item in a loose "notable rivalry or interesting fact" bucket, with no explicit priority ordering.
+
+## Decision
+
+Rewrote `_SYSTEM` in `src/worldcup_bot/ai/daily_update.py` with a **three-tier explicit priority**:
+
+1. **ARMED CONFLICT (PRIORITY):** If the two nations share a current or historical armed conflict, war, military confrontation, or serious military-political tension → name it concisely and factually (e.g. "se enfrentaron en la Guerra de las Malvinas (1982)"). Informative and concrete, not euphemistic.
+2. **OTHER GENUINE CURIOSITY:** Colonial history, notable territorial dispute, memorable past World Cup meeting — only if genuinely documented.
+3. **EMPTY STRING:** If nothing genuine exists → return `""`. Forbidden: inventing facts, stretching weak connections, generic filler like "es un partido bonito".
+
+### Structural change
+
+The `today_notes` rule is now stated **up-front and unconditionally** before the scenario-specific `standings_comment` guidance. This prevents scenario branches (`reanudacion`, `pausa`) from causing the model to skip or dilute the notes.
+
+## What did NOT change
+
+- JSON-only output contract (`{"today_notes": {…}, "standings_comment": "…"}`)
+- `today_notes` keyed by `HOME_TLA-AWAY_TLA`
+- `standings_comment` ≤ 4–5 short sentences
+- `max_completion_tokens=1500` usage
+- `parse_ai_json` fallback behaviour
+- Empty-string = no rendered note (correct, preserved)
+
+## Tests
+
+Added `TestSystemPromptContract` (5 tests) asserting:
+- `_SYSTEM` contains "conflicto armado"
+- `_SYSTEM` cites "Malvinas" as example
+- `_SYSTEM` states the empty-string / "CADENA VACÍA" rule
+- `today_notes` rule appears before `standings_comment` rule
+- `_SYSTEM` explicitly forbids filler
+
+**Final test count: 619 passing** (614 existing + 5 new).
+
+
