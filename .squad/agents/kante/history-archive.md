@@ -66,3 +66,28 @@ All participant names rendered in `<b>…</b>` HTML; all team names bold; AI-pro
 - Phase 23–25 (Finished match round): 702–733 tests
 - Block 1–4 (Goal detection to stats): 836–882 tests
 - Porra evolution (jornada + startup backfill): **962 tests**
+
+---
+
+## Rich-Image Feature — Session 2026-06-17
+
+**Archived:** 2026-06-17 from 58534 bytes (537 lines)  
+**Final state:** 1135 tests green
+
+Over 2026-06-15 and 2026-06-17, completed rich-image feature with 6 major refinements:
+
+1. **Model-Driven Escalation** — Removed hardcoded `_ESCALATION_CLAUSES`. Richness evolves implicitly: each iteration receives current image + instruction to add FEW new touches (pose, hands, entourage, vehicles, settings). Bounded history (30 memos) + captions (6 recent).
+
+2. **Hybrid Multi-Image Face-Anchor** — Run 2+ passes `[evolved, original]` pair to gpt-image-2. Face anchored to original while inventing new clothing/pose/scene. Single-image fallback if original missing.
+
+3. **Azure Moderation Compliance** — Reframed to positive-dressing language ("dress in fully-clothed luxury outfit"). Never "change/remove/alter clothing" in image prompts. Safe framing verified live.
+
+4. **Caption Normalization & Variety** — Fixed literal `\n` via `_normalize_caption()`. Removed `" / "` separators from stored examples (model was imitating them). Explicit instruction: line breaks, never slashes. 6-caption bounded store.
+
+5. **Rich Emphasis & Accessories** — Escalation now PRIMARY critical ask in prompt. Optional accessories (sunglasses/hat) occasionally added, never every time.
+
+6. **JSON Caption Extraction** — Model returns JSON `{"caption": "...", "memo": "..."}`. Fallback to raw text on failure.
+
+**Decisions linked:** kante-24, kante-25 (anchor), kante-26 (moderation), kante-27 (newline+richer), kante-29 (no-slashes)  
+**Key files:** `src/worldcup_bot/ai/rich_image.py`, `tests/test_rich_image.py`  
+**Final commit:** a8c773a on origin/main

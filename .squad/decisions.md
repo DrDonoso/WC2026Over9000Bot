@@ -1,6 +1,6 @@
 # Squad Decisions
 
-⚠️ **MANUAL COMPACTION NEEDED** (141 KB, date-gate cannot fire — all entries same-day)
+⚠️ **MANUAL COMPACTION NEEDED** (164 KB, date-gate can fire — entries span 2026-06-15 to 2026-06-17)
 
 ## 1. Architecture & Product Design — WorldCup2026Over9000TelegramBot
 
@@ -3189,3 +3189,286 @@ docker compose -f docker-compose.yml config -q          # exit 0
 - History logged in `.squad/agents/maldini/history.md`.
 
 ---
+
+
+---
+
+# Decision: Rich Caption Newline Normalization + Escalate Opulence Emphasis
+
+**Date:** 2026-06-17
+**Author:** Kanté (Backend Developer)
+**Status:** Implemented
+
+## Context
+
+Two issues surfaced after the hybrid face-anchor feature went live:
+
+1. **Literal `\n` in captions**: The caption model occasionally returns the two characters `\` and `n` (backslash-n) instead of a real line break — e.g. `"...humor.\\nMe he fugado..."`. Telegram renders these as literal text rather than line breaks, breaking the visual layout.
+
+2. **Opulence not escalating visibly**: The prompt did not emphasize that each iteration MUST look *more* luxurious than the one before. Users reported the richness plateau-ing or varying randomly rather than clearly escalating. An optional accessories angle (sunglasses/hat) was also requested to add visual variety.
+
+## Decision
+
+### 1. `_normalize_caption(text: str) -> str`
+
+New private helper in `rich_image.py`:
+- Replaces literal `\\r\\n` and `\\n` sequences with real newlines (handles the backslash-n quirk).
+- Normalizes real `\r\n` → `\n`.
+- Collapses 3+ consecutive newlines to exactly 2.
+- Strips trailing spaces on each line and strips the whole string.
+
+Applied to the `caption` return value in `generate_rich_caption` (both the JSON `data["caption"]` path and the non-JSON fallback `raw` path). The `memo` is trimmed (`.strip()`) but not run through the multi-line normalizer — it is intentionally single-line.
+
+### 2. `RICH_EDIT_PROMPT` — escalation emphasis + accessories
+
+Added a CRITICAL-labelled sentence as the leading instruction:
+
+> "CRITICAL: the result MUST look clearly and NOTICEABLY richer and more luxurious than the input image — escalate the opulence visibly each iteration: a more expensive outfit, a grander setting, more lavish props and wealth signals than before."
+
+Added optional accessories line:
+
+> "You MAY occasionally add tasteful accessories such as elegant sunglasses or a stylish hat (vary it; not every time)."
+
+All moderation-safe framing is preserved: positive dressing language ("dress in a fully-clothed luxury outfit", "tasteful", "elegant"), no "change/remove/alter clothing" phrasing.
+
+### 3. `RICH_FACE_ANCHOR_CLAUSE` — surpass framing
+
+Updated to reinforce escalation in the anchor path:
+
+> "Use the first image for the wealthy style, but SURPASS it — the new image must look clearly richer and more luxurious than the first, not merely match its opulence."
+
+The face-anchor-to-original instruction (EXACTLY/original) is fully preserved.
+
+## Consequences
+
+- Captions sent to Telegram always have clean, real newlines regardless of how the model encoded them.
+- Each iteration is explicitly instructed to beat the previous one in opulence — the main user request.
+- Accessories (sunglasses/hat) are available as an occasional stylistic variation without becoming repetitive.
+- 1123 tests green (+27 from 1096 baseline). All pre-existing tests unchanged.
+
+
+---
+
+# Decision: Rich-Image Captions — No Slash Separators
+
+**Date:** 2026-06-17  
+**Author:** Kanté (Backend Developer)  
+**Status:** Implemented
+
+## Problem
+
+Rich-image captions sent to users were containing literal `" / "` separators between sentences (e.g. `"Me he comprado un yate. / Me fui de Mónaco. / Pringados."`).
+
+## Root Cause
+
+`append_caption` stored each multi-line caption as a single line by replacing `\n` with `" / "`. Those stored lines were fed back to the language model as `recent_captions` (examples of prior captions for variety). The model imitated the `" / "` style and produced new captions with literal slash separators instead of real line breaks.
+
+## Fixes Applied
+
+### 1. `append_caption` — store with spaces, not slashes
+Replace `caption.replace("\n", " / ")` with `re.sub(r'\s+', ' ', caption).strip()`.  
+Stored examples no longer contain slashes, so the model has no reason to imitate them.
+
+### 2. `_normalize_caption` — convert slash separators to newlines
+Add `re.sub(r'\s+/\s+', '\n', text)` after CRLF normalisation.  
+Any `" / "`, `" /\n"`, or `"\n/ "` pattern becomes a clean `\n`.  
+Non-separator slashes (`24/7`, `and/or`) are unaffected — they have no surrounding whitespace.
+
+### 3. `RICH_CAPTION_PROMPT` — explicit instruction in Spanish
+Added: `"Separa las frases con SALTOS DE LÍNEA, NUNCA con barras \"/\" ni con \" / \"."`  
+Tells the model up-front to use line breaks, never slash separators.
+
+## Test Impact
+
+12 new tests added in `tests/test_rich_image.py`. Total: 1135 (was 1123). All green.
+
+
+---
+
+# Decision: Hybrid Multi-Image Face-Anchor for Rich Image Edit
+
+**Date:** 2026-06-17  
+**Author:** Kanté (Backend Developer)  
+**Status:** Implemented
+
+## Context
+
+The rich-image feature runs daily, progressively making a person look wealthier. Each iteration feeds the previous output as input. Over time the face and identity drifted (the model quietly altered appearance while only changing the background). Additionally, the output kept the same pose and clothing unchanged — only the background swapped.
+
+## Decision
+
+### 1. HYBRID multi-image edit [previous, original]
+
+Each iteration now passes **two images** to `client.images.edit`:
+- Image 1 (first): the evolved `rich_modified.png` from the state dir (continuity of wealthy style).
+- Image 2 (second / anchor): the original `{data_dir}/rich/rich_original.*` (face reference).
+
+This is activated only when an evolved image exists (`using_anchor = abspath(base) != abspath(original)`). First run is always single-image (base IS the original). Confirmed working on the user's LiteLLM/Azure gpt-image-2 deployment (api_version 2025-04-01-preview).
+
+### 2. RICH_FACE_ANCHOR_CLAUSE
+
+A constant appended to the prompt when `anchor=True`:
+> "A second reference image (the ORIGINAL photo of this person) is provided. The face, head, skin tone and facial features in your result MUST be an EXACT match to that ORIGINAL reference. Do NOT copy the clothing, outfit, pose or background from any reference image — invent NEW luxury clothing and a NEW pose. Use the FIRST image only for continuity of the wealthy style you are building on."
+
+### 3. RICH_EDIT_PROMPT: mandatory clothing + pose changes
+
+Rewrote the prompt to include a **MANDATORY CHANGES** section that explicitly requires:
+1. CLOTHING/OUTFIT: design completely NEW luxury attire every iteration — do NOT keep same clothes.
+2. POSTURE/POSE: choose a fresh body positioning each time.
+3. SETTING/BACKGROUND: evolve the scene.
+
+Identity preservation is now scoped to face/head/skin tone/facial features/build only — not clothing.
+
+## Consequences
+
+- Face identity is locked to the original from run 2 onwards, stopping multi-day drift.
+- Clothing, pose and scene change every iteration as required.
+- `build_rich_prompt(anchor=bool)` exposes the anchor toggle cleanly.
+- `edit_rich_image(anchor_path=...)` handles both single and dual-image calls transparently.
+- `find_original_image(data_dir)` always resolves the original independently of the state dir.
+- If the original is missing at runtime, graceful fallback to single-image mode (no crash).
+- 1096 tests green (+28 new tests).
+
+
+---
+
+# Decision: Rich Image — Model-Driven Escalation + Caption Variety
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-17  
+**Status:** IMPLEMENTED — 1068 tests green  
+
+---
+
+## Context
+
+The previous rich-image feature used a hardcoded `_ESCALATION_CLAUSES` list indexed by a `level` counter. Each run picked a clause (ático→club→jet→Rolls→yacht→...) that told the image model exactly what wealth marker to add. Two problems emerged:
+1. The model was constrained to fixed escalation steps rather than naturally evolving the photo.
+2. Captions were repeating the same coletillas ("seguid poniendo pasta", "currelas", "muertos de hambre", "a vuestra salud", "pringados") because no caption history was fed back.
+
+---
+
+## Decisions
+
+### 1. Removed level escalation — richness is model-driven and implicit
+
+`_ESCALATION_CLAUSES` deleted. `build_rich_prompt` no longer takes a `level` parameter.
+
+`RICH_EDIT_PROMPT` now:
+- Asks the model to make the person look **SOMEWHAT richer** (a few notches up, not a leap).
+- States that richness grows **gradually and implicitly** because each run feeds the previous output as input.
+- Mandates: pick only **a FEW NEW touches per iteration** and **VARY them** — do NOT add everything at once.
+- Explicitly encourages: changing POSTURE/POSE, bringing HANDS into view, adding OTHER PEOPLE (entourage, bodyguards, etc.), adding luxury VEHICLES (sports car, Rolls-Royce, private plane, yacht, helicopter), or moving to a different SETTING (pool, rooftop terrace, private-jet cabin, tropical private island, mansion, casino, ski chalet, designer boutique).
+- Maintains STRICT IDENTITY PRESERVATION (same face, skin tone, body, hair, distinguishing traits).
+
+`load_level` / `save_level` are kept as an **iteration counter** (no longer content-selection).
+
+### 2. rich_history cap raised to 30
+
+`RICH_HISTORY_MAX_LINES` was 20, now **30**.  
+History line label changed from `"nivel"` to `"iter"`: format is now `"{date_str} | iter {n} | {memo}"`.
+
+`format_history_for_prompt` gained a `max_items=None` parameter. The image prompt uses `max_items=12` (concise); the caption call uses the full 30.
+
+### 3. Added rich_captions.txt — cap 6
+
+New bounded store: `rich_captions.txt`, `RICH_CAPTIONS_MAX = 6`.
+
+- `append_caption(state_dir, caption)` — collapses newlines to `" / "`, caps at 6 lines.
+- `load_captions(state_dir) -> list[str]`
+- `format_captions_for_prompt(state_dir) -> str` — `""` if empty, newline-joined block otherwise.
+
+`generate_rich_caption` now accepts `recent_captions: str = ""`. When non-empty, injects:
+> `TEXTOS ANTERIORES (NO repitas su estructura, aperturas, insultos ni despedidas — usa vocabulario y coletillas DISTINTAS):\n{recent_captions}`
+
+`RICH_CAPTION_PROMPT` updated to explicitly instruct the model to **VARY** daily: no fixed openings, no fixed insults, invent fresh vocabulary each time.
+
+### 4. run_rich_iteration wiring
+
+Order:
+1. Read `image_history` (last 12 memos), `full_history` (all 30), `recent_captions` (last 6 captions) **before editing**.
+2. Edit image using `image_history`.
+3. Generate caption using `full_history` + `recent_captions` (best-effort).
+4. On caption **success**: `append_history(memo, cap=30)` + `append_caption(caption, cap=6)`.
+5. On caption **failure**: fallback `"🤑 Cada día más rico a vuestra costa"`, nothing appended.
+6. Rename temp → final, save iteration counter.
+
+---
+
+## Test Count
+
+1068 tests pass (+16 new). New: `TestRichCaptions` (9), `TestBuildRichPrompt` rewritten, new `TestRichEditPromptContent` assertions, `format_history_for_prompt` max_items, `TestGenerateRichCaption` recent_captions, `TestRunRichIteration` new integration tests.
+
+
+---
+
+# Decision: Azure Image Moderation — Safe Prompt Framing for Rich-Image
+
+**Date:** 2026-06-17  
+**Agent:** Kanté (Backend Developer)  
+**Files:** `src/worldcup_bot/ai/rich_image.py`, `tests/test_rich_image.py`
+
+## Problem
+
+`gpt-image-2` returned `400 moderation_blocked safety_violations=[sexual]` on the FIRST (single-image) rich-iteration call. Root cause: the `RICH_EDIT_PROMPT` contained the phrase "MANDATORY CHANGES — CLOTHING and OUTFIT: design completely NEW luxury attire — do NOT keep the same clothes or outfit from the input image." Azure's image safety moderator interprets "change the clothing / change the outfit" on a real person's photo as an undressing instruction and flags it as sexual content.
+
+## Decision
+
+Replace all "change/remove/swap/alter clothing/outfit" language with **positive luxury-dressing framing**: instruct the model to *dress* the person in a brand-new, elegant, fully-clothed outfit, never to *remove or change* what they are wearing.
+
+## Verified-Safe Wording (live-tested by coordinator, msgs 523/524)
+
+**`RICH_EDIT_PROMPT`**  
+> "Transform this photo into a photorealistic image where the person looks wealthier and more glamorous. Keep the EXACT same face, head, skin tone and facial features — the same identity. Dress them in a brand-new, elegant, fully-clothed luxury outfit (for example a tailored designer suit, a tuxedo, a smart blazer or a refined formal coat) — always tasteful and fully clothed. Give them a new confident pose with hands in view. Place them in a new opulent setting and add a few varied signs of wealth (an elegant entourage, a luxury car, a yacht, a private jet, fine jewellery) — a few new touches each time, growing gradually. Classy, elegant, photorealistic."
+
+**`RICH_FACE_ANCHOR_CLAUSE`** (appended when `anchor=True`)  
+> " A second reference image (the ORIGINAL photo) is provided; match the face, skin tone and features EXACTLY to that original. Use the first image only for the wealthy style. Invent a new elegant outfit and a new pose; keep the person fully and tastefully clothed."
+
+## Rules for Future Prompt Edits
+
+1. **Never** use the words "change", "alter", "remove", "swap" in conjunction with "clothing", "outfit", "clothes", or "attire" in a prompt sent to an image-generation model. Azure moderation reads this as undressing on a real person.
+2. **Always** frame the clothing instruction as positive dressing: "dress them in…", "wear…", "outfit them with…", always followed by "fully clothed", "tasteful", "elegant".
+3. Preserve face/skin/features language is safe and required.
+4. Luxury items (entourage, car, yacht, private jet, jewellery) are safe and encouraged.
+
+
+---
+
+# Decision: Rich Photo Folder Gitignore Pattern
+
+**Date:** 2026-06-17T17:05:00+02:00  
+**Agent:** Maldini (DevOps)  
+**Requested by:** David (@DrDonoso)
+
+## Problem Statement
+
+The rich-image feature (daily image generation with base photo) reads `data/rich/rich_original.jpg` at runtime. This is a PERSONAL photo, and the repo is PUBLIC on GitHub, so the photo must NEVER be committed. However, the `data/rich/` folder must exist in the repo structure (it's mounted via `./data:/app/data:ro` in docker-compose) so that deployment can locate the photo on the production server.
+
+## Solution
+
+Mirror the existing `data/tongo_gifs/` pattern in `.gitignore`:
+
+1. **Edit `.gitignore`:** Added a two-line commented block after the tongo_gifs section:
+   ```
+   # Personal base image for the daily 'rich' feature — drop rich_original.jpg into data/rich/ on the server (mounted, not committed).
+   data/rich/*
+   !data/rich/.gitkeep
+   ```
+
+2. **Create `data/rich/.gitkeep`:** Empty file ensures the folder is tracked by git without tracking the photo itself.
+
+## Verification
+
+- `git status --porcelain data/rich` → Shows `?? data/rich/` (untracked folder; only .gitkeep is present).
+- `git check-ignore -v data/rich/rich_original.jpg` → Returns `.gitignore:33:data/rich/*	data/rich/rich_original.jpg`, confirming the photo is correctly ignored.
+
+## Rationale
+
+- **Consistency:** Identical pattern to `data/tongo_gifs/` (runtime media, git-ignored, folder tracked via .gitkeep).
+- **Deployment:** Folder structure is preserved in the repo; ops mount it read-only and populate `rich_original.jpg` on the server.
+- **Security:** Personal photo stays off the public GitHub repo.
+
+## Status
+
+✅ Complete. Not committed (as instructed).
+
