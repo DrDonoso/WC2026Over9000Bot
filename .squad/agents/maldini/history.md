@@ -64,7 +64,23 @@
 - **Docker caching:** Stable layers (system deps like ffmpeg) go early; frequently-changing layers (Python deps/code) go late. Independent caching of system deps.
 - **Telegram polling conflict:** Only one client per token; kill lingering host pollers before container startup.
 
+## Learnings
+
+### Auto-Changelog Mechanism (2026-06-17)
+- Commit-derived notes via `git log "$RANGE" --no-merges --pretty=format:'%s'`; range from previous release tag to HEAD (`git describe --tags --abbrev=0`).
+- Internal-commit filtering: drop `.squad:` (Scribe memory commits), `docs: update changelog` (auto-commit loop prevention), `Merge ` (merge commits), `chore:` (non-user-facing). Pattern `'^\.squad:'` matches literal leading dot via BRE `\.`.
+- Conventional-commit prefix stripping with `sed -E 's/^(feat|fix|perf|refactor|docs)(\([^)]+\))?: //'` for readability; plain imperative subjects pass through unchanged.
+- Marker-based insertion: `sed -i "/<!-- releases -->/r new_entry.md"` reliably inserts newest entry first after the `<!-- releases -->` marker, avoids shell-quoting pain of awk `-v` with multiline values.
+- Loop prevention: `[skip ci]` in the auto-commit message prevents GitHub Actions from re-triggering on the changelog push.
+- Notes-file vs generate-notes fallback: when all commits are internal, fallback to `--generate-notes` so the release still has content.
+- Pipefail safety: `{ pipeline } > file || true` wraps the grep/sed chain — `set -eo pipefail` (GitHub Actions default) would abort if any `grep -v` sees empty input; the `|| true` absorbs the non-zero exit code.
+- Race-condition resilience: non-fast-forward push retried once with `git pull --rebase --autostash`; second failure emits a warning and exits 0 rather than failing the entire deploy workflow.
+
 ## Session Summary (2026-06-16T13:46:51Z)
 
 Maldini's daily-update rework (Phases 23–24) verified live on Telegram test group (message #446). All work integrated with Kanté's max_completion_tokens fix and HTML snapshot feature. Docker ownership fix applied; state volume working correctly. Code pending user approval for commit.
+
+## Session Summary (2026-06-17 06:34:32Z — Scribe)
+
+Auto-changelog mechanism (Decision #36) merged into decisions ledger. Inbox file deleted. Feature verified live: CI run 27670280717 succeeded, GitHub Release 20260617 created, CHANGELOG.md auto-updated via commit 59cbad3 with no loop. Gotcha recorded: literal `[skip ci]` token in commit BODY was skipped; workaround = amend + reword. Decisions.md flagged 104KB → manual compaction urgent when entries age past 7 days.
 

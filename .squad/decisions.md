@@ -2221,3 +2221,41 @@ Applied to:
 - 702 baseline → **733 passing** after adding 31 new tests.
 - New file: `tests/test_formatters.py` (25 `bold_person_names` tests).
 - Updated: `test_poll_finished_job.py`, `test_handlers.py`, `test_ai.py`, `test_commentators.py`.
+
+---
+
+## 36. Decision: Auto-Changelog via GitHub Release Workflow
+
+**Author:** Maldini
+**Date:** 2026-06-17
+**Status:** IMPLEMENTED
+
+### Context
+
+The repo had no CHANGELOG.md and the CI workflow used `--generate-notes` (GitHub-generated release notes). The team wanted a human-readable CHANGELOG.md that auto-updates from real commit subjects on every release, with internal Scribe commits filtered out.
+
+### Decision
+
+Added automated CHANGELOG.md maintenance to `.github/workflows/docker-deploy.yml`. A new `CHANGELOG.md` file is created at the repo root with a `<!-- releases -->` marker where entries are inserted newest-first.
+
+### Mechanism
+
+1. **Range detection:** After CalVer (which already runs `git fetch --tags`), `git describe --tags --abbrev=0` finds the previous release tag. Range is `$PREV_TAG..HEAD`; falls back to `HEAD` on first release (no previous tag).
+2. **Commit filtering:** `git log "$RANGE" --no-merges --pretty=format:'%s'` is piped through four `grep -v -i` filters:
+   - `^\.squad:` — Scribe memory commits
+   - `^docs: update changelog` — the auto-commit itself (loop prevention)
+   - `^Merge ` — merge commits
+   - `^chore:` — non-user-facing housekeeping
+3. **Prefix stripping:** `sed -E 's/^(feat|fix|perf|refactor|docs)(\([^)]+\))?: //'` removes conventional-commit prefixes for readability; plain imperative subjects are left unchanged.
+4. **Bullet list:** `sed 's/^/- /'` prefixes each surviving line. Written to `release_notes.md` on disk to avoid multiline-output escaping in `$GITHUB_OUTPUT`.
+5. **Release creation:** `has_notes=true` → `--notes-file release_notes.md`; `has_notes=false` (all commits internal) → fallback `--generate-notes`.
+6. **CHANGELOG insertion:** `sed -i "/<!-- releases -->/r new_entry.md"` appends the `## [VERSION] - DATE` block right after the marker (newest-first). Avoids awk `-v` multiline quoting issues.
+7. **Loop prevention:** Auto-commit uses `[skip ci]` suffix so GitHub Actions skips the push.
+8. **Race resilience:** Non-fast-forward push retried once with `git pull --rebase --autostash`; second failure logs a warning and exits 0 — deploy never fails over the changelog.
+
+### Constraints Honored
+
+- Docker image build/push and CalVer logic untouched.
+- No Python application code or Dockerfile modified.
+- `permissions: contents: write` was already present.
+- `fetch-depth: 0` was already present on checkout.
