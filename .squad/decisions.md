@@ -1,5 +1,7 @@
 # Squad Decisions
 
+⚠️ **MANUAL COMPACTION NEEDED** (141 KB, date-gate cannot fire — all entries same-day)
+
 ## 1. Architecture & Product Design — WorldCup2026Over9000TelegramBot
 
 **Author:** Pirlo (Lead)  
@@ -2856,3 +2858,334 @@ YAML parse: `python -c "import yaml; yaml.safe_load(open('.github/workflows/dock
 ---
 
 
+
+## 43. Decision: Remove dead date= parameter from get_standings
+
+**Date:** 2026-06-17  
+**Author:** Kanté (Backend Developer)  
+**Status:** Applied (not committed)
+
+### Context
+
+The porra-evolution feature (BLOCK 4b) rewrote history reconstruction to use match results directly — zero ?date= API calls. An earlier prototype had added an optional date: str | None = None parameter to FootballDataClient.get_standings() that built a ?date=YYYY-MM-DD query string. No production caller ever passed a date (both ngine.py and handlers.py call get_standings() with no args), making it dead code.
+
+### Decision
+
+Remove the date parameter and all supporting code. Specifically:
+
+1. **pi/client.py** — get_standings() signature simplified; params = {"date": date} if date else None branch removed; docstring updated.
+2. **	ests/test_api_client_date_param.py** — deleted (6 tests, all specific to the dead param).
+3. **	ests/test_history.py** — 	est_no_get_standings_with_date_called renamed to 	est_get_standings_not_called_from_ensure_history; replaced per-call kwargs.get("date") is None loop with ssert_not_called().
+
+### Rationale
+
+- The ?date= path was never wired to any live feature; keeping it creates a misleading API surface and unnecessary test burden.
+- Removing it makes the signature honest: get_standings() always returns current live standings.
+- The replacement assertion (ssert_not_called) is a stronger and clearer guard than the old loop.
+
+### Test result
+
+956 passed (was 962; −6 = deleted date-param tests). All other tests green, no behavior change.
+
+---
+
+## 44. Decision: Rich Image Daily Evolution
+
+**Author:** Kanté (Backend)  
+**Date:** 2026-06-17  
+**Status:** IMPLEMENTED — pending live test once gpt-image-2 key access is granted in LiteLLM.
+
+### Feature
+
+Every day at 11:00 Europe/Madrid, the bot takes a "rich" person image and asks
+gpt-image-2 to edit it: keep the exact same face/identity, but make them progressively
+wealthier. Each iteration overwrites the previous evolved image, so changes accumulate
+over days.
+
+### Key Decisions
+
+#### 1. Data is read-only → iterated image lives in state volume
+./data is mounted :ro (confirmed by Maldini). The base original is
+/app/data/rich/rich_original.jpg. The iteratively-evolved image MUST live in the
+writable state volume at {settings.state_dir}/rich_modified.png. On the first run, the
+base original is used as source; on every subsequent run, the previously-written
+ich_modified.png is used, chaining naturally.
+
+#### 2. Level persistence via small JSON
+A tiny {state_dir}/rich_state.json → {"level": int} tracks the current wealth level.
+load_level returns 0 on missing/corrupt file (safe default). save_level creates the
+directory if needed.
+
+#### 3. Prompt constant lives in i/rich_image.py — easy to find and tweak
+RICH_EDIT_PROMPT (module-level str) holds the base identity-preservation mandate. An
+_ESCALATION_CLAUSES list (indexed by level, 0–9) provides the per-level craziness
+clause. uild_rich_prompt(level) concatenates them. The user only needs to touch
+ich_image.py to adjust the creative direction.
+
+#### 4. Image-specific API credentials with fallback to chat credentials
+Three new env vars: OPENAI_IMAGE_API_KEY, OPENAI_IMAGE_BASE_URL, OPENAI_IMAGE_MODEL.
+If the image-specific key/url are empty, _effective_image_api_key /
+_effective_image_base_url fall back to the chat key/url. This means no new env vars are
+strictly required if both chat and image share the same LiteLLM endpoint.
+
+#### 5. Soft opt-in via image_ai_enabled(settings)
+The job only runs (and is only scheduled) if image_ai_enabled returns True. The job
+never raises — any error is logged and swallowed.
+
+#### 6. ich_image_chat_id — separate from 	elegram_group_id
+Sending the evolved image goes to RICH_IMAGE_CHAT_ID, defaulting to empty (job still
+generates and saves but doesn't send). The porra group and the image recipient can be
+different. For testing, the user sets it to 3041850.
+
+### Blocker (at time of writing)
+
+LiteLLM key access to gpt-image-2 not yet granted — **user is fixing this in LiteLLM**.
+This is NOT a max_tokens issue (images.edit has no token limit). The code is complete;
+the coordinator will run a live 5-iteration test once access is confirmed.
+
+### Files
+
+| File | Change |
+|------|--------|
+| src/worldcup_bot/config.py | +5 settings fields, +3 helpers (image_ai_enabled, _effective_image_api_key, _effective_image_base_url) |
+| src/worldcup_bot/ai/rich_image.py | NEW — RICH_EDIT_PROMPT, uild_rich_prompt, select_base_image, load_level, save_level, dit_rich_image, un_rich_iteration |
+| src/worldcup_bot/__main__.py | +import, +ich_image_job, +scheduling in main() |
+| 	ests/test_rich_image.py | NEW — 52 tests, all green |
+
+---
+
+## 45. Decision: Rich Image Daily Feature — Environment Variable Wiring
+
+**Date:** 2026-06-17 13:55:52Z  
+**Owner:** Maldini (DevOps)  
+**Status:** ✅ COMPLETED  
+**Requester:** David (@DrDonoso)  
+
+### Summary
+
+Wired up five environment variables across docker-compose.yml, docker-compose.local.yml, and .env.example to support Kanté's daily image-generation feature (gpt-image-2 via LiteLLM at 11:00).
+
+### Changes
+
+#### 1. docker-compose.yml (Production)
+
+Added to worldcup-bot service nvironment: block (after DAILY_UPDATE_HOUR):
+
+`yaml
+      # --- Daily 'rich' image evolution (gpt-image-2 via LiteLLM) ---
+      OPENAI_IMAGE_MODEL: "${OPENAI_IMAGE_MODEL:-gpt-image-2}"
+      OPENAI_IMAGE_API_KEY: "${OPENAI_IMAGE_API_KEY:-}"
+      OPENAI_IMAGE_BASE_URL: "${OPENAI_IMAGE_BASE_URL:-}"
+      RICH_IMAGE_HOUR: "${RICH_IMAGE_HOUR:-11}"
+      RICH_IMAGE_CHAT_ID: "${RICH_IMAGE_CHAT_ID:-}"
+`
+
+#### 2. docker-compose.local.yml (Local Development)
+
+Identical 5 vars added to worldcup-bot service nvironment: block.
+
+#### 3. .env.example
+
+Added documentation block:
+
+`ash
+# Optional — Daily 'rich' image evolution via gpt-image-2 (LiteLLM at 11:00 by default).
+# OPENAI_IMAGE_MODEL=gpt-image-2
+# OPENAI_IMAGE_API_KEY=your-litellm-key (if empty, falls back to OPENAI_API_KEY)
+# OPENAI_IMAGE_BASE_URL=https://your-litellm-host/v1 (if empty, falls back to OPENAI_BASE_URL)
+# RICH_IMAGE_HOUR=11 (24h local time; default 11)
+# RICH_IMAGE_CHAT_ID=3041850 (chat ID where the daily image is sent; if empty, image is generated+saved but not sent)
+`
+
+### Implementation Notes
+
+- **Defaults:** OPENAI_IMAGE_MODEL defaults to gpt-image-2; RICH_IMAGE_HOUR defaults to 11 (24h local time).
+- **Optional fallbacks:** OPENAI_IMAGE_API_KEY and OPENAI_IMAGE_BASE_URL fall back to OPENAI_API_KEY and OPENAI_BASE_URL respectively if unset (in-app logic, Kanté owns this).
+- **Test value:** RICH_IMAGE_CHAT_ID example uses 3041850 (David's test chat); empty disables send (image still generated and saved to state volume).
+- **Storage:** Iterated image written to existing ot_state:/app/state named volume. Base image at ./data/rich/rich_original.jpg (existing read-only mount). No new volumes.
+
+### Validation
+
+Both compose files validated cleanly:
+
+`ash
+$ docker compose -f docker-compose.local.yml config -q
+# exit 0
+
+$ docker compose -f docker-compose.yml config -q
+# exit 0 (unset vars produce warnings only; no YAML syntax errors)
+`
+
+### Next Steps
+
+Kanté will add logic to config.py to:
+1. Read these five vars via environment.
+2. Provide safe defaults (already specified above).
+3. Enable the daily image generation job at the specified hour.
+
+**Decision ID:** maldini-rich-image-env  
+**Related:** Kanté's daily image feature (in progress)  
+**Blocked by:** None  
+**Blocking:** Kanté's config.py integration (will receive these via environment)
+
+---
+
+## 18. Decision: Rich-image caption + pose iteration
+
+**Date:** 2026-06-17T15:04:47+02:00  
+**Author:** Kanté (Backend Developer)
+
+### Context
+
+Extended the daily rich-image evolution feature built earlier today.
+
+### Decisions
+
+#### 1. Caption uses the main chat model (multimodal), not the image model key
+
+`generate_rich_caption` uses `settings.openai_api_key` / `settings.openai_base_url` / `settings.openai_model` — not the image-specific variants. Rationale: the caption is a text-generation task sent to a multimodal chat endpoint (GPT-5.4 / LiteLLM). The image model key is for `images.edit` only.
+
+#### 2. Temp-rename pattern preserves OLD image for before/after comparison
+
+`run_rich_iteration` writes new PNG bytes to `{state_dir}/rich_modified.new.png` **before** replacing the old `rich_modified.png`. This keeps the OLD image alive so it can be base64-encoded and sent to the caption model. Only after the caption is generated is the temp atomically renamed via `os.replace`. If the old final exists it is removed first (Windows `os.replace` compatibility).
+
+#### 3. Destination is `telegram_group_id` — `RICH_IMAGE_CHAT_ID` removed entirely
+
+`rich_image_chat_id` setting and `RICH_IMAGE_CHAT_ID` env var removed. The photo is sent to `settings.telegram_group_id` (the same group used for goal notifications and daily updates). Sending to a separate chat_id was an unnecessary surface area.
+
+#### 4. LiteLLM rejects legacy `max_tokens` — use `max_completion_tokens`
+
+`generate_rich_caption` uses `max_completion_tokens=300` (not `max_tokens`). The user's LiteLLM proxy rejects the legacy parameter.
+
+#### 5. Caption is best-effort — never fatal
+
+If the main chat is not configured (any of `openai_api_key`, `openai_base_url`, `openai_model` is empty) or if the caption API call fails, `run_rich_iteration` falls back silently to `🤑 Nivel de riqueza {level}` (with a `log.warning` on API failure). The image is always written.
+
+#### 6. `_caption_client` and `_client` are independent injectables
+
+Tests can mock image editing and caption generation independently. This keeps unit tests fast and reliable without network calls.
+
+---
+
+## 19. Decision: Rich Image — Bounded Text History, JSON Caption+Memo, History in Both Generators
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-17  
+**Status:** IMPLEMENTED — 1052 tests green (+26)
+
+### Context
+
+The live E2E confirmed that rich-image captions and images work, but after a few days items started repeating (Rolls, yacht, same vacations). The user requested a persisted text history fed to both generators to avoid repetition, plus richer image composition variation.
+
+### Decisions
+
+#### 1. Bounded plain-text history — `rich_history.txt`, cap 20 lines
+
+A plain-text file at `{state_dir}/rich_history.txt` accumulates one line per successful iteration:
+```
+{date_str} | nivel {level} | {memo}
+```
+After every append, the file is truncated to keep only the **last 20 lines** (`RICH_HISTORY_MAX_LINES = 20`). This bounds the token cost injected into prompts while preserving enough context to avoid repetition across several weeks.
+
+- `append_history(state_dir, date_str, level, memo)` — appends + truncates; skips if memo is empty/whitespace.
+- `load_history_lines(state_dir) -> list[str]` — returns stripped non-blank lines, [] if missing/corrupt.
+- `format_history_for_prompt(state_dir) -> str` — bullet-list with "- " prefix, or "" if empty.
+
+#### 2. Caption returns JSON `{"caption": "...", "memo": "..."}`
+
+`generate_rich_caption(...)` now returns `tuple[str, str]` = (caption, memo):
+
+- The model is instructed to return **only** a JSON object.
+- On successful parse: returns (caption, memo).
+- On any JSON parse failure: returns (raw_stripped_text, "") — feature never breaks.
+- Code-fence stripping handles ` ```json ... ``` ` wrapper the model may add.
+- `max_completion_tokens` raised from 300 → 500 to accommodate JSON overhead.
+- API/transport errors still raise RuntimeError (caller handles fallback).
+
+#### 3. Context: person rigs our porra
+
+`RICH_CAPTION_PROMPT` updated to make explicit that:
+- The person is getting rich by **rigging the group's porra** (amañando la porra del grupo).
+- Tone stays chulesco/prepotente/burlón but from the position of cheating-the-group superiority.
+
+#### 4. History fed to BOTH generators
+
+In `run_rich_iteration`:
+1. `history = format_history_for_prompt(settings.state_dir)` (previous days).
+2. `build_rich_prompt(level, history)` — when history non-empty, appends "Previously shown across past days (introduce NEW, different luxuries/scenes/people; do NOT repeat these): {history}".
+3. `generate_rich_caption(..., history=history)` — when history non-empty, user message includes "YA HAS PRESUMIDO DE ESTO ANTES — NO lo repitas:\n{history}".
+4. `append_history(state_dir, date_str, level, memo)` persists the new memo after caption.
+
+#### 5. Image composition variation — CHANGE A
+
+`RICH_EDIT_PROMPT` updated to explicitly ENCOURAGE:
+- Freely changing the person's **POSTURE and POSE**.
+- Bringing **HANDS** into view with gestures (holding objects, arms open, pointing, etc.).
+- **INCLUDING OTHER PEOPLE** around the main subject (entourage, friends, staff, models, guests, bodyguards) — only the MAIN subject's identity must be preserved.
+
+### Files Changed
+
+- `src/worldcup_bot/ai/rich_image.py` — all changes above
+- `tests/test_rich_image.py` — +26 tests (1052 total, up from 1026)
+
+---
+
+## 20. Consolidate Rich Image Destination to TELEGRAM_GROUP_ID
+
+**Decision ID:** maldini-remove-rich-chat-id  
+**Date:** 2026-06-17T15:07:58Z  
+**Agent:** Maldini (DevOps)  
+**Requested by:** David (@DrDonoso)
+
+### Problem
+
+The rich-image daily feature had previously been wired to send images to a separate `RICH_IMAGE_CHAT_ID`. The destination is now consolidated: images go to the existing `TELEGRAM_GROUP_ID` (the shared group). The `RICH_IMAGE_CHAT_ID` env var is no longer needed.
+
+### Decision
+
+Remove `RICH_IMAGE_CHAT_ID` from environment configuration entirely. Keep the other 4 image-generation vars (`OPENAI_IMAGE_MODEL`, `OPENAI_IMAGE_API_KEY`, `OPENAI_IMAGE_BASE_URL`, `RICH_IMAGE_HOUR`).
+
+### Changes
+
+#### Files Modified
+
+1. **docker-compose.yml** (prod)
+   - Removed `RICH_IMAGE_CHAT_ID: "${RICH_IMAGE_CHAT_ID:-}"` from `worldcup-bot` service environment block.
+   - Kept 4 image vars: `OPENAI_IMAGE_MODEL`, `OPENAI_IMAGE_API_KEY`, `OPENAI_IMAGE_BASE_URL`, `RICH_IMAGE_HOUR`.
+
+2. **docker-compose.local.yml** (dev)
+   - Removed `RICH_IMAGE_CHAT_ID: "${RICH_IMAGE_CHAT_ID:-}"` from `worldcup-bot` service environment block.
+   - Kept 4 image vars (same as prod).
+
+3. **.env.example**
+   - Removed `RICH_IMAGE_CHAT_ID=3041850` line.
+   - Removed explanatory comment: "chat ID where the daily image is sent; if empty, image is generated+saved but not sent".
+   - Updated section comment from "Daily 'rich' image evolution" to clarify: "Image is sent to TELEGRAM_GROUP_ID."
+
+### Validation
+
+Both compose files parse cleanly after changes:
+```
+docker compose -f docker-compose.local.yml config -q   # exit 0
+docker compose -f docker-compose.yml config -q          # exit 0
+```
+
+### Rationale
+
+- Simplifies configuration: one group ID instead of two.
+- Reduces env-var surface: fewer optional vars to document and manage.
+- Aligns with Kanté's code logic: image destination is now hardcoded to the group.
+
+### Impact
+
+- ✅ **Dev/test:** No image regression; local compose still builds and validates.
+- ✅ **Prod:** No change in deployment model; Kanté owns runtime logic.
+- ⚠️ **Existing containers:** If `RICH_IMAGE_CHAT_ID` was set in production, it will be ignored (not an issue since feature is new).
+
+### Notes
+
+- No code changes (`config.py` / `src/**` owned by Kanté).
+- No git commit (as requested).
+- History logged in `.squad/agents/maldini/history.md`.
+
+---
