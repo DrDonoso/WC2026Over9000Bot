@@ -29,6 +29,20 @@ Possession: Portugal 58%, Congo DR 42%
 Shots: Portugal 14, Congo DR 4
 """
 
+_REAL_THREAD_SAMPLE_WITH_LINEUP = """\
+Starting XI
+
+Portugal: Diogo Costa / Gonçalo Inácio / João Neves / Nuno Mendes 🔄 off 72' / Vitinha 🔄 off 83'
+Congo DR: Masuaku / Wissa
+
+**MATCH EVENTS** | via ESPN
+**6'** ⚽ **Goal! Portugal 1, Congo DR 0. João Neves...**
+**45'** 🔄 Substitution, Portugal. Francisco Conceição replaces Bernardo Silva.
+
+**MATCH STATS** | via ESPN
+Possession: Portugal 58%, Congo DR 42%
+"""
+
 _SAMPLE_EVENTS_JSON = """\
 {
   "minute": "71",
@@ -45,6 +59,19 @@ _SAMPLE_EVENTS_JSON = """\
     {"minute": "57", "team": "Congo DR", "in": "Noah Sadiki", "out": "Ngal'ayel Mukau"},
     {"minute": "71", "team": "Portugal", "in": "Rafael Leão", "out": "Pedro Neto"}
   ]
+}
+"""
+
+_SAMPLE_EVENTS_WITH_LINEUP_JSON = """\
+{
+  "minute": "45",
+  "goals": [{"minute": "6", "team": "Portugal", "scorer": "João Neves"}],
+  "cards": [],
+  "subs": [{"minute": "45", "team": "Portugal", "in": "Francisco Conceição", "out": "Bernardo Silva"}],
+  "lineup": {
+    "home": ["Diogo Costa", "Gonçalo Inácio", "João Neves", "Francisco Conceição"],
+    "away": ["Masuaku", "Wissa"]
+  }
 }
 """
 
@@ -68,12 +95,12 @@ class TestTrimEventsRegion:
     def test_no_marker_returns_head(self):
         text = "a" * 10000
         trimmed = _trim_events_region(text)
-        assert len(trimmed) <= 6000
+        assert len(trimmed) <= 8000
 
-    def test_capped_at_6000(self):
-        events_section = "MATCH EVENTS\n" + ("x" * 8000)
+    def test_capped_at_8000(self):
+        events_section = "MATCH EVENTS\n" + ("x" * 10000)
         trimmed = _trim_events_region(events_section)
-        assert len(trimmed) <= 6000
+        assert len(trimmed) <= 8000
 
     def test_includes_context_before_marker(self):
         prefix = "preamble text " * 5
@@ -81,6 +108,17 @@ class TestTrimEventsRegion:
         trimmed = _trim_events_region(text)
         assert "MATCH EVENTS" in trimmed
         assert "⚽ Goal!" in trimmed
+
+    def test_includes_starting_xi_section(self):
+        trimmed = _trim_events_region(_REAL_THREAD_SAMPLE_WITH_LINEUP)
+        assert "Starting XI" in trimmed
+        assert "Diogo Costa" in trimmed
+
+    def test_anchors_on_earlier_of_starting_xi_and_match_events(self):
+        trimmed = _trim_events_region(_REAL_THREAD_SAMPLE_WITH_LINEUP)
+        assert "Starting XI" in trimmed
+        assert "MATCH EVENTS" in trimmed
+        assert "MATCH STATS" not in trimmed
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -149,7 +187,13 @@ class TestExtractMatchEvents:
         ai = MagicMock()
         ai.complete = AsyncMock(return_value="No sé nada de este partido, perdona.")
         result = await extract_match_events(ai, "thread", "Portugal", "Congo DR")
-        assert result == {"minute": None, "goals": [], "cards": [], "subs": []}
+        assert result == {
+            "minute": None,
+            "goals": [],
+            "cards": [],
+            "subs": [],
+            "lineup": {"home": [], "away": []},
+        }
 
     @pytest.mark.asyncio
     async def test_ai_raises_returns_empty_structure(self):
@@ -157,7 +201,13 @@ class TestExtractMatchEvents:
         ai = MagicMock()
         ai.complete = AsyncMock(side_effect=AIError("api failure"))
         result = await extract_match_events(ai, "thread", "Portugal", "Congo DR")
-        assert result == {"minute": None, "goals": [], "cards": [], "subs": []}
+        assert result == {
+            "minute": None,
+            "goals": [],
+            "cards": [],
+            "subs": [],
+            "lineup": {"home": [], "away": []},
+        }
 
     @pytest.mark.asyncio
     async def test_never_raises_on_any_exception(self):
@@ -210,8 +260,33 @@ class TestExtractMatchEvents:
         assert result["minute"] is None
 
     @pytest.mark.asyncio
-    async def test_max_completion_tokens_is_900(self):
+    async def test_max_completion_tokens_is_1200(self):
         ai = MagicMock()
         ai.complete = AsyncMock(return_value=_SAMPLE_EVENTS_JSON)
         await extract_match_events(ai, "thread", "Portugal", "Congo DR")
-        assert ai.complete.call_args.kwargs["max_completion_tokens"] == 900
+        assert ai.complete.call_args.kwargs["max_completion_tokens"] == 1200
+
+    @pytest.mark.asyncio
+    async def test_lineup_returned_in_result(self):
+        ai = MagicMock()
+        ai.complete = AsyncMock(return_value=_SAMPLE_EVENTS_WITH_LINEUP_JSON)
+        result = await extract_match_events(ai, _REAL_THREAD_SAMPLE_WITH_LINEUP, "Portugal", "Congo DR")
+        assert result["lineup"] == {
+            "home": ["Diogo Costa", "Gonçalo Inácio", "João Neves", "Francisco Conceição"],
+            "away": ["Masuaku", "Wissa"],
+        }
+
+    @pytest.mark.asyncio
+    async def test_lineup_empty_fallback(self):
+        ai = MagicMock()
+        ai.complete = AsyncMock(return_value=_SAMPLE_EVENTS_JSON)
+        result = await extract_match_events(ai, _REAL_THREAD_SAMPLE_WITH_LINEUP, "Portugal", "Congo DR")
+        assert result["lineup"] == {"home": [], "away": []}
+
+    @pytest.mark.asyncio
+    async def test_never_raises_always_has_lineup_key(self):
+        ai = MagicMock()
+        ai.complete = AsyncMock(side_effect=RuntimeError("boom"))
+        result = await extract_match_events(ai, "thread", "X", "Y")
+        assert "lineup" in result
+        assert result["lineup"] == {"home": [], "away": []}

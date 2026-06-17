@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from worldcup_bot.bot.formatters import bold_person_names
+from worldcup_bot.bot.formatters import bold_person_names, render_endirecto
 
 
 class TestBoldPersonNames:
@@ -289,3 +289,123 @@ class TestFormatLiveMatchDetail:
         result = format_live_match_detail(m, {})
         assert "🔴 EN DIRECTO" in result
         assert "Portugal" in result
+
+
+_MINIMAL_SNAP = {
+    "token": "abc12345",
+    "match_id": 1,
+    "minute": "71",
+    "home_name": "Portugal",
+    "away_name": "Congo DR",
+    "home_tla": "POR",
+    "away_tla": "COD",
+    "home_score": 1,
+    "away_score": 1,
+    "goals": [
+        {"minute": "6", "team": "Portugal", "scorer": "João Neves"},
+        {"minute": "45+5", "team": "Congo DR", "scorer": "Yoane Wissa"},
+    ],
+    "cards": [{"minute": "13", "team": "Portugal", "player": "Bernardo Silva", "type": "yellow"}],
+    "subs": [{"minute": "71", "team": "Portugal", "in": "Rafael Leão", "out": "Pedro Neto"}],
+    "lineup": {"home": ["Diogo Costa", "Gonçalo Inácio"], "away": ["Masuaku", "Wissa"]},
+    "revealed": [],
+    "created": 0.0,
+}
+
+
+class TestRenderEndirecto:
+    def test_revealed_empty_has_header_and_goals(self):
+        text, _ = render_endirecto(dict(_MINIMAL_SNAP))
+        assert "🔴 EN DIRECTO" in text
+        assert "⚽ Goles" in text
+        assert "João Neves" in text
+        assert "🟨 Tarjetas" not in text
+        assert "👥 Alineación" not in text
+        assert "🔄 Cambios" not in text
+
+    def test_revealed_empty_has_3_buttons(self):
+        _, kb = render_endirecto(dict(_MINIMAL_SNAP))
+        assert len(kb) == 1
+        assert len(kb[0]) == 3
+
+    def test_goals_always_shown_regardless_of_revealed(self):
+        snap = dict(_MINIMAL_SNAP)
+        snap["revealed"] = ["tarjetas"]
+        text, _ = render_endirecto(snap)
+        assert "⚽ Goles" in text
+
+    def test_fixed_order_tarjetas_before_alineacion_before_cambios(self):
+        snap = dict(_MINIMAL_SNAP)
+        snap["revealed"] = ["tarjetas", "alineacion", "cambios"]
+        text, _ = render_endirecto(snap)
+        assert text.index("⚽ Goles") < text.index("🟨 Tarjetas") < text.index("👥 Alineación actual") < text.index("🔄 Cambios")
+
+    def test_cambios_first_then_tarjetas_still_fixed_order(self):
+        snap = dict(_MINIMAL_SNAP)
+        snap["revealed"] = ["cambios", "tarjetas"]
+        text, _ = render_endirecto(snap)
+        assert text.index("🟨 Tarjetas") < text.index("🔄 Cambios")
+
+    def test_all_revealed_no_keyboard(self):
+        snap = dict(_MINIMAL_SNAP)
+        snap["revealed"] = ["tarjetas", "alineacion", "cambios"]
+        _, kb = render_endirecto(snap)
+        assert kb == []
+
+    def test_no_goals_shows_sin_goles(self):
+        snap = dict(_MINIMAL_SNAP)
+        snap["goals"] = []
+        text, _ = render_endirecto(snap)
+        assert "Sin goles todavía" in text
+
+    def test_minute_in_header(self):
+        text, _ = render_endirecto(dict(_MINIMAL_SNAP))
+        assert "71'" in text
+
+    def test_no_minute_no_prime(self):
+        snap = dict(_MINIMAL_SNAP)
+        snap["minute"] = None
+        text, _ = render_endirecto(snap)
+        assert "None'" not in text
+
+    def test_flags_via_tla(self):
+        text, _ = render_endirecto(dict(_MINIMAL_SNAP))
+        assert "Portugal" in text
+        assert "Congo DR" in text
+
+    def test_score_shown(self):
+        text, _ = render_endirecto(dict(_MINIMAL_SNAP))
+        assert "1-1" in text
+
+    def test_none_score_defaults_to_zero(self):
+        snap = dict(_MINIMAL_SNAP)
+        snap["home_score"] = None
+        snap["away_score"] = None
+        text, _ = render_endirecto(snap)
+        assert "0-0" in text
+
+    def test_callback_data_format(self):
+        _, kb = render_endirecto(dict(_MINIMAL_SNAP))
+        data = [button.callback_data for button in kb[0]]
+        assert data == ["ed|abc12345|t", "ed|abc12345|l", "ed|abc12345|c"]
+
+    def test_tarjetas_shown_when_revealed(self):
+        snap = dict(_MINIMAL_SNAP)
+        snap["revealed"] = ["tarjetas"]
+        text, _ = render_endirecto(snap)
+        assert "🟨 Tarjetas" in text
+        assert "Bernardo Silva" in text
+
+    def test_alineacion_shown_when_revealed(self):
+        snap = dict(_MINIMAL_SNAP)
+        snap["revealed"] = ["alineacion"]
+        text, _ = render_endirecto(snap)
+        assert "👥 Alineación actual" in text
+        assert "Diogo Costa" in text
+
+    def test_cambios_shown_when_revealed(self):
+        snap = dict(_MINIMAL_SNAP)
+        snap["revealed"] = ["cambios"]
+        text, _ = render_endirecto(snap)
+        assert "🔄 Cambios" in text
+        assert "Rafael Leão" in text

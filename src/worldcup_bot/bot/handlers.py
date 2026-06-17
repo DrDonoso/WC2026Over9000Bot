@@ -11,11 +11,12 @@ import asyncio
 import html
 import logging
 import random
+import time
 from pathlib import Path
 
 import requests as _requests
 
-from telegram import InputMediaPhoto, Update
+from telegram import InputMediaPhoto, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from worldcup_bot.api.cache import get_default_cache
@@ -24,6 +25,7 @@ from worldcup_bot.bot.formatters import (
     format_general_ranking,
     format_live_match_detail,
     format_match,
+    render_endirecto,
     format_standings,
     format_user_detail,
     participant_photo_url,
@@ -45,6 +47,12 @@ from worldcup_bot.reddit.clip_store import (
     add_entry as _cs_add_entry,
     goal_token as _goal_token,
     save_clips as _cs_save_clips,
+)
+from worldcup_bot.bot.endirecto_store import (
+    load_snapshot as _ed_load_snapshot,
+    new_token as _ed_new_token,
+    save_snapshot as _ed_save_snapshot,
+    set_revealed as _ed_set_revealed,
 )
 from worldcup_bot.reddit.downloader import MediaDownloader
 from worldcup_bot.reddit.models import GoalEvent
@@ -365,8 +373,7 @@ async def cmd_en_directo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if ai_enabled(settings)
         else None
     )
-
-    blocks: list[str] = []
+    store_path = f"{settings.state_dir}/endirecto.json"
     for m in live[:4]:
         try:
             if ai is not None:
@@ -376,19 +383,37 @@ async def cmd_en_directo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 if permalink:
                     body = await asyncio.to_thread(scanner.get_thread_body, permalink)
                     events = await extract_match_events(ai, body, m.home_name, m.away_name)
-                    blocks.append(format_live_match_detail(m, events, settings.timezone))
-                else:
-                    blocks.append(format_match(m, settings.timezone))
-            else:
-                blocks.append(format_match(m, settings.timezone))
+                    snap = {
+                        "token": _ed_new_token(),
+                        "match_id": m.id,
+                        "minute": events.get("minute"),
+                        "home_name": m.home_name,
+                        "away_name": m.away_name,
+                        "home_tla": m.home_tla,
+                        "away_tla": m.away_tla,
+                        "home_score": m.home_score,
+                        "away_score": m.away_score,
+                        "goals": events.get("goals", []),
+                        "cards": events.get("cards", []),
+                        "subs": events.get("subs", []),
+                        "lineup": events.get("lineup", {"home": [], "away": []}),
+                        "revealed": [],
+                        "created": time.time(),
+                    }
+                    _ed_save_snapshot(store_path, snap)
+                    text, kb = render_endirecto(snap)
+                    await update.message.reply_text(
+                        text,
+                        reply_markup=InlineKeyboardMarkup(kb) if kb else None,
+                    )
+                    continue
+            await update.message.reply_text(format_match(m, settings.timezone))
         except Exception as exc:
             log.warning(
                 "cmd_en_directo enrichment failed for %s vs %s: %s",
                 m.home_name, m.away_name, exc,
             )
-            blocks.append(format_match(m, settings.timezone))
-
-    await update.message.reply_text("\n\n———\n\n".join(blocks))
+            await update.message.reply_text(format_match(m, settings.timezone))
 
 
 async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -736,6 +761,42 @@ async def cmd_ver_gol_callback(
         inflight.discard(token)
 
 
+async def cmd_endirecto_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle /endirecto inline reveal buttons (tarjetas / alineacion / cambios)."""
+    query = update.callback_query
+    try:
+        parts = query.data.split("|", 2)
+        if len(parts) != 3:
+            await query.answer("Datos inválidos.", show_alert=True)
+            return
+        _, token, code = parts
+        _code_map = {"t": "tarjetas", "l": "alineacion", "c": "cambios"}
+        section = _code_map.get(code)
+        if not section:
+            await query.answer("Sección desconocida.", show_alert=True)
+            return
+        settings: Settings = context.bot_data["settings"]
+        store_path = f"{settings.state_dir}/endirecto.json"
+        snap = _ed_set_revealed(store_path, token, section)
+        if snap is None:
+            await query.answer("Datos no disponibles.", show_alert=True)
+            return
+        text, kb = render_endirecto(snap)
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(kb) if kb else None,
+        )
+        await query.answer()
+    except Exception as exc:
+        log.warning("cmd_endirecto_callback: error: %s", exc)
+        try:
+            await query.answer("Error al procesar.", show_alert=True)
+        except Exception:
+            pass
+
+
 # ── /simulagol — test command ─────────────────────────────────────────────────
 
 _FALLBACK_GOAL = GoalEvent(
@@ -974,4 +1035,3 @@ async def cmd_evolucion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception:
         log.exception("cmd_evolucion: error rendering or sending chart")
         await update.message.reply_text("❌ Error al generar el gráfico. Intenta más tarde.")
-

@@ -1,6 +1,7 @@
 """OpenAI-powered live match event extraction from Reddit match threads.
 
-Extracts minute, goals, cards and substitutions from the 'MATCH EVENTS' section
+Extracts minute, goals, cards, substitutions and current lineups from the
+'MATCH EVENTS' section
 of an r/soccer match thread.  Used to enrich /endirecto with live detail that
 football-data.org does not provide on the free tier.
 """
@@ -16,7 +17,7 @@ from worldcup_bot.ai.client import AIClient
 log = logging.getLogger(__name__)
 
 # Maximum characters to send to the LLM (keep token count reasonable)
-_MAX_THREAD_CHARS = 6000
+_MAX_THREAD_CHARS = 8000
 
 # System prompt — uses double-braces for literal JSON braces
 _SYSTEM_TEMPLATE = (
@@ -27,25 +28,36 @@ _SYSTEM_TEMPLATE = (
     '{{"minute": <minuto actual aproximado como string p.ej. "74" o "45+5", o null>, '
     '"goals": [{{"minute": "6", "team": "<nombre equipo>", "scorer": "<jugador>"}}], '
     '"cards": [{{"minute": "13", "team": "<equipo>", "player": "<jugador>", "type": "yellow"}}], '
-    '"subs": [{{"minute": "45", "team": "<equipo>", "in": "<entra>", "out": "<sale>"}}]}}\n'
+    '"subs": [{{"minute": "45", "team": "<equipo>", "in": "<entra>", "out": "<sale>"}}], '
+    '"lineup": {{"home": ["<jugador1>", ...], "away": ["<jugador1>", ...]}}}}\n'
     "Reglas: no inventes información; si no hay datos, listas vacías y minute null; "
     "ordena los eventos por minuto ascendente. "
-    "Para tarjetas: usa 'yellow' para amarilla y 'red' para roja."
+    "Para tarjetas: usa 'yellow' para amarilla y 'red' para roja. "
+    'Para lineup: devuelve el XI actual en el campo (once inicial con cambios '
+    'aplicados: quita jugadores que salieron, añade los que entraron). {home} = '
+    'equipo local, {away} = equipo visitante. Si no puedes determinar el lineup, '
+    'devuelve {{"home": [], "away": []}}.'
 )
 
-_EMPTY_EVENTS: dict = {"minute": None, "goals": [], "cards": [], "subs": []}
+_EMPTY_EVENTS: dict = {
+    "minute": None,
+    "goals": [],
+    "cards": [],
+    "subs": [],
+    "lineup": {"home": [], "away": []},
+}
 
 
 def _trim_events_region(thread_text: str) -> str:
     """Focus the LLM on the MATCH EVENTS region, dropping MATCH STATS noise.
 
-    Anchors on the 'MATCH EVENTS' marker (starting a bit before it), then
+    Anchors on the earlier of the 'Starting XI' or 'MATCH EVENTS' markers, then
     truncates at 'MATCH STATS' if present (removes the stats table).
     Falls back to the head of the post when the marker is absent.
     """
-    marker = thread_text.find("MATCH EVENTS")
-    if marker != -1:
-        start = max(0, marker - 200)
+    markers = [idx for idx in (thread_text.find("Starting XI"), thread_text.find("MATCH EVENTS")) if idx != -1]
+    if markers:
+        start = max(0, min(markers) - 200)
         snippet = thread_text[start:]
         stats_idx = snippet.find("MATCH STATS")
         if stats_idx != -1:
@@ -92,6 +104,26 @@ def _coerce_events(raw: dict) -> dict:
             result.append({k: str(v) if v is not None else "" for k, v in item.items()})
         return result
 
+    def _coerce_lineup(raw_data: dict) -> dict:
+        lineup = raw_data.get("lineup", {})
+        if not isinstance(lineup, dict):
+            return {"home": [], "away": []}
+
+        def _clean(side: str) -> list[str]:
+            players = lineup.get(side, [])
+            if not isinstance(players, list):
+                return []
+            result = []
+            for player in players:
+                if not isinstance(player, str):
+                    continue
+                cleaned = player.strip()
+                if cleaned:
+                    result.append(cleaned)
+            return result
+
+        return {"home": _clean("home"), "away": _clean("away")}
+
     minute = raw.get("minute")
     if minute is not None:
         minute = str(minute).strip() or None
@@ -101,6 +133,7 @@ def _coerce_events(raw: dict) -> dict:
         "goals": _coerce_list("goals", ["minute", "team", "scorer"]),
         "cards": _coerce_list("cards", ["minute", "team", "player", "type"]),
         "subs": _coerce_list("subs", ["minute", "team", "in", "out"]),
+        "lineup": _coerce_lineup(raw),
     }
 
 
@@ -112,7 +145,7 @@ async def extract_match_events(
 ) -> dict:
     """Ask the AI to extract live match events from an r/soccer match thread.
 
-    Returns a dict with keys: minute, goals, cards, subs.
+    Returns a dict with keys: minute, goals, cards, subs, lineup.
     Never raises — returns the empty structure on any failure.
     """
     trimmed = _trim_events_region(thread_text)
@@ -122,7 +155,7 @@ async def extract_match_events(
             system=system,
             user=trimmed,
             temperature=0.0,
-            max_completion_tokens=900,
+            max_completion_tokens=1200,
         )
         parsed = _parse_events_json(raw)
         if not parsed:

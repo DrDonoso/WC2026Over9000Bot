@@ -6,6 +6,7 @@ so no network calls or real files are needed.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,6 +20,7 @@ from worldcup_bot.bot.handlers import (
     _send_ranking_with_top3_photos,
     cmd_actual,
     cmd_clasificacion,
+    cmd_endirecto_callback,
     cmd_en_directo,
     cmd_estadisticas,
     cmd_general,
@@ -414,6 +416,20 @@ class TestBuildAppRegistrations:
 
         assert "listaaciertos" in commands
         assert "listaaciertosactual" in commands
+
+    def test_endirecto_callback_registered(self, fake_settings):
+        r"""A CallbackQueryHandler with pattern ^ed\| must be registered in build_app."""
+        from telegram.ext import CallbackQueryHandler
+        from worldcup_bot.__main__ import build_app
+
+        app = build_app(fake_settings)
+        patterns = []
+        for group_handlers in app.handlers.values():
+            for h in group_handlers:
+                if isinstance(h, CallbackQueryHandler):
+                    patterns.append(getattr(h, "pattern", None))
+        pattern_strs = [str(p.pattern) if hasattr(p, "pattern") else str(p) for p in patterns]
+        assert any("ed" in s and "|" in s for s in pattern_strs)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2147,6 +2163,7 @@ _ENRICHED_EVENTS = {
     "subs": [
         {"minute": "71", "team": "Portugal", "in": "Rafael Leão", "out": "Pedro Neto"},
     ],
+    "lineup": {"home": ["Diogo Costa", "Gonçalo Inácio"], "away": ["Masuaku", "Wissa"]},
 }
 
 
@@ -2187,13 +2204,14 @@ class TestCmdEnDirecto:
             instance = mock_scanner_cls.return_value
             instance.find_match_thread.assert_not_called()
 
+        update.message.reply_text.assert_called_once()
         text = update.message.reply_text.call_args[0][0]
         # format_match output includes the score and live emoji
         assert "Portugal" in text
         assert "Congo DR" in text
 
     @pytest.mark.asyncio
-    async def test_ai_enabled_no_thread_uses_format_match_fallback(self, fake_settings):
+    async def test_ai_enabled_no_thread_uses_format_match_fallback(self, tmp_path):
         """AI enabled but no match thread found → falls back to format_match."""
         settings = Settings(
             telegram_bot_token="t",
@@ -2201,6 +2219,7 @@ class TestCmdEnDirecto:
             openai_api_key="key",
             openai_base_url="http://ai",
             openai_model="gpt-4",
+            state_dir=str(tmp_path),
         )
         update = _make_update()
         context = _make_context(settings)
@@ -2216,12 +2235,13 @@ class TestCmdEnDirecto:
                 with patch("worldcup_bot.bot.handlers.AIClient"):
                     await cmd_en_directo(update, context)
 
+        update.message.reply_text.assert_called_once()
         text = update.message.reply_text.call_args[0][0]
         assert "Portugal" in text
         assert "Congo DR" in text
 
     @pytest.mark.asyncio
-    async def test_ai_enabled_with_thread_returns_enriched_block(self, fake_settings):
+    async def test_ai_enabled_with_thread_returns_enriched_block(self, tmp_path):
         """AI enabled + thread found + extract succeeds → enriched block in reply."""
         settings = Settings(
             telegram_bot_token="t",
@@ -2229,6 +2249,7 @@ class TestCmdEnDirecto:
             openai_api_key="key",
             openai_base_url="http://ai",
             openai_model="gpt-4",
+            state_dir=str(tmp_path),
         )
         update = _make_update()
         context = _make_context(settings)
@@ -2249,14 +2270,16 @@ class TestCmdEnDirecto:
                     ):
                         await cmd_en_directo(update, context)
 
+        update.message.reply_text.assert_called_once()
         text = update.message.reply_text.call_args[0][0]
+        kwargs = update.message.reply_text.call_args.kwargs
         assert "🔴 EN DIRECTO" in text
-        assert "71'" in text
         assert "João Neves" in text
         assert "Yoane Wissa" in text
+        assert kwargs["reply_markup"] is not None
 
     @pytest.mark.asyncio
-    async def test_per_match_exception_falls_back_to_format_match(self, fake_settings):
+    async def test_per_match_exception_falls_back_to_format_match(self, tmp_path):
         """If enrichment raises an exception, falls back to format_match (no crash)."""
         settings = Settings(
             telegram_bot_token="t",
@@ -2264,6 +2287,7 @@ class TestCmdEnDirecto:
             openai_api_key="key",
             openai_base_url="http://ai",
             openai_model="gpt-4",
+            state_dir=str(tmp_path),
         )
         update = _make_update()
         context = _make_context(settings)
@@ -2287,7 +2311,7 @@ class TestCmdEnDirecto:
 
     @pytest.mark.asyncio
     async def test_multiple_matches_joined_by_separator(self, fake_settings):
-        """Multiple live matches are joined by the ——— separator."""
+        """Multiple live matches are sent as separate messages."""
         settings = Settings(
             telegram_bot_token="t",
             football_data_api_key="k",
@@ -2316,7 +2340,161 @@ class TestCmdEnDirecto:
             with patch("worldcup_bot.bot.handlers.RedditMatchScanner"):
                 await cmd_en_directo(update, context)
 
-        text = update.message.reply_text.call_args[0][0]
-        assert "———" in text
-        assert "Portugal" in text
-        assert "France" in text
+        assert update.message.reply_text.call_count == 2
+        assert "Portugal" in update.message.reply_text.call_args_list[0][0][0]
+        assert "France" in update.message.reply_text.call_args_list[1][0][0]
+
+    @pytest.mark.asyncio
+    async def test_ai_enabled_saves_snapshot(self, tmp_path):
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="key",
+            openai_base_url="http://ai",
+            openai_model="gpt-4",
+            state_dir=str(tmp_path),
+        )
+        update = _make_update()
+        context = _make_context(settings)
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+        mock_scanner = MagicMock()
+        mock_scanner.find_match_thread = MagicMock(return_value="/r/soccer/comments/abc/")
+        mock_scanner.get_thread_body = MagicMock(return_value="thread body text")
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.RedditMatchScanner", return_value=mock_scanner):
+                with patch("worldcup_bot.bot.handlers.AIClient"):
+                    with patch(
+                        "worldcup_bot.bot.handlers.extract_match_events",
+                        new=AsyncMock(return_value=_ENRICHED_EVENTS),
+                    ):
+                        await cmd_en_directo(update, context)
+
+        store_path = tmp_path / "endirecto.json"
+        assert store_path.exists()
+        data = __import__("json").loads(store_path.read_text(encoding="utf-8"))
+        assert len(data) == 1
+
+    @pytest.mark.asyncio
+    async def test_ai_disabled_does_not_write_store(self, tmp_path):
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            state_dir=str(tmp_path),
+        )
+        update = _make_update()
+        context = _make_context(settings)
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.RedditMatchScanner"):
+                await cmd_en_directo(update, context)
+
+        assert not (tmp_path / "endirecto.json").exists()
+
+
+def _make_endirecto_callback_update(token: str, code: str) -> MagicMock:
+    update = MagicMock()
+    update.callback_query.data = f"ed|{token}|{code}"
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+    return update
+
+
+class TestCmdEndirectoCallback:
+    @pytest.mark.asyncio
+    async def test_reveal_section_edits_message(self, tmp_path, fake_settings):
+        import json
+
+        settings = replace(fake_settings, state_dir=str(tmp_path))
+        snap = {
+            "token": "abc12345",
+            "match_id": 1,
+            "minute": "71",
+            "home_name": "Portugal",
+            "away_name": "Congo DR",
+            "home_tla": "POR",
+            "away_tla": "COD",
+            "home_score": 1,
+            "away_score": 1,
+            "goals": [{"minute": "6", "team": "Portugal", "scorer": "João Neves"}],
+            "cards": [{"minute": "13", "team": "Portugal", "player": "Bernardo Silva", "type": "yellow"}],
+            "subs": [],
+            "lineup": {"home": ["Diogo Costa"], "away": ["Masuaku"]},
+            "revealed": [],
+            "created": 0.0,
+        }
+        (tmp_path / "endirecto.json").write_text(json.dumps({"abc12345": snap}), encoding="utf-8")
+        update = _make_endirecto_callback_update("abc12345", "t")
+        context = _make_context(settings)
+
+        await cmd_endirecto_callback(update, context)
+
+        update.callback_query.edit_message_text.assert_called_once()
+        assert "🟨 Tarjetas" in update.callback_query.edit_message_text.call_args[0][0]
+        update.callback_query.answer.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_expired_token_answers_alert(self, fake_settings, tmp_path):
+        settings = replace(fake_settings, state_dir=str(tmp_path))
+        update = _make_endirecto_callback_update("deadbeef", "t")
+        context = _make_context(settings)
+
+        await cmd_endirecto_callback(update, context)
+
+        update.callback_query.answer.assert_called_once_with("Datos no disponibles.", show_alert=True)
+
+    @pytest.mark.asyncio
+    async def test_all_revealed_edits_with_no_keyboard(self, tmp_path, fake_settings):
+        import json
+
+        settings = replace(fake_settings, state_dir=str(tmp_path))
+        snap = {
+            "token": "abc12345",
+            "match_id": 1,
+            "minute": "71",
+            "home_name": "Portugal",
+            "away_name": "Congo DR",
+            "home_tla": "POR",
+            "away_tla": "COD",
+            "home_score": 1,
+            "away_score": 1,
+            "goals": [],
+            "cards": [],
+            "subs": [],
+            "lineup": {"home": [], "away": []},
+            "revealed": ["tarjetas", "alineacion", "cambios"],
+            "created": 0.0,
+        }
+        (tmp_path / "endirecto.json").write_text(json.dumps({"abc12345": snap}), encoding="utf-8")
+        update = _make_endirecto_callback_update("abc12345", "t")
+        context = _make_context(settings)
+
+        await cmd_endirecto_callback(update, context)
+
+        assert update.callback_query.edit_message_text.call_args.kwargs["reply_markup"] is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_code_answers_alert(self, fake_settings, tmp_path):
+        settings = replace(fake_settings, state_dir=str(tmp_path))
+        update = _make_endirecto_callback_update("abc12345", "z")
+        context = _make_context(settings)
+
+        await cmd_endirecto_callback(update, context)
+
+        update.callback_query.answer.assert_called_once_with("Sección desconocida.", show_alert=True)
+
+    @pytest.mark.asyncio
+    async def test_never_raises_on_bad_query_data(self, fake_settings, tmp_path):
+        settings = replace(fake_settings, state_dir=str(tmp_path))
+        update = MagicMock()
+        update.callback_query.data = "bad-data"
+        update.callback_query.answer = AsyncMock()
+        update.callback_query.edit_message_text = AsyncMock()
+        context = _make_context(settings)
+
+        await cmd_endirecto_callback(update, context)
+
+        update.callback_query.answer.assert_called_once_with("Datos inválidos.", show_alert=True)

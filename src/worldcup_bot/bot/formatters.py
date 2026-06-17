@@ -12,6 +12,7 @@ from typing import Iterable
 
 import flag as flag_lib
 import pytz
+from telegram import InlineKeyboardButton
 
 from worldcup_bot.api.models import Match, Standing
 from worldcup_bot.data.tla_map import tla_to_iso
@@ -289,6 +290,90 @@ def format_live_match_detail(
             )
 
     return "\n".join(lines)
+
+
+_ED_SECTION_ORDER = ["tarjetas", "alineacion", "cambios"]
+_ED_SECTION_LABELS = {
+    "tarjetas": "🟨 Tarjetas",
+    "alineacion": "👥 Alineación",
+    "cambios": "🔄 Cambios",
+}
+_ED_SECTION_CODES = {"tarjetas": "t", "alineacion": "l", "cambios": "c"}
+
+
+def render_endirecto(snap: dict) -> tuple[str, list]:
+    token = snap.get("token", "")
+    minute = snap.get("minute")
+    home_name = snap.get("home_name", "")
+    away_name = snap.get("away_name", "")
+    home_tla = snap.get("home_tla", "")
+    away_tla = snap.get("away_tla", "")
+    home_flag = team_flag(home_tla)
+    away_flag = team_flag(away_tla)
+    hs = snap.get("home_score")
+    as_ = snap.get("away_score")
+    hs = 0 if hs is None else hs
+    as_ = 0 if as_ is None else as_
+    revealed = set(snap.get("revealed", []))
+
+    lines = ["🔴 EN DIRECTO" + (f" · {minute}'" if minute else "")]
+    lines.append(f"{home_flag} {home_name} {hs}-{as_} {away_name} {away_flag}")
+
+    lines.append("")
+    lines.append("⚽ Goles")
+    goals = snap.get("goals", [])
+    if isinstance(goals, list) and goals:
+        for g in goals:
+            if not isinstance(g, dict):
+                continue
+            lines.append(f"  {g['minute']}' {g['scorer']} ({g['team']})")
+    else:
+        lines.append("  Sin goles todavía")
+
+    if "tarjetas" in revealed:
+        lines.append("")
+        lines.append("🟨 Tarjetas")
+        cards = snap.get("cards", [])
+        if isinstance(cards, list):
+            for c in cards:
+                if not isinstance(c, dict):
+                    continue
+                emoji = "🟥" if c.get("type") == "red" else "🟨"
+                lines.append(f"  {c['minute']}' {emoji} {c['player']} ({c['team']})")
+
+    if "alineacion" in revealed:
+        lines.append("")
+        lines.append("👥 Alineación actual")
+        lineup = snap.get("lineup", {})
+        home_xi = lineup.get("home", []) if isinstance(lineup, dict) else []
+        away_xi = lineup.get("away", []) if isinstance(lineup, dict) else []
+        lines.append(f"{home_flag} {home_name}: {', '.join(home_xi)}")
+        lines.append(f"{away_flag} {away_name}: {', '.join(away_xi)}")
+
+    if "cambios" in revealed:
+        lines.append("")
+        lines.append("🔄 Cambios")
+        subs = snap.get("subs", [])
+        if isinstance(subs, list):
+            for s in subs:
+                if not isinstance(s, dict):
+                    continue
+                lines.append(f"  {s['minute']}' {s['in']} ▶ {s['out']} ({s['team']})")
+
+    text = "\n".join(lines)
+    not_revealed = [section for section in _ED_SECTION_ORDER if section not in revealed]
+    if not not_revealed:
+        return text, []
+    return (
+        text,
+        [[
+            InlineKeyboardButton(
+                _ED_SECTION_LABELS[section],
+                callback_data=f"ed|{token}|{_ED_SECTION_CODES[section]}",
+            )
+            for section in not_revealed
+        ]],
+    )
 
 
 # ── private helpers ───────────────────────────────────────────────────────────

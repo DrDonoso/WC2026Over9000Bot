@@ -27,6 +27,7 @@ from worldcup_bot.bot.handlers import (
     cmd_actual,
     cmd_ayer,
     cmd_clasificacion,
+    cmd_endirecto_callback,
     cmd_en_directo,
     cmd_estadisticas,
     cmd_evolucion,
@@ -758,6 +759,7 @@ def build_app(settings: Settings) -> Application:
         CommandHandler("estadisticas", cmd_estadisticas),
         # "Ver gol" inline button handler
         CallbackQueryHandler(cmd_ver_gol_callback, pattern=r"^vergol:"),
+        CallbackQueryHandler(cmd_endirecto_callback, pattern=r"^ed\|"),
         # Test / utility
         CommandHandler("simulagol", cmd_simula_gol),
         CommandHandler("updatediario", cmd_update_diario),
