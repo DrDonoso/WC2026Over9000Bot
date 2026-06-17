@@ -175,8 +175,34 @@ class TestScorerMatches:
     def test_empty_scorer(self):
         assert _scorer_matches("", "Messi") is False
 
-    def test_partial_last_name(self):
-        assert _scorer_matches("Gyokeres", "Viktor Gyökeres") is False
+    def test_partial_last_name_accent_stripped(self):
+        """Accent-folding makes 'Gyokeres' identical to 'Gyökeres' → match."""
+        assert _scorer_matches("Gyokeres", "Viktor Gyökeres") is True
+
+    def test_surname_initial_goal_wissa(self):
+        """r/soccer 'Surname Initial. goal' format: Wissa Y. goal → Yoane Wissa."""
+        assert _scorer_matches("Wissa Y. goal", "Yoane Wissa") is True
+
+    def test_surname_initial_goal_neves(self):
+        """r/soccer 'Surname Initial. goal' format: Neves J. goal → João Neves."""
+        assert _scorer_matches("Neves J. goal", "João Neves") is True
+
+    def test_full_firstname_lastname_joao_cancelo(self):
+        assert _scorer_matches("João Cancelo", "João Cancelo") is True
+
+    def test_surname_only_against_full_name(self):
+        """Clip has only surname (e.g. 'Gyökeres') vs full target name."""
+        assert _scorer_matches("Gyökeres", "Viktor Gyökeres") is True
+
+    def test_r_initial_goal_format_leao(self):
+        assert _scorer_matches("R. Leão goal", "Rafael Leão") is True
+
+    def test_noise_only_clip_returns_false(self):
+        """After stripping noise 'goal' leaves no tokens → fallback → False."""
+        assert _scorer_matches("goal", "Ronaldo") is False
+
+    def test_truly_different_names_false(self):
+        assert _scorer_matches("Lukaku", "Viktor Gyökeres") is False
 
 
 # ── _match_post ───────────────────────────────────────────────────────────────
@@ -271,6 +297,28 @@ class TestMatchPost:
         )
         result = _match_post(post, "Portugal", "Congo DR", 1, 0, "João Neves", 6)
         assert result == "https://dropr.co/v/3ba063ff"
+
+    def test_wissa_scorer_format_minute_off_by_four(self):
+        """Live bug: 'Wissa Y. goal 49'' must match target (Yoane Wissa, 45').
+
+        Scorer fix is the primary signal (token intersection), minute diff=4 > ±3
+        so minute_ok is False — the scorer fix alone must carry the match.
+        """
+        post = self._post(
+            "Portugal 1 - [1] D.R. Congo - Wissa Y. goal 49'",
+            "https://dropr.co/v/849532d6",
+        )
+        result = _match_post(post, "Portugal", "Congo DR", 1, 1, "Yoane Wissa", 45)
+        assert result == "https://dropr.co/v/849532d6"
+
+    def test_guard_wrong_scorer_and_minute_far_off_returns_none(self):
+        """Different scorer + minute off by more than ±3 must not match."""
+        post = self._post(
+            "Portugal 1 - [1] D.R. Congo - Lukaku 80'",
+            "https://dropr.co/v/999999",
+        )
+        result = _match_post(post, "Portugal", "Congo DR", 1, 1, "Yoane Wissa", 45)
+        assert result is None
 
 
 # ── find_goal_clip ────────────────────────────────────────────────────────────
@@ -555,3 +603,57 @@ class TestFindGoalClipHtmlSearch:
 
         result = find_goal_clip(scanner, "Sweden", "Tunisia", 1, 0, "Isak", 10)
         assert result == "https://streamff.link/v/newclip"
+
+
+class TestFindGoalClipMergeNewListing:
+    """HTML search + /new/ listing are always merged when JSON is unavailable."""
+
+    def test_clip_only_in_new_listing_found_when_html_search_has_unrelated_posts(self):
+        """HTML search returns unrelated posts; matching clip is only in /new/ → still found."""
+        from unittest.mock import patch
+
+        unrelated = {
+            "id": "unrelated1",
+            "title": "Portugal [1] - 0 D.R. Congo - Neves J. goal 5'",
+            "url": "https://dropr.co/v/3ba063ff",
+            "permalink": "/r/soccer/comments/unrelated1/",
+        }
+        cancelo_post = {
+            "id": "cancelo1",
+            "title": "Portugal [2] - 1 D.R. Congo - João Cancelo 55'",
+            "url": "https://streamin.link/v/f5eabdf2",
+            "permalink": "",
+        }
+
+        with (
+            patch("worldcup_bot.reddit.clip_finder._fetch_search_posts", return_value=None),
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_search_posts", return_value=[unrelated]),
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_posts", return_value=[cancelo_post]),
+        ):
+            result = find_goal_clip(
+                MagicMock(), "Portugal", "Congo DR", 2, 1, "João Cancelo", 55
+            )
+
+        assert result == "https://streamin.link/v/f5eabdf2"
+
+    def test_dedupe_same_post_id_in_html_search_and_new_listing(self):
+        """Same post id in both sources → matched exactly once, no crash or duplication."""
+        from unittest.mock import patch
+
+        shared_post = {
+            "id": "dupe123",
+            "title": "Portugal [2] - 1 D.R. Congo - João Cancelo 55'",
+            "url": "https://streamin.link/v/f5eabdf2",
+            "permalink": "/r/soccer/comments/dupe123/",
+        }
+
+        with (
+            patch("worldcup_bot.reddit.clip_finder._fetch_search_posts", return_value=None),
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_search_posts", return_value=[shared_post]),
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_posts", return_value=[shared_post]),
+        ):
+            result = find_goal_clip(
+                MagicMock(), "Portugal", "Congo DR", 2, 1, "João Cancelo", 55
+            )
+
+        assert result == "https://streamin.link/v/f5eabdf2"

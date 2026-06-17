@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from html import unescape
 from urllib.parse import quote_plus
 
@@ -172,18 +173,57 @@ def _extract_media_url(post_url: str) -> str | None:
 
 # ── scorer fuzzy match ─────────────────────────────────────────────────────────
 
+# Words that appear in r/soccer clip scorer fields but are NOT name tokens.
+_SCORER_NOISE = {"goal", "goals", "penalty", "pen", "og", "owngoal", "own"}
+
+
+def _fold(s: str) -> str:
+    """Accent-fold *s*: NFKD-decompose then drop combining marks, lowercase."""
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", s) if unicodedata.category(c) != "Mn"
+    ).lower()
+
 
 def _scorer_matches(clip_scorer: str, target_scorer: str) -> bool:
-    """Return True if clip_scorer is a plausible match for target_scorer."""
+    """Return True if clip_scorer is a plausible match for target_scorer.
+
+    Tolerates r/soccer mixed formats such as "Surname Initial. goal",
+    "Firstname Lastname", accented characters (Gyökeres, João), and
+    added-time minute drift.  Both sides are accent-folded and tokenised;
+    noise words ("goal", "penalty", …) and single-character initials are
+    stripped before comparison.
+    """
     if not clip_scorer or not target_scorer:
         return False
-    cn = clip_scorer.lower().strip()
-    tn = target_scorer.lower().strip()
-    if cn == tn or cn in tn or tn in cn:
+
+    cf = _fold(clip_scorer)
+    tf = _fold(target_scorer)
+
+    # Tokenise into alphanumeric sequences, then strip noise + single-char initials.
+    ct = [
+        t
+        for t in re.findall(r"[a-z0-9]+", cf)
+        if t not in _SCORER_NOISE and len(t) > 1
+    ]
+    tt = [
+        t
+        for t in re.findall(r"[a-z0-9]+", tf)
+        if t not in _SCORER_NOISE and len(t) > 1
+    ]
+
+    if ct and tt:
+        # Any shared name token (surname overlap is sufficient).
+        if set(ct) & set(tt):
+            return True
+        # One cleaned string is a substring of the other.
+        cj, tj = " ".join(ct), " ".join(tt)
+        return cj in tj or tj in cj
+
+    # Fallback when noise-stripping empties a side: plain string comparison.
+    if cf == tf or cf in tf or tf in cf:
         return True
-    # Last-name match
-    clip_last = cn.split()[-1] if cn.split() else cn
-    target_last = tn.split()[-1] if tn.split() else tn
+    clip_last = cf.split()[-1] if cf.split() else cf
+    target_last = tf.split()[-1] if tf.split() else tf
     return clip_last == target_last
 
 
@@ -284,9 +324,9 @@ def _match_post(
     if clip_hs != target_hs or clip_as != target_as:
         return None
 
-    # At least one of: scorer fuzzy-match OR minute within ±2
+    # At least one of: scorer fuzzy-match OR minute within ±3
     scorer_ok = _scorer_matches(clip_scorer, scorer)
-    minute_ok = abs(clip_minute - minute) <= 2
+    minute_ok = abs(clip_minute - minute) <= 3
     if not (scorer_ok or minute_ok):
         return None
 
@@ -327,13 +367,19 @@ def find_goal_clip(
 
     posts = _fetch_search_posts(scanner, search_url)
     if posts is None:
-        log.info("find_goal_clip: JSON search 403/failed, trying HTML search")
-        posts = _fetch_html_search_posts(scanner, home_team, away_team)
-        if not posts:
-            log.info(
-                "find_goal_clip: HTML search empty/failed, falling back to /new/ listing"
-            )
-            posts = _fetch_html_posts(scanner)
+        log.info("find_goal_clip: JSON search 403/failed, using HTML search + /new/ listing")
+        merged: list[dict] = []
+        seen: set[str] = set()
+        for p in (
+            _fetch_html_search_posts(scanner, home_team, away_team)
+            + _fetch_html_posts(scanner)
+        ):
+            pid = p.get("id") or p.get("permalink") or p.get("url")
+            if pid in seen:
+                continue
+            seen.add(pid)
+            merged.append(p)
+        posts = merged
 
     for post in posts:
         media_url = _match_post(
