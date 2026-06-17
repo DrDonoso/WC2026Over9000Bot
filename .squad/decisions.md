@@ -1596,3 +1596,110 @@ The coordinator can write a snapshot directly into `{state_dir}/endirecto.json` 
 
 43 new tests: store (14), match_events (5 new + 5 updated), formatters (17), handlers (7). Final count: 1248 (from 1205).
 
+
+
+## 38. # Decision: Streamff Mirror Fix + Thread-Based Early Goal Detection
+
+**Author:** Kanté (Backend Developer)
+**Date:** 2026-06-17
+**Status:** IMPLEMENTED — 1267 tests green, not yet committed (coordinator live-tests first).
+
+---
+
+## Fix A — streamff.* all route to cdn.streamff.one/{id}.mp4
+
+### Problem
+
+`download()` in `reddit/downloader.py` only matched `streamff.link` and `streamff.com`. Any
+other TLD (`.pro`, `.gg`, `.one`, `.top`, etc.) fell through to yt-dlp, which errors
+"Unsupported URL" because yt-dlp does not support streamff front-ends.
+
+Confirmed LIVE: `https://streamff.pro/v/89b5d5c1` returned 200 + 27 MB video/mp4 from
+`https://cdn.streamff.one/89b5d5c1.mp4` — the id is the same across ALL mirror front-ends.
+
+### Decision
+
+- `STREAMFF_CDN_ID_RE`: `streamff\.(?:com|link)/v/...` → `streamff\.[a-z]+/v/...` — any TLD.
+- Host check in `download()`: explicit `.link`/`.com` OR → `"streamff." in media_url`.
+- CDN URL construction unchanged: `https://cdn.streamff.one/{id}.mp4`.
+
+### Invariant
+
+Any `streamff.*/v/{id}` URL produces the same CDN URL regardless of mirror TLD.
+
+---
+
+## Fix B — Thread-based early goal detection with shared dedup state
+
+### Problem
+
+`poll_goals_job` polls football-data.org every 60 s, introducing lag. The r/soccer match
+thread posts goals in the MATCH EVENTS section sooner. Previous architecture had no way to
+use thread events for notification without risking double-notification when football-data
+later confirmed the same score.
+
+### Decision
+
+#### 1. Shared in-memory score state
+
+`build_app()` pre-loads `live_scores.json` into `app.bot_data["live_scores"]` at startup.
+Both `poll_goals_job` and `poll_thread_goals_job` read/write this SAME dict. When the thread
+job notifies a goal and advances `scores[key]["home"]` to the new value, `poll_goals_job` on
+its next tick computes `diff_scores(stored, match)` against the already-updated value and
+gets `[]` → no second notification.
+
+`poll_goals_job` uses `setdefault` as a backward-compat safety net (for test isolation and
+edge cases where `build_app` didn't run).
+
+#### 2. `_notify_goal` shared helper
+
+Extracted from `_process_goal_delta`'s goal branch:
+```
+async def _notify_goal(match, new_home, new_away, scoring_team, scorer, minute,
+                        settings, context, silent)
+```
+Sends the HTML goal message AND registers the clip-store entry (same token_key formula:
+`f"{match.id}:{scoring_team}:{new_home}-{new_away}"`). Both the football-data path and the
+thread path call this helper.
+
+#### 3. `poll_thread_goals_job` (interval=25s, first=25s)
+
+- Calls `client.get_live_matches()` (IN_PLAY/PAUSED only).
+- `scanner.scan_live_matches(live_matches)` in `asyncio.to_thread`.
+- Matches result to fixture via `(home_tla, away_tla)` lookup.
+- Skips unseeded matches (key absent from shared scores) — avoids startup backlog.
+- Computes thread score as `max(e.home_score)` / `max(e.away_score)` across all events.
+- Only notifies INCREASES strictly above stored score.
+- Passes `event.scorer` directly (no OpenAI call — speed win and simpler).
+- Sorts pending goals by `minute_sort` before notifying.
+- Does NOT handle disallowed goals (leaves those to the football-data poll).
+- Per-match `try/except` + whole-job `try/except` — never crashes.
+
+### Dedup guarantee
+
+Thread updates `scores[key]["home/away"]` in-place before returning. On the next
+`poll_goals_job` tick, `diff_scores(scores[key], match)` returns `[]` because the stored
+value already equals the reported score → no duplicate message.
+
+### Thread scorer advantage
+
+Reddit MATCH EVENTS lines already contain the scorer name (e.g. `Harry Kane 60'`).
+`GoalEvent.scorer` is populated by `parse_goal_events`. The thread path passes this directly
+to `_notify_goal` — no OpenAI call needed. If `event.scorer` is empty, `None` is passed and
+the message still sends (score-only format).
+
+### Files changed
+
+- `src/worldcup_bot/reddit/downloader.py` — Fix A regex + routing
+- `src/worldcup_bot/__main__.py` — `_notify_goal` helper, `poll_goals_job` setdefault,
+  `poll_thread_goals_job` new job, `build_app` live_scores preload, `main()` job registration
+- `tests/test_downloader.py` — 4 new tests
+- `tests/test_poll_thread_goals_job.py` — new file, 11 tests
+- `tests/test_poll_goals_job.py` — 4 new tests
+
+### Test count
+
+- Baseline: 1248
+- Added: 19
+- **Total: 1267 passing**
+
