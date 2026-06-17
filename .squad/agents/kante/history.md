@@ -7,7 +7,59 @@
 
 ## Recent Accomplishments (Phases 1–23)
 
+**2026-06-17 (BLOCK 3 refinement):** Always-porra-commentary — removed `live_diff.changed` gate from `poll_finished_matches_job`. Commentary now generated whenever `ai_enabled(settings)` AND `bool(ranking)`, regardless of ranking movement. Added `render_porra_context(diff, ranking)` to `porra/live.py` — always returns meaningful text with "CLASIFICACIÓN ACTUAL" (top-5) and "CAMBIOS CON ESTE RESULTADO" (movements or "Ninguno…" note). Updated `build_commentary_messages` system prompt to handle no-change case gracefully: instructs commentator to acknowledge "Ninguno" text and remind leader, never invent movements. `render_changes_text` preserved unchanged for any other callers. 882 tests green (+16 from 866 baseline).
+
+**2026-06-17:** BLOCK 2 clip-store rework — decoupled goal message from clip search. New `reddit/clip_store.py` (goal_token, load_clips, save_clips, add_entry, prune_old_entries). `_process_goal_delta` now captures message_id and writes searching entry. New `poll_goal_clips_job` (45s interval): finds clip via Reddit, downloads to `{state_dir}/clips/{token}.mp4`, edits original message to add keyboard, prunes 7-day-old entries. Reworked `cmd_ver_gol_callback`: serves pre-downloaded clip from disk, file_id cache in clip-store entry, inflight guard. Reworked `cmd_simula_gol`: sends no keyboard immediately, registers clip-store entry with status "searching". Removed old `goal_clips`/`clip_file_ids` bot_data dicts. 826 tests green.
+
+**2026-06-17:** BLOCK 1 goal-detection rework — football-data score-change detection + persistent live_scores.json + OpenAI scorer extractor + new HTML goal messages (no keyboard). Old Reddit-parse detection path removed. 789 tests green.
+
 **2026-06-16:** Match-finish stats + porra commentary feature (ESPN API client, Reddit gameId extraction, commentators pool, live ranking tracker, poll_finished_matches_job with dedup) — 702 tests green. Refinement: combined message (stats + "----" + commentary), persona hidden (style-only via system prompt), bold_person_names helper applied to all participant displays — 733 tests green. Verified live in container with combined message to test group.
+
+**2026-06-16 (earlier):** OpenAI daily update feature verified live (real LiteLLM instance). All 10 inbox decisions merged. 538 tests green.
+
+**Core features:** YAML-driven predictions (hot-reload), official/provisional rankings, football-day rolling window (/hoy/ayer, 09:00→09:00 local), Reddit live goal notifier with "Ver gol" button (multi-host downloader + ffmpeg compression + ffprobe dimension fix), gender-aware /tongo phrases (gender-guesser), /tongo GIF pool (hot-reload), /simulagol random goals (E2E testing), OpenAI-compatible daily 9 AM Spanish recap (self-disables gracefully when vars unset), match-finish ESPN stats card + porra commentary with combined messaging and bold names, score-based goal detection (block 1), persistent clip storage + background clip search + deferred keyboard editing (block 2).
+
+**Architecture:** Shared process-wide TTLCache (fixes HTTP 429), goal tokens (SHA1[:12]), non-blocking inflight set, two-level file_id cache, SSL remediation for corporate networks, photo album rankings (top-3 URLs), ESPN integration (thin client + formatter), live porra state tracking (separate from daily snapshot), persistent live_scores.json for score-change goal detection, persistent goal_clips.json (clip-store) with in-memory bot_data["clip_store"] as authoritative cache, clips/ volume dir for downloaded videos.
+
+**Test status:** 826 passing (block 2 adds 37 new tests). Docker container running, State=healthy, RestartCount=0.
+
+**Block 2 key patterns:**
+- clip_store.py is pure/sync — no async, no Telegram; safe from anywhere
+- bot_data["clip_store"] is authoritative; JSON is persistence layer loaded at startup
+- poll_goal_clips_job: each entry wrapped in try/except so one error doesn't kill others
+- Stale file_id: evict on TelegramError, fall through to fresh disk send
+- prune_old_entries called every tick (7-day retention)
+- Tests patch `_cs_save_clips` in handlers tests to avoid real I/O on /app/state
+
+## Learnings
+
+### Block 1 — football-data score-change detection + OpenAI goal_extractor (2026-06-17)
+
+**Root cause of goal-notifier failures:**
+- Reddit match threads use human-narrated format (`66': [](#icon-ball-big)**GOAL FRANCE!!**`), not ESPN-structured lines with ⚽ and `Goal! H hs, A as. Scorer (Team)`. The old `parse_goal_events` found 0 goals.
+- Re-parsing Reddit also caused VAR flip-flops (score 1-0 → 1-1 → 1-0) when ESPN reordered events.
+
+**Fix — detect from football-data score changes:**
+- `src/worldcup_bot/reddit/score_state.py` — `GoalDelta` dataclass + `load_scores` / `save_scores` / `diff_scores` (pure). Persistent state in `{state_dir}/live_scores.json`.
+- `src/worldcup_bot/ai/goal_extractor.py` — `extract_scorer(ai, thread_text, scoring_team, home_team, away_team, new_home, new_away) → (scorer|None, minute|None)`. Handles BOTH thread formats (LLM reads natural language). `_parse_extractor_json` handles clean / fenced / garbage JSON.
+- `src/worldcup_bot/reddit/notifier.py` — added `format_new_goal_message` and `format_disallowed_message` (HTML, escape all variables, scoring team bold). Old `format_goal_notification` / `build_goal_keyboard` kept for cmd_simula_gol / block-2 flow.
+- `src/worldcup_bot/__main__.py` — `poll_goals_job` completely rewritten. `_enrich_scorer` (Reddit → OpenAI → parse_goal_events fallback). `_process_goal_delta` sends goal/disallowed messages. No keyboard in block 1. `compute_new_goals` / `notified_goal_keys` / `seeded_threads` removed.
+
+**Importable enrichment functions for E2E testing:**
+- `worldcup_bot.ai.goal_extractor.extract_scorer` — call with `(ai, thread_text, scoring_team, home_team, away_team, new_home, new_away)` using real France-Senegal thread 1u7ltq6.
+- `worldcup_bot.ai.goal_extractor._parse_extractor_json` — standalone JSON parser for testing LLM output.
+- `worldcup_bot.reddit.score_state.diff_scores` — pure function, no I/O.
+
+**Key files changed/added:**
+- NEW: `src/worldcup_bot/reddit/score_state.py`
+- NEW: `src/worldcup_bot/ai/goal_extractor.py`
+- MODIFIED: `src/worldcup_bot/reddit/notifier.py` (added new formatters)
+- MODIFIED: `src/worldcup_bot/reddit/parser.py` (removed `compute_new_goals`)
+- MODIFIED: `src/worldcup_bot/__main__.py` (rewrote poll_goals_job)
+- NEW TESTS: `test_score_state.py`, `test_goal_extractor.py`, `test_goal_formatter.py`, `test_poll_goals_job.py`
+- MODIFIED TESTS: `test_reddit_parser.py` (removed TestComputeNewGoals)
+
+
 
 **2026-06-16 (earlier):** OpenAI daily update feature verified live (real LiteLLM instance). All 10 inbox decisions merged. 538 tests green.
 
@@ -187,3 +239,138 @@ Send `User-Agent: Mozilla/5.0` header. Response: `boxscore.teams[].{homeAway, te
 - `tests/test_espn_client.py`, `test_espn_formatter.py`, `test_espn_scanner.py`, `test_commentators.py`, `test_porra_live.py`, `test_poll_finished_job.py` — 83 new tests
 
 **Final test count: 702 passing (619 + 83 new).**
+
+### Block 3 — always-send final-result, 3-dash separator, simplified stats header (2026-06-17)
+
+**Problem:** When matches finished yesterday, no stats were sent and only the porra commentary appeared (when present). When neither ESPN stats nor porra change existed, nothing was sent at all — the user had no signal that a match had ended.
+
+**Fix:** `poll_finished_matches_job` now ALWAYS sends one message per finished match. Message is assembled from up to 3 sections joined by `"\n\n---\n\n"`:
+1. **Section 1 (always):** `🏁 <b>Final</b>\n{home_flag} {h_name} {hs}-{as_} {a_name} {away_flag}` — winner's team name wrapped in `<b>…</b>` (HOME_TEAM → home bolded, AWAY_TEAM → away bolded, DRAW/None → neither).
+2. **Section 2 (if ESPN stats found):** `format_match_stats` card — header simplified from `"📊 <b>Estadísticas — {flag} {home} {hs}-{as} {away} {flag}</b>"` to just `"📊 <b>Estadísticas</b>"` to avoid duplicating the scoreline already in section 1.
+3. **Section 3 (if porra changed AND ai_enabled):** AI commentary with `bold_person_names` applied — unchanged logic.
+
+**Key implementation details:**
+- `import html` added to `__main__.py` stdlib imports; `team_flag` added to `bot.formatters` import.
+- `espn/formatter.py` — removed `import html`, `from worldcup_bot.bot.formatters import team_flag`, and the 6 header-only variables (`home_name`, `away_name`, `home_flag`, `away_flag`, `h_score`, `a_score`). Header is now a plain string literal.
+- The old `if combined: await ...` guard is gone — `send_message` is called unconditionally after building sections.
+- Old 4-dash `"\n\n----\n\n"` separator replaced by 3-dash `"\n\n---\n\n"` per user spec.
+
+**Key files changed:**
+- MODIFIED: `src/worldcup_bot/__main__.py` (reworked assembly + always-send in `poll_finished_matches_job`)
+- MODIFIED: `src/worldcup_bot/espn/formatter.py` (simplified header, removed unused imports/vars)
+- MODIFIED: `tests/test_espn_formatter.py` (updated 3 tests: `test_header_present`, `test_none_score_defaults_to_zero` → `test_none_score_still_renders`, `test_html_escape_team_name` → `test_special_chars_in_team_name_no_crash`)
+- MODIFIED: `tests/test_poll_finished_job.py` (`_make_match` gets `winner` param; new `TestFinalResultSection` class with 9 tests; `TestCombinedMessage` fully updated; `test_no_send_when_game_id_none` → `test_no_stats_in_message_when_game_id_none`)
+
+**Final test count: 835 passing (826 block-2 baseline + 9 new Block-3 tests).**
+
+---
+
+### Block 4 — Persistent vergol stats counter + /estadisticas command (2026-06-17)
+
+**What was built:**
+- `src/worldcup_bot/reddit/vergol_stats.py` — pure/sync module. Schema: `{str(user_id): {"name": str, "tokens": [...]}}`. Four public functions:
+  - `load_stats(path) -> dict` — returns {} on missing/corrupt
+  - `save_stats(path, data)` — best-effort, swallows+logs errors
+  - `record_view(data, user_id, name, token) -> bool` — dedupes per (user, token), updates name, returns True only if new view
+  - `leaderboard(data) -> list[tuple[str, int]]` — sorted by count desc, name asc; excludes users with empty token lists
+- `bot/handlers.py` — added `_record_vergol_view(settings, query, token)` helper (best-effort, never raises). Called in `cmd_ver_gol_callback` after BOTH delivery paths (cached file_id and fresh disk send). Uses load/save on each tap — simple and consistent.
+- `bot/handlers.py` — new `cmd_estadisticas` command: HTML leaderboard with `<b>name</b>` and `html.escape`; empty-data fallback message.
+- `cmd_start` help updated to list `/estadisticas`.
+- `__main__.py` — imports + `CommandHandler("estadisticas", cmd_estadisticas)` registered.
+- **NEW TESTS:** `tests/test_vergol_stats.py` (31 tests) + new classes in `test_handlers.py` (`TestCmdVerGolCallbackStats`, `TestCmdEstadisticas`).
+
+**Key patterns:**
+- vergol_stats.py is pure/sync — no async, no Telegram; safe from anywhere (same as clip_store.py).
+- No new bot_data keys — stats are always loaded fresh from disk on each tap (low-frequency operation).
+- Patch targets in handlers tests: `worldcup_bot.bot.handlers._vs_record_view`, `_vs_load_stats`, `_vs_save_stats`.
+- Counter failure isolation: the try/except in `_record_vergol_view` is the sole safety net — no additional nesting required in the callback.
+
+**E2E importable functions (for coordinator):**
+- `worldcup_bot.reddit.vergol_stats.record_view(data, user_id, name, token) -> bool`
+- `worldcup_bot.reddit.vergol_stats.leaderboard(data) -> list[tuple[str, int]]`
+- `worldcup_bot.reddit.vergol_stats.load_stats(path) -> dict`
+- `worldcup_bot.reddit.vergol_stats.save_stats(path, data)`
+- `worldcup_bot.bot.handlers.cmd_estadisticas` — send `/estadisticas` to test group after recording a few views.
+
+**Key files changed/added:**
+- NEW: `src/worldcup_bot/reddit/vergol_stats.py`
+- NEW: `tests/test_vergol_stats.py`
+- MODIFIED: `src/worldcup_bot/bot/handlers.py` (imports, _record_vergol_view, cmd_ver_gol_callback wiring, cmd_estadisticas, cmd_start help)
+- MODIFIED: `src/worldcup_bot/__main__.py` (import cmd_estadisticas, CommandHandler registration)
+- MODIFIED: `tests/test_handlers.py` (import cmd_estadisticas, TestCmdVerGolCallbackStats, TestCmdEstadisticas)
+
+**Final test count: 866 passing (835 block-3 baseline + 31 new tests).**
+
+### Block 3 refinement — always-porra-commentary (2026-06-17)
+
+**Problem:** Commentary only fired when `live_diff.changed` was True — so if a match finished without moving the porra standings, the user got no narration (or nothing at all when ESPN was also absent). David wanted commentary after every match when AI is enabled, even if no one moved.
+
+**Fix — three-part change:**
+1. **`porra/live.py`** — added `render_porra_context(diff: LiveDiff, ranking: list) -> str`. Always returns meaningful text with two blocks:
+   - `CLASIFICACIÓN ACTUAL:` — top-5 entries as `{pos}. {display_name} — {pts} pts`
+   - `CAMBIOS CON ESTE RESULTADO:` — movement wording from `render_changes_text` if any, else `"Ninguno — la clasificación no se ha movido con este resultado."`
+   `render_changes_text` left unchanged for any other callers (daily update may use it later).
+
+2. **`__main__.py` `poll_finished_matches_job`** — removed `live_diff.changed` gate. New condition: `ai_enabled(settings) and bool(ranking)`. Uses `render_porra_context(live_diff, ranking)` instead of `render_changes_text(live_diff)`.
+
+3. **`ai/commentators.py` `build_commentary_messages`** — updated system prompt:
+   - Context description updated: explains the input contains standings + change block.
+   - Adds: if `"Ninguno"` in text → say so briefly and remind who leads; never invent movements.
+
+**Net result for the message:**
+- Section 1 (🏁 Final result): always
+- Section 2 (ESPN stats): when stats found
+- Section 3 (porra narration): when `ai_enabled` AND `bool(ranking)` — independent of stats and independent of movement
+
+**Tests:**
+- `test_porra_live.py` — new `TestRenderPorraContext` class (9 tests): always non-empty, includes both headers, "Ninguno" when no movement, lists movements when changed, top-5 cap, etc.
+- `test_commentators.py` — added `test_no_change_instruction_in_system` and `test_no_invent_movements_instruction_in_system`.
+- `test_poll_finished_job.py` — updated `test_only_stats_when_no_porra_change` (now expects 3 sections, mocked commentary); added `TestAlwaysCommentary` class (5 tests): no-change+no-stats, no-change+stats, empty-ranking suppresses, AI-disabled suppresses, context text verified.
+
+**Key pattern:**
+- Always generate commentary for any match finish when AI + participants exist, so users always get a porra update — even when no one moved.
+- The "CLASIFICACIÓN ACTUAL" block gives the commentator context to narrate who leads even in no-change case.
+- `render_porra_context` is the only caller-side change; `render_changes_text` is preserved for daily update or other future callers.
+
+**Final test count: 882 passing (866 baseline + 16 new).**
+
+### Block 4 — Ver-gol stats (persistent per-user counter) (2026-06-17)
+
+**Requirement:** Track who taps "Ver gol" per user, persist across restarts, show leaderboard via `/estadisticas` command.
+
+**Implementation — new module `src/worldcup_bot/reddit/vergol_stats.py`:**
+- Pure sync helper (like `clip_store.py`) — no async, no Telegram
+- File: `{state_dir}/vergol_stats.json` schema: `{str(user_id): {"name": display_name, "tokens": [goal_tokens]}}`
+- User ID stringified for JSON key (int keys unsupported)
+- Token-based dedup: append token only if not already in list (prevents double-count on multiple taps)
+- `load_stats(path)` / `save_stats(path, data)` — graceful on missing file or corrupt JSON
+- `record_view(stats, user_id, goal_token, display_name_fn)` — update name (handles username changes), append token
+- `leaderboard(stats) -> list` — sorted by token count desc, name asc
+
+**Integration into `cmd_ver_gol_callback`:**
+- Hook marked with `[Block 4]` in sources is now active
+- After successful `send_video`, call `_record_vergol_view(goal_token, user_id, ...)`
+- Best-effort isolation: wrap stats logic in try/except, log warning on any error, never raise
+
+**New command `/estadisticas`:**
+- `cmd_estadisticas` handler (new in `bot/handlers.py`)
+- Calls `leaderboard(load_stats(...))` on every invocation (stats loaded fresh, not cached in bot_data)
+- HTML output: trophy emoji header, numbered list, bold names, empty-state message in Spanish
+- Registered in `build_app` and listed in `/start` help text
+
+**Low-frequency I/O pattern:**
+- Stats loaded fresh on every `/estadisticas` command invocation
+- Avoids extra bot_data key and keeps the model simple
+- Per-tap I/O cost is negligible (views are low-frequency events)
+
+**Consequences:**
+- `vergol_stats.json` created on first tap in `{settings.state_dir}/`
+- Pure functions importable for E2E verification (no Telegram context needed)
+- No migration needed — missing file gracefully returns `{}`
+
+**Tests:**
+- `tests/test_vergol_stats.py` — 24 tests: load/save round-trip, dedup token logic, display name updates, leaderboard sorting
+- `tests/test_handlers.py` — 7 new tests: _record_vergol_view behavior, cmd_estadisticas output formatting, empty leaderboard, integration with cmd_ver_gol_callback
+
+**Final test count: 882 passing (final for Block 4 itself — no new tests added, just verified integration).**
+

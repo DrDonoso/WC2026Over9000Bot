@@ -2259,3 +2259,372 @@ Added automated CHANGELOG.md maintenance to `.github/workflows/docker-deploy.yml
 - No Python application code or Dockerfile modified.
 - `permissions: contents: write` was already present.
 - `fetch-depth: 0` was already present on checkout.
+
+---
+
+## 37. Decision: Goal Detection Rework — Block 1
+
+**Author:** Kanté (Backend)  
+**Date:** 2026-06-17  
+**Status:** IMPLEMENTED — 789 tests green, not yet committed (coordinator commits at end of multi-block goal).
+
+### Problem
+
+The previous goal notifier detected goals by **parsing Reddit match threads** via `parse_goal_events`, which required the ESPN-structured format:
+```
+⚽ Goal! France 1, Senegal 0. Mbappé (France)
+```
+
+The France-Senegal thread (1u7ltq6) used a **human-narrated format** with no `⚽` emoji and no structured `Goal!` line:
+```
+66': [](#icon-ball-big)**GOAL FRANCE!! ...narrative... _Kylian Mbappé_ ...**
+```
+
+Result: `parse_goal_events` found 0 goals → nothing notified (bug #1).
+
+Additionally, re-parsing Reddit on each tick caused flip-flops (1-0 → 1-1 → 1-0) when ESPN reordered events mid-game (bug #5).
+
+### Decision
+
+**Use football-data.org score changes as the AUTHORITATIVE goal detection source.** Reddit/OpenAI is used ONLY for scorer enrichment.
+
+#### Rationale
+- football-data.org free tier reliably reports `home_score`/`away_score` on `IN_PLAY`/`PAUSED` matches, even though it does not provide scorer or minute.
+- Score changes are monotonic and unambiguous: increase = goal, decrease = VAR disallowed.
+- LLM reads natural language — handles ANY Reddit thread format, not just ESPN-structured.
+- Persistent state survives bot restarts; seed-on-first-sight prevents false positives.
+
+### Implementation
+
+#### New modules
+
+**`src/worldcup_bot/reddit/score_state.py`**
+- `GoalDelta` dataclass: `{side, scoring_team, new_home, new_away, kind: "goal"|"disallowed"}`
+- `load_scores(path) → dict` — reads `{state_dir}/live_scores.json`, returns `{}` on any error (graceful)
+- `save_scores(path, data)` — best-effort, swallows/logs failures
+- `diff_scores(stored, match) → list[GoalDelta]` — pure: `None` stored → seed (return `[]`); increase → goal(s); decrease → disallowed
+
+**`src/worldcup_bot/ai/goal_extractor.py`**
+- `extract_scorer(ai, thread_text, scoring_team, home_team, away_team, new_home, new_away) → (scorer|None, minute|None)`
+- Strict information extractor prompt: "Devuelve ÚNICAMENTE JSON {\"scorer\": ..., \"minute\": ...}". No invention. `null` if not found.
+- `_parse_extractor_json(raw)` — strips ``` fences; returns `(None, None)` on garbage
+- Thread text trimmed to last 6000 chars; uses `max_completion_tokens=100` (not `max_tokens`)
+
+#### Modified modules
+
+**`src/worldcup_bot/reddit/notifier.py`** — added:
+- `format_new_goal_message(scoring_team, home_name, away_name, home_score, away_score, ...)` → HTML, scoring team bold, flag emojis, optional scorer + minute line
+- `format_disallowed_message(home_name, away_name, home_score, away_score, ...)` → HTML VAR message
+- Kept: `format_goal_notification`, `build_goal_keyboard` (used by cmd_simula_gol + block-2 flow)
+
+**`src/worldcup_bot/reddit/parser.py`** — REMOVED `compute_new_goals` (Reddit-parse detection mechanism). Kept `parse_goal_events` as fallback enrichment helper.
+
+**`src/worldcup_bot/__main__.py`** — rewrote `poll_goals_job`:
+- `load_scores(state_path)` each tick (persistent across restarts)
+- `get_all_matches()` (cached); relevant = IN_PLAY/PAUSED or FINISHED-already-tracked
+- First-seen → SEED (no notify)
+- Score change → `_process_goal_delta` → sends HTML message WITHOUT keyboard
+- Enrichment via `_enrich_scorer`: `find_match_thread` → `get_thread_body` → OpenAI `extract_scorer` → `parse_goal_events` fallback → `(None, None)`
+- `save_scores` after any state change
+- Removed: `notified_goal_keys`, `seeded_threads`, `compute_new_goals`, `build_goal_keyboard` usage
+
+### NOT in block 1 (block 2)
+- "Ver gol" inline keyboard on goal messages
+- Clip download / video sending
+- `goal_clips` population from new job
+
+### Tests added (56 new, 789 total)
+- `tests/test_score_state.py` — diff_scores (seed, home goal, away goal, double increase, decrease→disallowed, no change, None scores), load/save round-trip, error handling
+- `tests/test_goal_extractor.py` — `_parse_extractor_json` (clean, fenced, garbage, nulls, empty strings), `extract_scorer` (AI success, AI failure, garbage, trim, temperature, system prompt content)
+- `tests/test_goal_formatter.py` — `format_new_goal_message` (scorer present/absent, flags, bold team, HTML escaping, score, both team names), `format_disallowed_message` (VAR text, score, flags, escaping)
+- `tests/test_poll_goals_job.py` — seed-on-first-sight (no sends), score increase → goal message (no keyboard), state updated, FINISHED-already-tracked catches final goal, FINISHED-not-tracked ignored, VAR disallowed message, persistence called/not-called on changes/no-changes, API error → no save
+- `tests/test_reddit_parser.py` — removed `TestComputeNewGoals` (function deleted)
+
+---
+
+## 38. Decision: Block 2 — Decoupled Clip Search & Persistent Clip Store
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-17  
+**Status:** Implemented, 826 tests green
+
+### Context
+
+Block 1 sent goal messages without a "Ver gol" button. Block 2 decouples the clip search from the goal notification: the goal message fires immediately, then a background job searches Reddit and edits the message to add the button only when the clip is ready.
+
+### Decisions
+
+#### 1. Persistent clip state: `reddit/clip_store.py`
+- File: `{state_dir}/goal_clips.json`. One entry per `token` (SHA1[:12] of a goal key).
+- Entry fields: `chat_id`, `message_id`, `home_name`, `away_name`, `home_tla`, `away_tla`, `home_score`, `away_score`, `scoring_team`, `scorer`, `minute`, `status` ("searching"|"ready"|"timeout"), `clip_path`, `file_id`, `attempts`, `created_at`.
+- `load_clips` / `save_clips` are best-effort (swallow + log on error).
+- `add_entry` initialises status="searching", attempts=0, timestamps.
+- `prune_old_entries` removes entries older than 7 days (prevents volume bloat).
+- **Rationale:** Pure sync module, no async, no Telegram → safe to call anywhere.
+
+#### 2. `bot_data["clip_store"]` as authoritative in-memory dict
+- `build_app` loads `goal_clips.json` into `bot_data["clip_store"]` at startup.
+- Callbacks and jobs mutate this dict; JSON file is persisted after each write.
+- Old `bot_data["goal_clips"]` and `bot_data["clip_file_ids"]` removed entirely.
+- **Rationale:** Single source of truth, survives restart: "ready" entries work immediately (clip_path on disk, file_id cached), "searching" entries resume in background.
+
+#### 3. `_process_goal_delta` captures `message_id`
+- After `send_message` for a goal, captures `sent.message_id` and calls `add_entry` + `save_clips`.
+- Disallowed (VAR) branch returns early — no clip-store entry created.
+
+#### 4. `poll_goal_clips_job` (run_repeating, 45s, first=20s)
+- Iterates "searching" entries. Per entry: `attempts += 1`. If > 25 → "timeout".
+- `find_goal_clip` via `asyncio.to_thread`; `MediaDownloader.download` awaited directly.
+- Downloads to temp file → `compress_if_needed` → `shutil.move` to `{clips_dir}/{token}.mp4`.
+- `probe_video` for dims. Sets `status="ready"`, `clip_path`.
+- `edit_message_reply_markup` to add `build_goal_keyboard(token)`.
+- Each entry wrapped in `try/except` for isolation.
+- `prune_old_entries` called every tick.
+- Scheduled only when `telegram_group_id` is set.
+
+#### 5. Reworked `cmd_ver_gol_callback`
+- Reads from `bot_data["clip_store"]` (not `goal_clips`).
+- Guards: unknown token → show_alert; status != "ready" or no clip_path → "no listo".
+- Inflight guard: `vergol_inflight` set keyed by token.
+- Fast path: `entry["file_id"]` → send by file_id (skip disk read + probe).
+- Stale file_id → evict, fall through to fresh disk send.
+- Fresh send: open `Path(clip_path)`, `probe_video`, `send_video` with `reply_to_message_id`.
+- Cache returned file_id in entry + `save_clips`.
+- TODO [Block 4]: click counter hook marked in source.
+
+#### 6. Reworked `cmd_simula_gol`
+- Sends goal message WITHOUT keyboard.
+- Registers clip-store entry (status="searching") so `poll_goal_clips_job` picks it up.
+- `_cs_save_clips` persists immediately.
+
+#### 7. Clips directory
+- `{state_dir}/clips/` created by `build_app` if missing.
+- Clip files named `{token}.mp4`.
+
+### Key function names (for coordinator E2E)
+- `poll_goal_clips_job` — background job in `__main__.py`
+- `add_entry` / `load_clips` / `save_clips` / `prune_old_entries` — in `reddit/clip_store.py`
+- `cmd_ver_gol_callback` — reworked in `bot/handlers.py`
+- `cmd_simula_gol` — reworked in `bot/handlers.py`
+
+### Test count
+- Baseline (Block 1): 789
+- Block 2 adds: 37 new tests (clip_store: 14, poll_goal_clips_job: 13, poll_goals integration: 2, handlers: 8)
+- **Total: 826 passing**
+
+---
+
+## 39. Decision: Match-finish message always contains a 🏁 Final result section
+
+**Author:** Kanté (Backend)  
+**Date:** 2026-06-17  
+**Status:** IMPLEMENTED — 835 tests green, no commit yet.
+
+### Context
+
+`poll_finished_matches_job` previously sent nothing when ESPN stats were unavailable and the porra ranking did not change. Users reported that finished matches went completely silent — no confirmation that a match had ended.
+
+### Decision
+
+The match-finish message is now assembled from up to **3 sections** joined by `"\n\n---\n\n"` (3-dash separator):
+
+1. **Final result** *(always present)*
+   ```
+   🏁 <b>Final</b>
+   {home_flag} {h_name} {hs}-{as_} {a_name} {away_flag}
+   ```
+   The winning team's name is wrapped in `<b>…</b>` (`match.winner == "HOME_TEAM"` → bold home; `"AWAY_TEAM"` → bold away; `"DRAW"` or `None` → neither). Team names are `html.escape`d.
+
+2. **ESPN stats card** *(only if stats were found)*  
+   Unchanged stat rows. Header simplified from  
+   `"📊 <b>Estadísticas — {flag} {home} {hs}-{as} {away} {flag}</b>"` → `"📊 <b>Estadísticas</b>"`  
+   to avoid duplicating the scoreline already in section 1.
+
+3. **Porra commentary** *(only if `live_diff.changed` AND `ai_enabled`)*  
+   AI-generated text with `bold_person_names` applied — unchanged logic.
+
+`send_message` is called unconditionally (section 1 guarantees a non-empty message).
+
+### Rationale
+
+- Users need immediate feedback that a match has ended, regardless of API availability.
+- The scoreline was duplicated in section 1 (final result) and in the old stats-card header; removing it from the header keeps the card focused on statistics.
+- 3-dash `---` aligns with the separator used in goal notifications; the old 4-dash `----` was inconsistent.
+
+### Files changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/__main__.py` | Added `import html`, `team_flag` import; replaced combine+send logic with section-builder + unconditional send |
+| `src/worldcup_bot/espn/formatter.py` | Simplified header to `"📊 <b>Estadísticas</b>"`; removed unused `html`, `team_flag` imports and 6 header-only variables |
+| `tests/test_espn_formatter.py` | Updated 3 tests to reflect header no longer contains scoreline or team names |
+| `tests/test_poll_finished_job.py` | `_make_match` gains `winner` param; new `TestFinalResultSection` (9 tests); `TestCombinedMessage` fully updated; `test_no_send_when_game_id_none` renamed and inverted |
+
+---
+
+## 40. Decision: Always generate porra commentary on match finish (Block 3 refinement)
+
+**Author:** Kanté (Backend)  
+**Date:** 2026-06-17  
+**Status:** IMPLEMENTED — 882 tests green, not yet committed.
+
+### Problem
+
+`poll_finished_matches_job` only generated porra commentary when `live_diff.changed` was `True`. If a match finished without moving the ranking (or with no ESPN stats), users received either a bare `🏁 Final` result line with no context, or nothing.
+
+### Decision
+
+**Commentary is generated whenever `ai_enabled(settings)` AND `bool(ranking)` — regardless of whether the ranking changed and regardless of whether ESPN stats are available.**
+
+The `live_diff.changed` gate is removed from Part B of `poll_finished_matches_job`.
+
+### Implementation
+
+#### `porra/live.py` — new `render_porra_context`
+
+```python
+def render_porra_context(diff: LiveDiff, ranking: list) -> str:
+    """Always non-empty when ranking exists.
+    Returns CLASIFICACIÓN ACTUAL (top-5) + CAMBIOS CON ESTE RESULTADO blocks.
+    """
+```
+
+- Top-5 standings: `{pos}. {display_name} — {pts:.1f} pts`
+- Changes block: movement wording if `diff.changed`, else `"Ninguno — la clasificación no se ha movido con este resultado."`
+- `render_changes_text` unchanged — preserved for any other callers.
+
+#### `__main__.py` — `poll_finished_matches_job` Part B
+
+Before:
+```python
+if live_diff.changed and ai_enabled(settings):
+    ...
+```
+
+After:
+```python
+if ai_enabled(settings) and bool(ranking):
+    ...
+    context_text = render_porra_context(live_diff, ranking)
+```
+
+#### `ai/commentators.py` — updated system prompt
+
+Extended with per-scenario instructions: explains input always contains current standings + change block; if "Ninguno" appears → acknowledge no change, remind who leads; never invent movements not in the text.
+
+### Net message structure
+
+| Condition | Sections |
+|---|---|
+| No stats, no participants | `🏁 Final` only |
+| No stats, AI disabled | `🏁 Final` only |
+| No stats, AI enabled + participants | `🏁 Final` --- `commentary` |
+| No stats, AI disabled | `🏁 Final` only |
+| Stats, AI enabled + participants | `🏁 Final` --- `stats` --- `commentary` |
+
+### Tests added / changed
+
+- `test_porra_live.py`: `TestRenderPorraContext` (9 tests)
+- `test_commentators.py`: new system-prompt tests (2)
+- `test_poll_finished_job.py`: `TestAlwaysCommentary` (5 tests)
+
+**Test count: 882 (up from 866 baseline).**
+
+---
+
+## 41. Decision: vergol-stats-block4 — Persistent per-user "Ver gol" counter
+
+**Date:** 2026-06-17  
+**Author:** Kanté (Backend Developer)  
+**Block:** 4 (final)
+
+### Context
+
+User requirement #6: a persistent counter of who taps "Ver gol", survived bot restarts, with a `/estadisticas` command showing the leaderboard.
+
+### Decision
+
+#### Module placement
+New file `src/worldcup_bot/reddit/vergol_stats.py` (alongside `clip_store.py`). Both are pure/sync persistence helpers for the goal-notifier subsystem.
+
+#### Schema
+```json
+{
+  "<str(user_id)>": {
+    "name": "<display name>",
+    "tokens": ["<goal token>", ...]
+  }
+}
+```
+Keyed by `str(user_id)` (Telegram user IDs are ints; stringified for JSON key consistency). `tokens` is a list of *distinct* goal tokens. `len(tokens)` = the count shown in `/estadisticas`.
+
+#### Deduplication
+`record_view` only appends a token if it is not already in the list. Multiple taps on the same goal clip by the same user do not inflate the count. Display name is always updated to the latest value (handles username changes).
+
+#### Load-on-tap vs. in-memory cache
+Stats are loaded fresh from disk on every `cmd_ver_gol_callback` invocation. This avoids needing a new `bot_data` key and keeps the data model simple. View events are low-frequency.
+
+#### Best-effort isolation
+`_record_vergol_view` wraps all stats logic in a `try/except Exception`. A disk error, corrupt JSON, or any unexpected failure writes a warning log and returns without raising.
+
+#### `/estadisticas` output
+HTML parse_mode; names wrapped in `<b>` with `html.escape` applied; trophy header; empty-state fallback message in Spanish; numbered leaderboard sorted by count desc, name asc.
+
+#### Registration
+`CommandHandler("estadisticas", cmd_estadisticas)` added to `build_app`. Listed in `/start` help text (normal user command).
+
+### Consequences
+
+- `vergol_stats.json` is created on first tap in `{settings.state_dir}/`.
+- Pure functions (`load_stats`, `save_stats`, `record_view`, `leaderboard`) are importable for E2E verification.
+- No migration needed — missing file returns `{}` gracefully.
+- Test count: 866 passing (31 new tests: 24 in `test_vergol_stats.py` + 7 in `test_handlers.py`).
+
+---
+
+## 42. Decision: CI Trigger Optimization via paths-ignore
+
+**Timestamp:** 2026-06-17T08:35:56Z  
+**Agent:** Maldini (DevOps)  
+**Owner:** DrDonoso  
+**Status:** Applied  
+
+### Summary
+
+Added `paths-ignore` filter to `.github/workflows/docker-deploy.yml` `push` trigger to prevent team memory (`.squad/**`) and auto-changelog (`CHANGELOG.md`) commits from triggering unnecessary Docker builds and GitHub Releases.
+
+### Implementation
+
+**File:** `.github/workflows/docker-deploy.yml`
+
+**Before:**
+```yaml
+on:
+  push:
+    branches:
+      - main
+```
+
+**After:**
+```yaml
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.squad/**'
+      - 'CHANGELOG.md'
+```
+
+### Rationale
+
+- **`.squad/**`:** Team memory (Scribe's decision ledger, agent history, etc.) never affects the bot image; commits here should not trigger CI.
+- **`CHANGELOG.md`:** Auto-generated by the workflow itself on release; the commit is infrastructure-only and already protected by `[skip ci]` flag.
+- **GitHub Actions behavior:** Workflow runs only if ≥1 changed file is NOT in `paths-ignore`. A push touching ONLY these paths is skipped entirely, reducing wasted Docker Hub builds and empty releases.
+- **Code/config changes still trigger:** Any push touching `src/`, `tests/`, `Dockerfile`, `docker-compose*.yml`, `.github/workflows/`, or other infrastructure code will still run the workflow normally.
+
+### Verification
+
+- ✅ Workflow YAML is syntactically valid
+- ✅ `paths-ignore` is correctly nested
+- ✅ No other workflow sections modified
