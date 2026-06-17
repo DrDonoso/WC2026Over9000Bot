@@ -5,6 +5,17 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260617.07] - 2026-06-17
+
+- feat: add /evolucion command that renders a bump chart of each participant's porra ranking across jornadas
+- feat: reconstruct historical group standings from match results grouped by football-day (09:00-09:00 window, aligned with the Mexico/USA/Canada match day) so a "jornada" is one day of matches
+- feat: the latest jornada uses the exact live /actual ranking while past jornadas are reconstructed, so the rightmost point of the chart always matches the current classification
+- feat: build and persist per-jornada snapshots to the state volume at startup (15s after boot) and refresh them daily at 09:05 Europe/Madrid, so the history is ready without recomputing on every command
+- perf: /evolucion reads the cached snapshots from the volume and only recomputes the latest point, keeping the command fast
+- chore: add matplotlib as a dependency for chart rendering (self-contained wheels, no extra system libs)
+- refactor: remove the unused get_standings(date=...) parameter from the football-data client (dead code from the earlier date-based approach)
+
+
 ## [20260617.04] - 2026-06-17
 
 - feat: score-based goal detection — goals are now detected from football-data score changes instead of parsing Reddit, fixing missed goals on human-narrated match threads and the 1-0 → 1-1 → 1-0 flip-flop.
