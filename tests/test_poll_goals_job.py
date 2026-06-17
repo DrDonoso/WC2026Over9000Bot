@@ -398,3 +398,140 @@ class TestClipStoreIntegration:
             await poll_goals_job(ctx)
 
         assert ctx.bot_data["clip_store"] == {}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Shared state: poll_goals_job uses bot_data["live_scores"]
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSharedState:
+    @pytest.mark.asyncio
+    async def test_poll_goals_uses_pre_populated_live_scores(self, tmp_path):
+        """When bot_data['live_scores'] is pre-populated (build_app path), poll_goals uses it."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+
+        # Pre-populate as build_app would
+        shared_scores = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}
+        ctx.bot_data["live_scores"] = shared_scores
+
+        match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
+        fake_sent = MagicMock()
+        fake_sent.message_id = 42
+        ctx.bot.send_message = AsyncMock(return_value=fake_sent)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        # Goal sent and shared dict mutated in-place
+        ctx.bot.send_message.assert_called_once()
+        assert shared_scores["1"]["home"] == 1
+
+    @pytest.mark.asyncio
+    async def test_poll_goals_falls_back_to_load_scores_when_key_absent(self, tmp_path):
+        """When bot_data has no 'live_scores' key, poll_goals_job falls back to load_scores."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+        # Note: no "live_scores" key in bot_data
+
+        match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}) as mock_load,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        # load_scores was called as fallback (setdefault)
+        mock_load.assert_called_once()
+        # Key now populated in bot_data
+        assert "live_scores" in ctx.bot_data
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# _notify_goal helper
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestNotifyGoal:
+    @pytest.mark.asyncio
+    async def test_notify_goal_sends_message_and_registers_clip(self, tmp_path):
+        """_notify_goal: sends goal message AND registers a clip-store entry."""
+        from worldcup_bot.__main__ import _notify_goal
+
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx.bot_data["clip_store"] = {}
+
+        fake_sent = MagicMock()
+        fake_sent.message_id = 55
+        ctx.bot.send_message = AsyncMock(return_value=fake_sent)
+
+        match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
+
+        with patch("worldcup_bot.__main__.save_clips"):
+            await _notify_goal(
+                match=match,
+                new_home=1,
+                new_away=0,
+                scoring_team="France",
+                scorer="Mbappé",
+                minute="35",
+                settings=settings,
+                context=ctx,
+                silent=False,
+            )
+
+        ctx.bot.send_message.assert_called_once()
+        call_kwargs = ctx.bot.send_message.call_args.kwargs
+        assert "⚽" in call_kwargs["text"]
+        assert call_kwargs["parse_mode"] == "HTML"
+
+        clips = ctx.bot_data["clip_store"]
+        assert len(clips) == 1
+        entry = next(iter(clips.values()))
+        assert entry["status"] == "searching"
+        assert entry["message_id"] == 55
+        assert entry["scorer"] == "Mbappé"
+        assert entry["minute"] == "35"
+
+    @pytest.mark.asyncio
+    async def test_notify_goal_token_key_format(self, tmp_path):
+        """_notify_goal token key is {match.id}:{scoring_team}:{new_home}-{new_away}."""
+        from worldcup_bot.__main__ import _notify_goal
+        from worldcup_bot.reddit.clip_store import goal_token
+
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx.bot_data["clip_store"] = {}
+
+        fake_sent = MagicMock()
+        fake_sent.message_id = 1
+        ctx.bot.send_message = AsyncMock(return_value=fake_sent)
+
+        match = _make_match(1, "IN_PLAY", home_name="France", away_name="Senegal", home_score=2, away_score=1)
+
+        expected_token = goal_token("1:France:2-1")
+
+        with patch("worldcup_bot.__main__.save_clips"):
+            await _notify_goal(
+                match=match,
+                new_home=2,
+                new_away=1,
+                scoring_team="France",
+                scorer=None,
+                minute=None,
+                settings=settings,
+                context=ctx,
+                silent=False,
+            )
+
+        assert expected_token in ctx.bot_data["clip_store"]

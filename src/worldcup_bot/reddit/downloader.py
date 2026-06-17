@@ -23,7 +23,7 @@ STREAMFF_VIDEO_RE = re.compile(
     r'(?:source\s+src|file)\s*[=:]\s*["\']?(https?://[^"\'>\s]+\.mp4[^"\'>\s]*)',
     re.IGNORECASE,
 )
-STREAMFF_CDN_ID_RE = re.compile(r"streamff\.(?:com|link)/v/([a-zA-Z0-9]+)")
+STREAMFF_CDN_ID_RE = re.compile(r"streamff\.[a-z]+/v/([a-zA-Z0-9]+)")
 STREAMFF_CDN_BASE = "https://cdn.streamff.one"
 
 STREAMIN_CDN_ID_RE = re.compile(r"streamin\.(?:link|me)/v/([a-zA-Z0-9]+)")
@@ -72,7 +72,7 @@ class MediaDownloader:
         """Download the video at *media_url*; returns local Path or None on failure."""
         dest = self._make_dest(media_url)
 
-        if "streamff.link" in media_url or "streamff.com" in media_url:
+        if "streamff." in media_url:
             result = await asyncio.to_thread(self._download_streamff, media_url, dest)
             if result:
                 return result

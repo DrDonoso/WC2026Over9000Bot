@@ -113,6 +113,30 @@ class TestDownloadStreamff:
         called_url = session.get.call_args[0][0]
         assert called_url == f"{STREAMFF_CDN_BASE}/xyz789.mp4"
 
+    def test_streamff_pro_cdn_id_resolution(self, tmp_path):
+        """`streamff.pro/v/{id}` → CDN URL `cdn.streamff.one/{id}.mp4`."""
+        session = _make_session_for_download()
+        d = MediaDownloader(session=session)
+        dest = tmp_path / "out.mp4"
+
+        result = d._download_streamff("https://streamff.pro/v/89b5d5c1", dest)
+
+        assert result == dest
+        called_url = session.get.call_args[0][0]
+        assert called_url == f"{STREAMFF_CDN_BASE}/89b5d5c1.mp4"
+
+    def test_streamff_gg_cdn_id_resolution(self, tmp_path):
+        """`streamff.gg/v/{id}` → CDN URL `cdn.streamff.one/{id}.mp4`."""
+        session = _make_session_for_download()
+        d = MediaDownloader(session=session)
+        dest = tmp_path / "out.mp4"
+
+        result = d._download_streamff("https://streamff.gg/v/aabbccdd", dest)
+
+        assert result == dest
+        called_url = session.get.call_args[0][0]
+        assert called_url == f"{STREAMFF_CDN_BASE}/aabbccdd.mp4"
+
     def test_page_scrape_fallback_when_no_cdn_id(self, tmp_path):
         """URL with no recognisable id → page-scrape for video source."""
         page_html = """
@@ -301,3 +325,28 @@ class TestYtDlpFallback:
 
         assert result == fake_file
         session.get.assert_not_called()
+
+    async def test_download_routes_streamff_pro_to_streamff_handler(self, tmp_path):
+        """download() with streamff.pro routes to _download_streamff, not yt-dlp."""
+        session = _make_session_for_download(b"videobytes")
+        d = MediaDownloader(session=session)
+
+        result = await d.download("https://streamff.pro/v/89b5d5c1")
+
+        # Session.get was called by _download_streamff for the CDN URL — not yt-dlp
+        assert result is not None
+        called_url = session.get.call_args[0][0]
+        assert "cdn.streamff.one" in called_url
+        assert "89b5d5c1" in called_url
+
+    async def test_download_routes_streamff_gg_to_streamff_handler(self, tmp_path):
+        """download() with streamff.gg routes to _download_streamff, not yt-dlp."""
+        session = _make_session_for_download(b"videobytes")
+        d = MediaDownloader(session=session)
+
+        result = await d.download("https://streamff.gg/v/cafebabe")
+
+        assert result is not None
+        called_url = session.get.call_args[0][0]
+        assert "cdn.streamff.one" in called_url
+        assert "cafebabe" in called_url

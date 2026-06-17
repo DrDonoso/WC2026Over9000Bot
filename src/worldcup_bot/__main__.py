@@ -218,6 +218,69 @@ async def _enrich_scorer(
         return None, None
 
 
+async def _notify_goal(
+    match,
+    new_home: int,
+    new_away: int,
+    scoring_team: str,
+    scorer: str | None,
+    minute: str | None,
+    settings: Settings,
+    context: ContextTypes.DEFAULT_TYPE,
+    silent: bool,
+) -> None:
+    """Send a goal notification and register a clip-store entry.
+
+    Shared by both the football-data poll path and the thread-based early-detection
+    path.  Takes scorer/minute as explicit params so callers can supply their own
+    source (e.g. the thread event's scorer, or the OpenAI-enriched scorer).
+    """
+    text = format_new_goal_message(
+        scoring_team=scoring_team,
+        home_name=match.home_name,
+        away_name=match.away_name,
+        home_score=new_home,
+        away_score=new_away,
+        home_tla=match.home_tla,
+        away_tla=match.away_tla,
+        scorer=scorer,
+        minute=minute,
+    )
+    sent = await context.bot.send_message(
+        chat_id=settings.telegram_group_id,
+        text=text,
+        parse_mode="HTML",
+        disable_notification=silent,
+    )
+    log.info(
+        "Goal notification sent: %s vs %s (%d-%d) scorer=%s minute=%s",
+        match.home_name, match.away_name, new_home, new_away, scorer, minute,
+    )
+
+    # Register a clip-store entry so poll_goal_clips_job can search in the background
+    clips_path = f"{settings.state_dir}/goal_clips.json"
+    clip_data: dict = context.bot_data.setdefault("clip_store", {})
+    token_key = f"{match.id}:{scoring_team}:{new_home}-{new_away}"
+    tok = _cs_goal_token(token_key)
+    _cs_add_entry(
+        clip_data,
+        token=tok,
+        chat_id=settings.telegram_group_id,
+        message_id=sent.message_id,
+        home_name=match.home_name,
+        away_name=match.away_name,
+        home_tla=match.home_tla,
+        away_tla=match.away_tla,
+        home_score=new_home,
+        away_score=new_away,
+        scoring_team=scoring_team,
+        scorer=scorer,
+        minute=minute,
+    )
+    save_clips(clips_path, clip_data)
+    log.debug("Clip-store entry created: token=%s key=%s", tok, token_key)
+
+
 async def _process_goal_delta(
     delta: GoalDelta,
     match,
@@ -249,52 +312,17 @@ async def _process_goal_delta(
         return
 
     scorer, minute = await _enrich_scorer(delta, match, scanner, settings)
-
-    text = format_new_goal_message(
-        scoring_team=delta.scoring_team,
-        home_name=match.home_name,
-        away_name=match.away_name,
-        home_score=delta.new_home,
-        away_score=delta.new_away,
-        home_tla=match.home_tla,
-        away_tla=match.away_tla,
-        scorer=scorer,
-        minute=minute,
-    )
-    sent = await context.bot.send_message(
-        chat_id=settings.telegram_group_id,
-        text=text,
-        parse_mode="HTML",
-        disable_notification=silent,
-    )
-    log.info(
-        "Goal notification sent: %s vs %s (%d-%d) scorer=%s minute=%s",
-        match.home_name, match.away_name, delta.new_home, delta.new_away,
-        scorer, minute,
-    )
-
-    # Record a clip-store entry so poll_goal_clips_job can search in the background
-    clips_path = f"{settings.state_dir}/goal_clips.json"
-    clip_data: dict = context.bot_data.setdefault("clip_store", {})
-    token_key = f"{match.id}:{delta.scoring_team}:{delta.new_home}-{delta.new_away}"
-    tok = _cs_goal_token(token_key)
-    _cs_add_entry(
-        clip_data,
-        token=tok,
-        chat_id=settings.telegram_group_id,
-        message_id=sent.message_id,
-        home_name=match.home_name,
-        away_name=match.away_name,
-        home_tla=match.home_tla,
-        away_tla=match.away_tla,
-        home_score=delta.new_home,
-        away_score=delta.new_away,
+    await _notify_goal(
+        match=match,
+        new_home=delta.new_home,
+        new_away=delta.new_away,
         scoring_team=delta.scoring_team,
         scorer=scorer,
         minute=minute,
+        settings=settings,
+        context=context,
+        silent=silent,
     )
-    save_clips(clips_path, clip_data)
-    log.debug("Clip-store entry created: token=%s key=%s", tok, token_key)
 
 
 # ── polling job ───────────────────────────────────────────────────────────────
@@ -304,7 +332,8 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Repeating job: detect new goals via football-data score changes.
 
     Detection strategy (score-based, block 1):
-    1. Load persistent score state from live_scores.json.
+    1. Use shared in-memory score state from bot_data["live_scores"] (loaded at startup
+       by build_app; setdefault falls back to disk for robustness / test isolation).
     2. Get all matches from football-data.org (cached).
     3. Relevant matches: IN_PLAY / PAUSED, OR FINISHED that we were tracking.
     4. First-seen match → SEED (store current score, notify nothing).
@@ -319,7 +348,10 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         settings: Settings = context.bot_data["settings"]
         state_path = f"{settings.state_dir}/live_scores.json"
 
-        scores: dict = load_scores(state_path)
+        # Use the shared in-memory dict; setdefault is a safety net so tests that
+        # pre-populate bot_data["live_scores"] work, while also falling back to disk
+        # if the key is somehow absent after build_app startup.
+        scores: dict = context.bot_data.setdefault("live_scores", load_scores(state_path))
 
         if context.bot_data.get("reddit_scanner") is None:
             context.bot_data["reddit_scanner"] = RedditMatchScanner(
@@ -401,7 +433,187 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("poll_goals_job: unexpected error (will retry next tick): %s", exc)
 
 
-# ── background clip-search job ────────────────────────────────────────────────
+# ── thread-based early goal detection job ─────────────────────────────────────
+
+
+async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Repeating job: detect goals from Reddit match thread BEFORE football-data reports them.
+
+    Runs every 25 seconds.  Shares bot_data["live_scores"] with poll_goals_job so
+    that when football-data later reports the same score, diff_scores returns []
+    and no duplicate notification is sent.
+
+    Strategy:
+    - Only notifies for matches already seeded by poll_goals_job (key present in
+      shared scores) — avoids notifying a backlog of old goals on startup.
+    - Only notifies INCREASES strictly above the stored score.
+    - Does NOT handle disallowed goals (leave those to the authoritative football-data poll).
+    - Passes the thread event's own scorer directly (no OpenAI call → speed win).
+    """
+    try:
+        settings: Settings = context.bot_data["settings"]
+        state_path = f"{settings.state_dir}/live_scores.json"
+
+        # Shared dict — must already be populated by build_app / poll_goals_job setdefault
+        scores: dict = context.bot_data["live_scores"]
+
+        if context.bot_data.get("reddit_scanner") is None:
+            context.bot_data["reddit_scanner"] = RedditMatchScanner(
+                user_agent=settings.reddit_user_agent
+            )
+        scanner: RedditMatchScanner = context.bot_data["reddit_scanner"]
+
+        client = make_client(settings)
+        try:
+            live_matches = client.get_live_matches()
+        except FootballAPIError as exc:
+            log.warning("poll_thread_goals_job: could not get live matches: %s", exc)
+            return
+
+        if not live_matches:
+            return
+
+        local_tz = pytz.timezone(settings.timezone)
+        now_local = datetime.now(local_tz)
+        silent = _is_silent_hour(now_local)
+
+        try:
+            results = await asyncio.to_thread(scanner.scan_live_matches, live_matches)
+        except Exception as exc:
+            log.exception("poll_thread_goals_job: scan_live_matches failed: %s", exc)
+            return
+
+        # Build a lookup from (home_tla, away_tla) → Match for quick matching
+        match_by_tla: dict[tuple[str, str], object] = {}
+        for m in live_matches:
+            match_by_tla[(m.home_tla, m.away_tla)] = m
+
+        changed = False
+
+        for result in results:
+            try:
+                match = match_by_tla.get((result.home_tla, result.away_tla))
+                if match is None:
+                    log.debug(
+                        "poll_thread_goals_job: no match found for TLAs %s vs %s",
+                        result.home_tla, result.away_tla,
+                    )
+                    continue
+
+                key = str(match.id)
+
+                # Skip unseeded matches — let poll_goals_job seed first to avoid startup backlog
+                if key not in scores:
+                    log.debug(
+                        "poll_thread_goals_job: match %d not yet seeded, skipping", match.id
+                    )
+                    continue
+
+                events = result.events
+                if not events:
+                    continue
+
+                # Thread's current score: max scores seen across all events
+                thread_home = max((e.home_score for e in events), default=0)
+                thread_away = max((e.away_score for e in events), default=0)
+
+                stored_home = int(scores[key].get("home", 0))
+                stored_away = int(scores[key].get("away", 0))
+
+                # Nothing new to notify
+                if thread_home <= stored_home and thread_away <= stored_away:
+                    continue
+
+                sorted_events = sorted(events, key=lambda e: e.minute_sort)
+
+                # Collect all goals to notify (home + away sides), then sort by minute
+                goals_to_notify: list[dict] = []
+
+                for target in range(stored_home + 1, thread_home + 1):
+                    event = next(
+                        (
+                            e for e in sorted_events
+                            if e.home_score == target
+                            and _teams_match(e.scoring_team, match.home_name)
+                        ),
+                        None,
+                    )
+                    goals_to_notify.append({
+                        "scoring_team": match.home_name,
+                        "new_home": target,
+                        "new_away": event.away_score if event else stored_away,
+                        "scorer": event.scorer if event else None,
+                        "minute": event.minute_text if event else None,
+                        "minute_sort": event.minute_sort if event else float("inf"),
+                    })
+
+                for target in range(stored_away + 1, thread_away + 1):
+                    event = next(
+                        (
+                            e for e in sorted_events
+                            if e.away_score == target
+                            and _teams_match(e.scoring_team, match.away_name)
+                        ),
+                        None,
+                    )
+                    goals_to_notify.append({
+                        "scoring_team": match.away_name,
+                        "new_home": event.home_score if event else stored_home,
+                        "new_away": target,
+                        "scorer": event.scorer if event else None,
+                        "minute": event.minute_text if event else None,
+                        "minute_sort": event.minute_sort if event else float("inf"),
+                    })
+
+                # Notify in ascending minute order
+                goals_to_notify.sort(key=lambda g: g["minute_sort"])
+
+                for g in goals_to_notify:
+                    try:
+                        await _notify_goal(
+                            match=match,
+                            new_home=g["new_home"],
+                            new_away=g["new_away"],
+                            scoring_team=g["scoring_team"],
+                            scorer=g["scorer"] or None,
+                            minute=g["minute"],
+                            settings=settings,
+                            context=context,
+                            silent=silent,
+                        )
+                    except Exception as exc:
+                        log.error(
+                            "poll_thread_goals_job: _notify_goal failed for match %d: %s",
+                            match.id, exc,
+                        )
+
+                # Update shared score state to prevent double-notification from football-data
+                scores[key]["home"] = thread_home
+                scores[key]["away"] = thread_away
+                changed = True
+
+                log.info(
+                    "poll_thread_goals_job: match %d (%s vs %s) thread score %d-%d "
+                    "(was %d-%d), %d goal(s) notified",
+                    match.id, match.home_name, match.away_name,
+                    thread_home, thread_away, stored_home, stored_away,
+                    len(goals_to_notify),
+                )
+
+            except Exception as exc:
+                log.exception(
+                    "poll_thread_goals_job: error for match %s vs %s: %s",
+                    result.home_tla, result.away_tla, exc,
+                )
+
+        if changed:
+            save_scores(state_path, scores)
+
+    except Exception as exc:
+        log.exception("poll_thread_goals_job: unexpected error (will retry next tick): %s", exc)
+
+
+
 
 
 async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -730,6 +942,10 @@ def build_app(settings: Settings) -> Application:
     # Store settings in bot_data for handler access
     app.bot_data["settings"] = settings
     app.bot_data["reddit_scanner"] = None
+    # Pre-load live score state so both poll_goals_job and poll_thread_goals_job
+    # share the same in-memory dict for race-free deduplication.
+    state_path = f"{settings.state_dir}/live_scores.json"
+    app.bot_data["live_scores"] = load_scores(state_path)
     # Load persistent clip-store from disk (restart resilience: 'ready' entries
     # keep working, 'searching' entries resume in poll_goal_clips_job)
     clips_path = f"{settings.state_dir}/goal_clips.json"
@@ -805,6 +1021,17 @@ def main() -> None:
         interval=settings.goal_poll_interval_seconds,
         first=10,
         name="poll_goals",
+    )
+
+    app.job_queue.run_repeating(
+        poll_thread_goals_job,
+        interval=25,
+        first=25,
+        name="poll_thread_goals",
+    )
+    log.info(
+        "Thread-based early goal detector enabled — polling Reddit every 25s for group %s",
+        settings.telegram_group_id,
     )
 
     # Porra history: backfill at startup + refresh daily at 09:05 local time
