@@ -5,6 +5,13 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260617.14] - 2026-06-17
+
+- feat: detect goals directly from the r/soccer match thread every 25s, so notifications arrive earlier than football-data's lagging score update; the scorer comes straight from the thread (no extra AI call)
+- feat: share a single in-memory live-score state between the football-data poll and the new thread poll, so whichever sees a goal first notifies and the other is deduplicated (no double messages)
+- fix: download goal clips from any streamff mirror domain (streamff.pro, .gg, etc.) by routing them to the streamff CDN — previously only .link/.com worked, so streamff.pro clips never got the "Ver gol" button
+
+
 ## [20260617.13] - 2026-06-17
 
 - feat: /endirecto now sends only the header and goals, with an inline keyboard offering Tarjetas, Alineación and Cambios
