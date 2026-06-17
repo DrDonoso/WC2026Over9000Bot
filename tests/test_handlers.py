@@ -19,6 +19,7 @@ from worldcup_bot.bot.handlers import (
     _send_ranking_with_top3_photos,
     cmd_actual,
     cmd_clasificacion,
+    cmd_en_directo,
     cmd_estadisticas,
     cmd_general,
     cmd_lista_aciertos,
@@ -2112,3 +2113,210 @@ class TestCmdEstadisticas:
 
         text = update.message.reply_text.call_args[0][0]
         assert "/estadisticas" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_en_directo — enriched live match detail
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+_LIVE_MATCH = Match(
+    id=1,
+    utc_date="2026-06-17T18:00:00Z",
+    status="IN_PLAY",
+    stage="GROUP_STAGE",
+    group="GROUP_A",
+    home_tla="POR",
+    away_tla="COD",
+    home_name="Portugal",
+    away_name="Congo DR",
+    home_score=1,
+    away_score=1,
+    winner=None,
+)
+
+_ENRICHED_EVENTS = {
+    "minute": "71",
+    "goals": [
+        {"minute": "6", "team": "Portugal", "scorer": "João Neves"},
+        {"minute": "45+5", "team": "Congo DR", "scorer": "Yoane Wissa"},
+    ],
+    "cards": [
+        {"minute": "13", "team": "Portugal", "player": "Bernardo Silva", "type": "yellow"},
+    ],
+    "subs": [
+        {"minute": "71", "team": "Portugal", "in": "Rafael Leão", "out": "Pedro Neto"},
+    ],
+}
+
+
+class TestCmdEnDirecto:
+    @pytest.mark.asyncio
+    async def test_no_live_matches_sends_no_hay(self, fake_settings):
+        """When get_live_matches returns [], the 'no hay' message is sent."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = []
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            await cmd_en_directo(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "No hay partidos en directo" in text
+
+    @pytest.mark.asyncio
+    async def test_ai_disabled_uses_format_match_fallback(self, fake_settings):
+        """When AI is disabled, format_match is used (no scanner thread calls)."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        # settings has empty openai keys → ai_enabled returns False
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch(
+                "worldcup_bot.bot.handlers.RedditMatchScanner"
+            ) as mock_scanner_cls:
+                await cmd_en_directo(update, context)
+
+        # Scanner's find_match_thread must NOT have been called
+        if mock_scanner_cls.called:
+            instance = mock_scanner_cls.return_value
+            instance.find_match_thread.assert_not_called()
+
+        text = update.message.reply_text.call_args[0][0]
+        # format_match output includes the score and live emoji
+        assert "Portugal" in text
+        assert "Congo DR" in text
+
+    @pytest.mark.asyncio
+    async def test_ai_enabled_no_thread_uses_format_match_fallback(self, fake_settings):
+        """AI enabled but no match thread found → falls back to format_match."""
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="key",
+            openai_base_url="http://ai",
+            openai_model="gpt-4",
+        )
+        update = _make_update()
+        context = _make_context(settings)
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.RedditMatchScanner", return_value=mock_scanner):
+                with patch("worldcup_bot.bot.handlers.AIClient"):
+                    await cmd_en_directo(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Portugal" in text
+        assert "Congo DR" in text
+
+    @pytest.mark.asyncio
+    async def test_ai_enabled_with_thread_returns_enriched_block(self, fake_settings):
+        """AI enabled + thread found + extract succeeds → enriched block in reply."""
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="key",
+            openai_base_url="http://ai",
+            openai_model="gpt-4",
+        )
+        update = _make_update()
+        context = _make_context(settings)
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_match_thread = MagicMock(return_value="/r/soccer/comments/abc/")
+        mock_scanner.get_thread_body = MagicMock(return_value="thread body text")
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.RedditMatchScanner", return_value=mock_scanner):
+                with patch("worldcup_bot.bot.handlers.AIClient"):
+                    with patch(
+                        "worldcup_bot.bot.handlers.extract_match_events",
+                        new=AsyncMock(return_value=_ENRICHED_EVENTS),
+                    ):
+                        await cmd_en_directo(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "🔴 EN DIRECTO" in text
+        assert "71'" in text
+        assert "João Neves" in text
+        assert "Yoane Wissa" in text
+
+    @pytest.mark.asyncio
+    async def test_per_match_exception_falls_back_to_format_match(self, fake_settings):
+        """If enrichment raises an exception, falls back to format_match (no crash)."""
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="key",
+            openai_base_url="http://ai",
+            openai_model="gpt-4",
+        )
+        update = _make_update()
+        context = _make_context(settings)
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_match_thread = MagicMock(side_effect=RuntimeError("boom"))
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.RedditMatchScanner", return_value=mock_scanner):
+                with patch("worldcup_bot.bot.handlers.AIClient"):
+                    await cmd_en_directo(update, context)
+
+        # Must not crash; fallback format_match still produces a reply
+        update.message.reply_text.assert_called_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "Portugal" in text
+        assert "Congo DR" in text
+
+    @pytest.mark.asyncio
+    async def test_multiple_matches_joined_by_separator(self, fake_settings):
+        """Multiple live matches are joined by the ——— separator."""
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+        )
+        update = _make_update()
+        context = _make_context(settings)
+
+        match2 = Match(
+            id=2,
+            utc_date="2026-06-17T20:00:00Z",
+            status="IN_PLAY",
+            stage="GROUP_STAGE",
+            group="GROUP_B",
+            home_tla="FRA",
+            away_tla="ESP",
+            home_name="France",
+            away_name="Spain",
+            home_score=0,
+            away_score=0,
+            winner=None,
+        )
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH, match2]
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.RedditMatchScanner"):
+                await cmd_en_directo(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "———" in text
+        assert "Portugal" in text
+        assert "France" in text

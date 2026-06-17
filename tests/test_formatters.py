@@ -135,3 +135,157 @@ class TestBoldPersonNames:
         result = bold_person_names("<script>alert('xss')</script>", ["Alice"])
         assert "<script>" not in result
         assert "&lt;script&gt;" in result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# format_live_match_detail
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFormatLiveMatchDetail:
+    def _make_match(self, home_tla="POR", away_tla="COD", home_score=1, away_score=1):
+        from worldcup_bot.api.models import Match
+        return Match(
+            id=1,
+            utc_date="2026-06-17T18:00:00Z",
+            status="IN_PLAY",
+            stage="GROUP_STAGE",
+            group="GROUP_A",
+            home_tla=home_tla,
+            away_tla=away_tla,
+            home_name="Portugal",
+            away_name="Congo DR",
+            home_score=home_score,
+            away_score=away_score,
+            winner=None,
+        )
+
+    def test_header_contains_en_directo(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        result = format_live_match_detail(m, {})
+        assert "🔴 EN DIRECTO" in result
+
+    def test_header_includes_minute_when_present(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        result = format_live_match_detail(m, {"minute": "74", "goals": [], "cards": [], "subs": []})
+        assert "74'" in result
+
+    def test_header_no_minute_when_null(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        result = format_live_match_detail(m, {"minute": None, "goals": [], "cards": [], "subs": []})
+        # Should not have any minute marker after EN DIRECTO
+        lines = result.splitlines()
+        assert "·" not in lines[0]
+
+    def test_score_line_shows_both_teams_and_score(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match(home_score=1, away_score=1)
+        result = format_live_match_detail(m, {})
+        assert "Portugal" in result
+        assert "Congo DR" in result
+        assert "1-1" in result
+
+    def test_none_score_shows_zero(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match(home_score=None, away_score=None)
+        result = format_live_match_detail(m, {})
+        assert "0-0" in result
+
+    def test_goals_section_shown_when_present(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        events = {
+            "minute": "71",
+            "goals": [{"minute": "6", "team": "Portugal", "scorer": "João Neves"}],
+            "cards": [],
+            "subs": [],
+        }
+        result = format_live_match_detail(m, events)
+        assert "⚽ Goles" in result
+        assert "João Neves" in result
+        assert "6'" in result
+        assert "(Portugal)" in result
+
+    def test_goals_section_omitted_when_empty(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        result = format_live_match_detail(m, {"minute": None, "goals": [], "cards": [], "subs": []})
+        assert "⚽ Goles" not in result
+
+    def test_yellow_card_shown_with_yellow_emoji(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        events = {
+            "minute": "13",
+            "goals": [],
+            "cards": [{"minute": "13", "team": "Portugal", "player": "Bernardo Silva", "type": "yellow"}],
+            "subs": [],
+        }
+        result = format_live_match_detail(m, events)
+        assert "🟨 Tarjetas" in result
+        assert "🟨" in result
+        assert "Bernardo Silva" in result
+
+    def test_red_card_shown_with_red_emoji(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        events = {
+            "minute": "55",
+            "goals": [],
+            "cards": [{"minute": "55", "team": "Congo DR", "player": "Mbemba", "type": "red"}],
+            "subs": [],
+        }
+        result = format_live_match_detail(m, events)
+        assert "🟥" in result
+        assert "Mbemba" in result
+
+    def test_cards_section_omitted_when_empty(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        result = format_live_match_detail(m, {"minute": None, "goals": [], "cards": [], "subs": []})
+        assert "🟨 Tarjetas" not in result
+
+    def test_subs_section_shown_with_arrow(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        events = {
+            "minute": "71",
+            "goals": [],
+            "cards": [],
+            "subs": [{"minute": "71", "team": "Portugal", "in": "Rafael Leão", "out": "Pedro Neto"}],
+        }
+        result = format_live_match_detail(m, events)
+        assert "🔄 Cambios" in result
+        assert "Rafael Leão" in result
+        assert "Pedro Neto" in result
+        assert "▶" in result
+
+    def test_subs_section_omitted_when_empty(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        result = format_live_match_detail(m, {"minute": None, "goals": [], "cards": [], "subs": []})
+        assert "🔄 Cambios" not in result
+
+    def test_all_sections_present_when_all_events(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        events = {
+            "minute": "71",
+            "goals": [{"minute": "6", "team": "Portugal", "scorer": "João Neves"}],
+            "cards": [{"minute": "13", "team": "Portugal", "player": "Bernardo Silva", "type": "yellow"}],
+            "subs": [{"minute": "45", "team": "Portugal", "in": "Conceição", "out": "Bernardo Silva"}],
+        }
+        result = format_live_match_detail(m, events)
+        assert "⚽ Goles" in result
+        assert "🟨 Tarjetas" in result
+        assert "🔄 Cambios" in result
+
+    def test_resilient_to_empty_events_dict(self):
+        from worldcup_bot.bot.formatters import format_live_match_detail
+        m = self._make_match()
+        result = format_live_match_detail(m, {})
+        assert "🔴 EN DIRECTO" in result
+        assert "Portugal" in result

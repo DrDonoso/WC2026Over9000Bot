@@ -22,6 +22,7 @@ from worldcup_bot.api.cache import get_default_cache
 from worldcup_bot.api.client import FootballDataClient, FootballAPIError
 from worldcup_bot.bot.formatters import (
     format_general_ranking,
+    format_live_match_detail,
     format_match,
     format_standings,
     format_user_detail,
@@ -30,6 +31,7 @@ from worldcup_bot.bot.formatters import (
 )
 from worldcup_bot.ai.client import AIClient
 from worldcup_bot.ai.daily_update import generate_daily_update
+from worldcup_bot.ai.match_events import extract_match_events
 from worldcup_bot.config import Settings, ai_enabled
 from worldcup_bot.data.stages import GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
 from worldcup_bot.data.tongo import FRASES, SANCHEZ_ENS_ROBA, frase_argentino
@@ -357,8 +359,36 @@ async def cmd_en_directo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("No hay partidos en directo en este momento.")
         return
 
-    lines = [format_match(m, settings.timezone) for m in live]
-    await update.message.reply_text("\n".join(lines))
+    scanner = RedditMatchScanner(user_agent=settings.reddit_user_agent)
+    ai = (
+        AIClient(settings.openai_api_key, settings.openai_base_url, settings.openai_model)
+        if ai_enabled(settings)
+        else None
+    )
+
+    blocks: list[str] = []
+    for m in live[:4]:
+        try:
+            if ai is not None:
+                permalink = await asyncio.to_thread(
+                    scanner.find_match_thread, m.home_name, m.away_name
+                )
+                if permalink:
+                    body = await asyncio.to_thread(scanner.get_thread_body, permalink)
+                    events = await extract_match_events(ai, body, m.home_name, m.away_name)
+                    blocks.append(format_live_match_detail(m, events, settings.timezone))
+                else:
+                    blocks.append(format_match(m, settings.timezone))
+            else:
+                blocks.append(format_match(m, settings.timezone))
+        except Exception as exc:
+            log.warning(
+                "cmd_en_directo enrichment failed for %s vs %s: %s",
+                m.home_name, m.away_name, exc,
+            )
+            blocks.append(format_match(m, settings.timezone))
+
+    await update.message.reply_text("\n\n———\n\n".join(blocks))
 
 
 async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

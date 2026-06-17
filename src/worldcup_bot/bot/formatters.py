@@ -226,6 +226,71 @@ def format_user_detail(detail: dict) -> str:
     return "\n".join(lines)
 
 
+# ── live match detail formatting ─────────────────────────────────────────────
+
+
+def format_live_match_detail(
+    match: Match,
+    events: dict,
+    tz_name: str = "Europe/Madrid",
+) -> str:
+    """Format a live match with enriched event details (goals, cards, subs).
+
+    Produces a plain-text (no HTML) message block for /endirecto.
+    Resilient to missing or malformed keys in events dict.
+    """
+    home_fl = team_flag(match.home_tla)
+    away_fl = team_flag(match.away_tla)
+    hs = match.home_score if match.home_score is not None else 0
+    as_ = match.away_score if match.away_score is not None else 0
+
+    evt = events if isinstance(events, dict) else {}
+    minute = evt.get("minute")
+
+    lines: list[str] = []
+    header = "🔴 EN DIRECTO"
+    if minute:
+        header += f" · {minute}'"
+    lines.append(header)
+    lines.append(f"{home_fl} {match.home_name} {hs}-{as_} {match.away_name} {away_fl}")
+
+    goals = evt.get("goals", [])
+    if isinstance(goals, list) and goals:
+        lines.append("")
+        lines.append("⚽ Goles")
+        for g in goals:
+            if not isinstance(g, dict):
+                continue
+            lines.append(
+                f"  {g.get('minute', '?')}' {g.get('scorer', '?')} ({g.get('team', '?')})"
+            )
+
+    cards = evt.get("cards", [])
+    if isinstance(cards, list) and cards:
+        lines.append("")
+        lines.append("🟨 Tarjetas")
+        for c in cards:
+            if not isinstance(c, dict):
+                continue
+            card_emoji = "🟥" if c.get("type", "").lower() == "red" else "🟨"
+            lines.append(
+                f"  {c.get('minute', '?')}' {card_emoji} {c.get('player', '?')} ({c.get('team', '?')})"
+            )
+
+    subs = evt.get("subs", [])
+    if isinstance(subs, list) and subs:
+        lines.append("")
+        lines.append("🔄 Cambios")
+        for s in subs:
+            if not isinstance(s, dict):
+                continue
+            lines.append(
+                f"  {s.get('minute', '?')}' {s.get('in', '?')} ▶ {s.get('out', '?')} ({s.get('team', '?')})"
+            )
+
+    return "\n".join(lines)
+
+
 # ── private helpers ───────────────────────────────────────────────────────────
 
 
