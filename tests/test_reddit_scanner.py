@@ -14,6 +14,7 @@ from worldcup_bot.reddit.scanner import (
     _find_matching_fixture,
     _html_to_goaltext,
     _is_match_thread,
+    _normalize_team,
     _parse_thread_teams,
     _teams_match,
 )
@@ -244,8 +245,33 @@ class TestTeamMatching:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# RedditMatchScanner — JSON path
+# _normalize_team — dotted name normalization (Bug fix: D.R. Congo)
 # ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestNormalizeTeam:
+    def test_dr_congo_with_dots_and_space(self):
+        assert _normalize_team("D.R. Congo") == "congo dr"
+
+    def test_dr_congo_dots_no_space(self):
+        assert _normalize_team("D.R.Congo") == "congo dr"
+
+    def test_dr_congo_alias_no_dots(self):
+        assert _normalize_team("DR Congo") == "congo dr"
+
+    def test_democratic_republic_of_congo(self):
+        assert _normalize_team("Democratic Republic of Congo") == "congo dr"
+
+    def test_normal_name_unchanged(self):
+        assert _normalize_team("Portugal") == "portugal"
+
+    def test_teams_match_dr_congo_dotted(self):
+        assert _teams_match("D.R. Congo", "Congo DR") is True
+
+    def test_teams_match_dr_congo_dots_no_space(self):
+        assert _teams_match("D.R.Congo", "Congo DR") is True
+
+
 
 
 class TestScannerJsonPath:

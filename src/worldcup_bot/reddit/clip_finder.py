@@ -43,7 +43,7 @@ STREAMFF_RE = re.compile(
 )
 VIDEO_URL_RE = re.compile(
     r"https?://(?:www\.)?(?:streamable\.com|v\.redd\.it"
-    r"|streamin\.(?:me|link)|streamain\.com|dubz\.link)/\S+",
+    r"|streamin\.(?:me|link)|streamain\.com|dubz\.link|dropr\.co)/\S+",
     re.IGNORECASE,
 )
 
@@ -143,13 +143,30 @@ def _parse_search_results_html(html: str) -> list[dict]:
 
 
 def _extract_media_url(post_url: str) -> str | None:
-    """Return the media URL if *post_url* points at a known video host."""
+    """Return the media URL if *post_url* points at a known video host.
+
+    Falls back to returning the URL as-is for any http(s) URL that is not a
+    reddit/redd.it/imgur link and whose path does not end in a static-image
+    extension.  This ensures future clip hosts work without allowlist updates.
+    """
     m = STREAMFF_RE.search(post_url)
     if m:
         return m.group(0)
     m = VIDEO_URL_RE.search(post_url)
     if m:
         return m.group(0)
+    # Generic fallback: any external http(s) URL that is not Reddit/imgur and
+    # not a static image.  Safe because _match_post only calls this after the
+    # post title has already matched the exact goal via GOAL_TITLE_PATTERN +
+    # team/score/scorer-or-minute checks.
+    lower = post_url.lower()
+    if lower.startswith(("http://", "https://")):
+        if any(d in lower for d in ("reddit.com", "redd.it", "imgur.com")):
+            return None
+        path = post_url.split("?", 1)[0]
+        if re.search(r"\.(jpg|jpeg|png|gif|webp)$", path, re.IGNORECASE):
+            return None
+        return post_url
     return None
 
 

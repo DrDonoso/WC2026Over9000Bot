@@ -77,8 +77,10 @@ WC_TEAM_ALIASES: dict[str, str] = {
     "trinidad & tobago": "trinidad and tobago",
     "trinidad": "trinidad and tobago",
     "dr congo": "congo dr",
+    "d r congo": "congo dr",  # "D.R. Congo" / "D.R.Congo" after dot→space normalization
     "democratic republic of congo": "congo dr",
     "dem. rep. congo": "congo dr",
+    "dem rep congo": "congo dr",  # "Dem. Rep. Congo" after dot→space normalization
 }
 
 
@@ -89,8 +91,10 @@ def _strip_accents(text: str) -> str:
 
 
 def _normalize_team(name: str) -> str:
-    """Lowercase, strip accents, apply WC alias map."""
+    """Lowercase, strip accents, strip periods, apply WC alias map."""
     key = _strip_accents(name.strip()).lower()
+    key = key.replace(".", " ")
+    key = re.sub(r"\s+", " ", key).strip()
     return WC_TEAM_ALIASES.get(key, key)
 
 

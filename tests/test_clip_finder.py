@@ -127,6 +127,34 @@ class TestExtractMediaUrl:
         url = _extract_media_url("https://old.reddit.com/r/soccer/comments/abc/def/")
         assert url is None
 
+    def test_dropr_co_known_host(self):
+        url = _extract_media_url("https://dropr.co/v/3ba063ff")
+        assert url == "https://dropr.co/v/3ba063ff"
+
+    def test_generic_fallback_novel_host(self):
+        url = _extract_media_url("https://newcliphost.xyz/v/abc123")
+        assert url == "https://newcliphost.xyz/v/abc123"
+
+    def test_generic_fallback_excludes_redd_it_image(self):
+        assert _extract_media_url("https://i.redd.it/abc.jpg") is None
+
+    def test_generic_fallback_excludes_reddit_com(self):
+        assert _extract_media_url("https://www.reddit.com/r/soccer/abc") is None
+
+    def test_generic_fallback_excludes_imgur(self):
+        assert _extract_media_url("https://imgur.com/a/x") is None
+
+    def test_generic_fallback_excludes_static_image_png_case_insensitive(self):
+        assert _extract_media_url("https://host.com/pic.PNG") is None
+
+    def test_generic_fallback_excludes_jpeg(self):
+        assert _extract_media_url("https://cdn.example.com/image.jpeg") is None
+
+    def test_generic_fallback_allows_image_extension_in_query_string(self):
+        """URL with .jpg only in query string (not path) should NOT be excluded."""
+        url = "https://newcliphost.xyz/v/clip?thumb=preview.jpg"
+        assert _extract_media_url(url) == url
+
 
 # ── _scorer_matches ───────────────────────────────────────────────────────────
 
@@ -235,6 +263,15 @@ class TestMatchPost:
         result = _match_post(post, "Netherlands", "Morocco", 1, 0, "Depay", 55)
         assert result is not None
 
+    def test_portugal_dr_congo_dotted_name_dropr_url(self):
+        """Live bug: D.R. Congo in clip title + dropr.co URL must match."""
+        post = self._post(
+            "Portugal [1] - 0 D.R. Congo - Neves J. goal 5'",
+            "https://dropr.co/v/3ba063ff",
+        )
+        result = _match_post(post, "Portugal", "Congo DR", 1, 0, "João Neves", 6)
+        assert result == "https://dropr.co/v/3ba063ff"
+
 
 # ── find_goal_clip ────────────────────────────────────────────────────────────
 
@@ -324,6 +361,20 @@ class TestFindGoalClip:
         scanner = _make_scanner(json_response=response)
         result = find_goal_clip(scanner, "Sweden", "Tunisia", 3, 1, "Gyökeres", 60)
         assert result is None
+
+    def test_portugal_dr_congo_dropr_integration(self):
+        """Integration: D.R. Congo dotted-name + dropr.co URL → finds clip."""
+        response = _search_json(
+            {
+                "id": "dropr1",
+                "title": "Portugal [1] - 0 D.R. Congo - Neves J. goal 5'",
+                "url": "https://dropr.co/v/3ba063ff",
+                "permalink": "/r/soccer/comments/dropr1/",
+            }
+        )
+        scanner = _make_scanner(json_response=response)
+        result = find_goal_clip(scanner, "Portugal", "Congo DR", 1, 0, "João Neves", 6)
+        assert result == "https://dropr.co/v/3ba063ff"
 
 
 # ── _parse_clip_posts_html ────────────────────────────────────────────────────
