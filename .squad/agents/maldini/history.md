@@ -87,6 +87,13 @@
 
 Maldini's daily-update rework (Phases 23–24) verified live on Telegram test group (message #446). All work integrated with Kanté's max_completion_tokens fix and HTML snapshot feature. Docker ownership fix applied; state volume working correctly. Code pending user approval for commit.
 
+### Body-Bullet Changelog Extraction (2026-06-17)
+- Replaced the `git log --pretty='%s'` + grep/sed chain in the "Generate release notes from commits" step with a `python3 - <<'PYEOF'` quoted heredoc.
+- Logic: enumerate SHAs via `--format=%H`; for each, parse full `%B` message; extract bullet lines (`- ` prefix after optional indent) from the body; fold wrapped continuation lines (2+ leading spaces) into one line; stop at `Co-authored-by:` trailer; skip internal commits (`.squad:`, `chore:`, `docs: update changelog`, `merge `); fall back to `- {subject}` if no bullets found.
+- Prefixes (`feat:`, `fix:`, etc.) are kept verbatim in bullets — no stripping.
+- Quoted heredoc (`<<'PYEOF'`) prevents shell from expanding `$` or backticks in the Python source.
+- Verified locally: range `20260617.04^..48edda9` (commit 48edda9) → 4 elaborate single-line bullets covering goal detection, clip flow, match-finish, and /estadisticas. YAML: `python -c "import yaml; yaml.safe_load(...)"` → exit 0.
+
 ## Session Summary (2026-06-17 06:34:32Z — Scribe)
 
 Auto-changelog mechanism (Decision #36) merged into decisions ledger. Inbox file deleted. Feature verified live: CI run 27670280717 succeeded, GitHub Release 20260617 created, CHANGELOG.md auto-updated via commit 59cbad3 with no loop. Gotcha recorded: literal `[skip ci]` token in commit BODY was skipped; workaround = amend + reword. Decisions.md flagged 104KB → manual compaction urgent when entries age past 7 days.
