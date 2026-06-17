@@ -5,6 +5,13 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260617.10] - 2026-06-17
+
+- fix: normalize team names with dots so "D.R. Congo" matches "Congo DR" (strip periods before alias lookup) — was breaking the clip match for that fixture
+- fix: add dropr.co to the recognised goal-clip video hosts
+- fix: accept any external (non-reddit, non-image) link from an already title-matched clip post as the media URL, so future clip-host rotations don't silently drop the "Ver gol" button
+
+
 ## [20260617.09] - 2026-06-17
 
 - Merged all 6 inbox decisions into decisions.md (kante-25, kante-26, kante-27, kante-29, maldini-10)
