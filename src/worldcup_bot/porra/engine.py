@@ -60,6 +60,50 @@ def _build_actual_winners(client: FootballDataClient) -> dict[str, list[str]]:
 # ── public ranking functions ──────────────────────────────────────────────────
 
 
+def compute_general_ranking_from(
+    predictions: dict,
+    actual_standings: dict[str, list[str]],
+    actual_winners: dict[str, list[str]],
+) -> list[UserRankEntry]:
+    """Score all participants given pre-built standings and winners dicts.
+
+    Enables dependency injection so historical / date-scoped paths can pass
+    their own data without changing the default live-data behaviour.
+    """
+    participants = predictions.get("participants", {})
+    rows: list[UserRankEntry] = []
+
+    for uname, udata in participants.items():
+        base = udata.get("base_score", 0.0)
+        grp_pts, detail = score_groups(udata.get("groups", {}), actual_standings)
+        exact_hits = sum(1 for d in detail if d.get("note") == "exacto")
+
+        ko_scores: dict[str, float] = {}
+        ko_pts, _ = score_knockout(udata.get("knockout", {}), actual_winners)
+        for api_stage, _, stage_pts_val in KNOCKOUT_STAGES:
+            yaml_key = STAGE_YAML_KEYS.get(api_stage, api_stage.lower())
+            stage_picks = {yaml_key: udata.get("knockout", {}).get(yaml_key, [])}
+            stage_actual = {api_stage: actual_winners.get(api_stage, [])}
+            pts_for_stage, _ = score_knockout(stage_picks, stage_actual, [(api_stage, "", stage_pts_val)])
+            ko_scores[api_stage] = pts_for_stage
+
+        total = base + grp_pts + ko_pts
+        dname = udata.get("display_name") or f"@{uname}"
+        rows.append(
+            UserRankEntry(
+                username=uname,
+                display_name=dname,
+                total_score=total,
+                base_score=base,
+                group_score=grp_pts,
+                knockout_scores=ko_scores,
+                exact_group_hits=exact_hits,
+            )
+        )
+
+    return _sort_ranking(rows)
+
+
 def compute_group_ranking(
     predictions: dict,
     client: FootballDataClient,
@@ -109,39 +153,7 @@ def compute_general_ranking(
         started = client.get_started_groups()
         actual_standings = _build_actual_standings(client, only_groups=started)
     actual_winners = _build_actual_winners(client)
-    participants = predictions.get("participants", {})
-    rows: list[UserRankEntry] = []
-
-    for uname, udata in participants.items():
-        base = udata.get("base_score", 0.0)
-        grp_pts, detail = score_groups(udata.get("groups", {}), actual_standings)
-        exact_hits = sum(1 for d in detail if d.get("note") == "exacto")
-
-        ko_scores: dict[str, float] = {}
-        ko_pts, _ = score_knockout(udata.get("knockout", {}), actual_winners)
-        # Also record per-stage breakdown
-        for api_stage, _, stage_pts_val in KNOCKOUT_STAGES:
-            yaml_key = STAGE_YAML_KEYS.get(api_stage, api_stage.lower())
-            stage_picks = {yaml_key: udata.get("knockout", {}).get(yaml_key, [])}
-            stage_actual = {api_stage: actual_winners.get(api_stage, [])}
-            pts_for_stage, _ = score_knockout(stage_picks, stage_actual, [(api_stage, "", stage_pts_val)])
-            ko_scores[api_stage] = pts_for_stage
-
-        total = base + grp_pts + ko_pts
-        dname = udata.get("display_name") or f"@{uname}"
-        rows.append(
-            UserRankEntry(
-                username=uname,
-                display_name=dname,
-                total_score=total,
-                base_score=base,
-                group_score=grp_pts,
-                knockout_scores=ko_scores,
-                exact_group_hits=exact_hits,
-            )
-        )
-
-    return _sort_ranking(rows)
+    return compute_general_ranking_from(predictions, actual_standings, actual_winners)
 
 
 def compute_user_detail(

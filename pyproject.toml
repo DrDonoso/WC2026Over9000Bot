@@ -17,6 +17,7 @@ dependencies = [
     "yt-dlp>=2024.0",
     "gender-guesser>=0.4",
     "openai>=1.40",
+    "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]

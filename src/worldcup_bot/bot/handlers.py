@@ -36,6 +36,8 @@ from worldcup_bot.data.tongo import FRASES, SANCHEZ_ENS_ROBA, frase_argentino
 from worldcup_bot.data.gender import infer_gender
 from worldcup_bot.data.gifs import list_tongo_gifs
 from worldcup_bot.porra import engine, predictions as pred_loader
+from worldcup_bot.porra.history import ensure_history
+from worldcup_bot.porra.chart import render_evolution_png
 from worldcup_bot.reddit.clip_finder import find_goal_clip
 from worldcup_bot.reddit.clip_store import (
     add_entry as _cs_add_entry,
@@ -143,6 +145,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Comandos disponibles:\n"
         "/actual — clasificación provisional (a día de hoy)\n"
         "/general — clasificación general (oficial, solo grupos cerrados)\n"
+        "/evolucion — gráfico de evolución de la porra 📈\n"
         "/porra — alias de /actual\n"
         "/listaaciertos — tus aciertos (oficial, solo cerrados)\n"
         "/listaaciertosactual — tus aciertos provisionales (a día de hoy)\n"
@@ -896,3 +899,49 @@ async def cmd_update_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(
             "❌ Error al generar el resumen. Revisa los logs."
         )
+
+
+# ── /evolucion — ranking evolution chart ─────────────────────────────────────
+
+
+async def cmd_evolucion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Post a bump-chart image of porra ranking evolution since the first match."""
+    settings: Settings = context.bot_data["settings"]
+    predictions = pred_loader.load(settings.predictions_path)
+
+    if not predictions.get("participants"):
+        await update.message.reply_text(_msg_no_predictions(settings.predictions_path))
+        return
+
+    client = make_client(settings)
+    history_path = f"{settings.state_dir}/porra_history.json"
+
+    try:
+        history = await asyncio.to_thread(
+            ensure_history, client, predictions, settings, history_path
+        )
+    except FootballAPIError as exc:
+        await update.message.reply_text(_api_error_msg(exc))
+        return
+    except Exception:
+        log.exception("cmd_evolucion: error building history")
+        await update.message.reply_text("❌ Error al generar la evolución. Intenta más tarde.")
+        return
+
+    if not history:
+        await update.message.reply_text("Aún no hay partidos para dibujar la evolución.")
+        return
+
+    out_path = f"{settings.state_dir}/evolucion.png"
+    try:
+        await asyncio.to_thread(render_evolution_png, history, out_path)
+        with open(out_path, "rb") as f:
+            await context.bot.send_photo(
+                chat_id=update.effective_chat.id,
+                photo=f,
+                caption="📈 Evolución de la porra",
+            )
+    except Exception:
+        log.exception("cmd_evolucion: error rendering or sending chart")
+        await update.message.reply_text("❌ Error al generar el gráfico. Intenta más tarde.")
+

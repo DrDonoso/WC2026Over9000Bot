@@ -45,20 +45,25 @@ class FootballDataClient:
 
     # ── low-level fetch ──────────────────────────────────────────────────────
 
-    def _get(self, url: str) -> dict:
-        cached = self._cache.get(url)
+    def _get(self, url: str, params: dict | None = None) -> dict:
+        cache_key = url
+        if params:
+            qs = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+            cache_key = f"{url}?{qs}"
+
+        cached = self._cache.get(cache_key)
         if cached is not None:
-            log.debug("Cache hit: %s", url)
+            log.debug("Cache hit: %s", cache_key)
             return cached
 
-        log.debug("Fetching: %s", url)
-        resp = self._session.get(url, timeout=15)
+        log.debug("Fetching: %s", cache_key)
+        resp = self._session.get(url, params=params, timeout=15)
 
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After", "")
             log.warning(
                 "HTTP 429 rate limit on %s%s",
-                url,
+                cache_key,
                 f" — Retry-After: {retry_after}" if retry_after else "",
             )
             raise FootballAPIError(429, "Rate limit alcanzado")
@@ -66,7 +71,7 @@ class FootballDataClient:
             raise FootballAPIError(resp.status_code, f"HTTP {resp.status_code}")
 
         data = resp.json()
-        self._cache.set(url, data)
+        self._cache.set(cache_key, data)
         return data
 
     # ── public API ───────────────────────────────────────────────────────────

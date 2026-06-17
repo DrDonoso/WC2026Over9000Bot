@@ -28,6 +28,7 @@ from worldcup_bot.bot.handlers import (
     cmd_clasificacion,
     cmd_en_directo,
     cmd_estadisticas,
+    cmd_evolucion,
     cmd_general,
     cmd_hoy,
     cmd_lista_aciertos,
@@ -47,6 +48,7 @@ from worldcup_bot.espn.client import ESPNClient
 from worldcup_bot.espn.formatter import format_match_stats
 from worldcup_bot.porra import predictions as pred_loader
 from worldcup_bot.porra.engine import compute_general_ranking
+from worldcup_bot.porra.history import ensure_history
 from worldcup_bot.porra.live import build_state, diff_live, load_live, render_porra_context, save_live
 from worldcup_bot.reddit.notifier import (
     _is_silent_hour,
@@ -98,6 +100,34 @@ async def daily_update_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.send_message(chat_id=settings.telegram_group_id, text=text, parse_mode="HTML")
     except Exception:
         log.exception("daily_update_job failed")
+
+
+# ── porra history backfill job ────────────────────────────────────────────────
+
+
+async def history_backfill_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One-shot / daily job: build per-jornada porra history into the state volume.
+
+    Runs at startup (≈15s after launch) and once daily at 09:05 local time so
+    newly-completed jornadas are captured automatically.  Never raises — any
+    error is logged and swallowed so it cannot affect other jobs.
+    """
+    try:
+        settings: Settings = context.bot_data["settings"]
+        predictions = pred_loader.load(settings.predictions_path)
+        if not predictions.get("participants"):
+            log.info("history_backfill_job: no predictions loaded, skipping")
+            return
+        client = make_client(settings)
+        history_path = f"{settings.state_dir}/porra_history.json"
+        history = await asyncio.to_thread(
+            ensure_history, client, predictions, settings, history_path
+        )
+        log.info(
+            "history_backfill_job: porra history has %d jornadas", len(history)
+        )
+    except Exception:
+        log.exception("history_backfill_job: error (non-fatal)")
 
 
 async def _enrich_scorer(
@@ -696,6 +726,7 @@ def build_app(settings: Settings) -> Application:
         CommandHandler("ayer", cmd_ayer),
         CommandHandler("siguiente", cmd_siguiente),
         CommandHandler("general", cmd_general),
+        CommandHandler("evolucion", cmd_evolucion),
         CommandHandler("tongo", cmd_tongo),
         # New approved improvements
         CommandHandler("mispredicciones", cmd_mis_predicciones),
@@ -748,6 +779,23 @@ def main() -> None:
         interval=settings.goal_poll_interval_seconds,
         first=10,
         name="poll_goals",
+    )
+
+    # Porra history: backfill at startup + refresh daily at 09:05 local time
+    tz = pytz.timezone(settings.timezone)
+    app.job_queue.run_once(
+        history_backfill_job,
+        when=15,
+        name="history_backfill_startup",
+    )
+    app.job_queue.run_daily(
+        history_backfill_job,
+        time=dtime(hour=9, minute=5, tzinfo=tz),
+        name="history_backfill_daily",
+    )
+    log.info(
+        "Porra history refresh enabled — startup (15s) + daily 09:05 %s",
+        settings.timezone,
     )
 
     if ai_enabled(settings) and settings.telegram_group_id:
