@@ -1,6 +1,6 @@
 # Squad Decisions
 
-⚠️ **MANUAL COMPACTION NEEDED** (164 KB, date-gate can fire — entries span 2026-06-15 to 2026-06-17)
+⚠️ **MANUAL COMPACTION NEEDED** (168 KB, entries span 2026-06-15 to 2026-06-17 — within 7-day window)
 
 ## 1. Architecture & Product Design — WorldCup2026Over9000TelegramBot
 
@@ -2853,6 +2853,99 @@ YAML parse: `python -c "import yaml; yaml.safe_load(open('.github/workflows/dock
 ## Files Changed
 
 - `.github/workflows/docker-deploy.yml` — "Generate release notes from commits" step `run:` block replaced.
+
+---
+
+## 43. Decision: Clip-match fix — D.R. Congo dotted-name normalization + dropr.co host + generic media-URL fallback
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-17  
+**Status:** IMPLEMENTED — awaiting coordinator commit
+
+### Context
+
+Live production failure: `find_goal_clip` returned `None` for the goal "Portugal 1-0 D.R. Congo, João Neves 6'" even though the r/soccer clip post was found. Post title: `"Portugal [1] - 0 D.R. Congo - Neves J. goal 5'"`, post URL: `https://dropr.co/v/3ba063ff`. Two independent bugs caused the failure.
+
+---
+
+### Bug 1 — Team normalization dropped dotted abbreviations ("D.R. Congo")
+
+**File:** `src/worldcup_bot/reddit/scanner.py`  
+**Function:** `_normalize_team`
+
+#### Root cause
+`_normalize_team("D.R. Congo")` lowercased to `"d.r. congo"`, which is not a key in `WC_TEAM_ALIASES` (the existing key is `"dr congo"`), so the function returned `"d.r. congo"` unchanged. `_teams_match("D.R. Congo", "Congo DR")` therefore returned `False`.
+
+#### Fix
+In `_normalize_team`, after lowercase + accent-strip, add:
+```python
+key = key.replace(".", " ")
+key = re.sub(r"\s+", " ", key).strip()
+```
+This transforms:
+- `"D.R. Congo"` → `"d.r. congo"` → `"d r congo"` → alias → `"congo dr"` ✓
+- `"D.R.Congo"` → `"d.r.congo"` → `"d r congo"` → alias → `"congo dr"` ✓
+
+Two new alias entries added to `WC_TEAM_ALIASES`:
+- `"d r congo": "congo dr"` — handles dotted "D.R. Congo" and "D.R.Congo"
+- `"dem rep congo": "congo dr"` — handles "Dem. Rep. Congo" through the same transform (existing `"dem. rep. congo"` entry kept for backward compat)
+
+---
+
+### Bug 2 — Media URL host allowlist missed dropr.co (and was brittle)
+
+**File:** `src/worldcup_bot/reddit/clip_finder.py`  
+**Function:** `_extract_media_url`
+
+#### Root cause
+`VIDEO_URL_RE` listed only `streamable.com`, `v.redd.it`, `streamin.(me|link)`, `streamain.com`, `dubz.link`. `dropr.co` was not included, so `_extract_media_url("https://dropr.co/v/3ba063ff")` returned `None`. The "Ver gol" button was therefore never emitted even though the clip was there.
+
+#### Fix (a) — Add dropr.co to known hosts
+`dropr\.co` added to `VIDEO_URL_RE` alternation.
+
+#### Fix (b) — Generic HTTPS fallback for future host rotation
+After the known-host checks, `_extract_media_url` now applies a conservative fallback: if the URL is `http(s)` and:
+- does NOT contain `reddit.com`, `redd.it`, or `imgur.com`
+- path does NOT end in `.jpg/.jpeg/.png/.gif/.webp` (case-insensitive, query string ignored)
+
+…then the URL is returned as-is as the media URL.
+
+**Rationale:** `_match_post` only calls `_extract_media_url` after the post title has already been validated by `GOAL_TITLE_PATTERN` + team/score/scorer-or-minute checks. A title-matched post's external URL is the clip, regardless of host. The downloader's yt-dlp fallback handles playback from unknown hosts. This prevents future clip-host rotations from silently killing the "Ver gol" button again.
+
+---
+
+### Tests added
+
+#### `tests/test_reddit_scanner.py` — `TestNormalizeTeam` (7 assertions)
+- `_normalize_team("D.R. Congo") == "congo dr"`
+- `_normalize_team("D.R.Congo") == "congo dr"`
+- `_normalize_team("DR Congo") == "congo dr"` (existing alias still works)
+- `_normalize_team("Democratic Republic of Congo") == "congo dr"` (existing alias still works)
+- `_normalize_team("Portugal") == "portugal"` (no alias, unchanged)
+- `_teams_match("D.R. Congo", "Congo DR") is True`
+- `_teams_match("D.R.Congo", "Congo DR") is True`
+
+#### `tests/test_clip_finder.py` — `TestExtractMediaUrl` (10 cases extended)
+- `dropr.co` → returned as-is (known host)
+- novel host `newcliphost.xyz` → returned as-is (generic fallback)
+- `i.redd.it/abc.jpg` → `None` (redd.it excluded)
+- `www.reddit.com/r/soccer/…` → `None` (reddit excluded)
+- `imgur.com/a/x` → `None` (imgur excluded)
+- `host.com/pic.PNG` → `None` (static image, case-insensitive)
+- `cdn.example.com/image.jpeg` → `None` (static image)
+- `newcliphost.xyz/v/clip?thumb=preview.jpg` → returned (`.jpg` only in query string, path is clean)
+
+#### `tests/test_clip_finder.py` — `TestMatchPost`
+- `test_portugal_dr_congo_dotted_name_dropr_url`: exact live-failure scenario — `_match_post` for the "Portugal [1] - 0 D.R. Congo - Neves J. goal 5'" post returns `"https://dropr.co/v/3ba063ff"`.
+
+#### `tests/test_clip_finder.py` — `TestFindGoalClip`
+- `test_portugal_dr_congo_dropr_integration`: full `find_goal_clip` with injected fake scanner returns the dropr.co URL.
+
+---
+
+### Result
+
+**1152 tests green** (baseline was 1135).
 
 
 ---
