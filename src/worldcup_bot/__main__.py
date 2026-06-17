@@ -20,6 +20,7 @@ from worldcup_bot.ai.client import AIClient
 from worldcup_bot.ai.commentators import generate_porra_commentary, pick_commentator
 from worldcup_bot.ai.daily_update import generate_daily_update
 from worldcup_bot.ai.goal_extractor import extract_scorer
+from worldcup_bot.ai.rich_image import run_rich_iteration
 from worldcup_bot.api.client import FootballAPIError
 from worldcup_bot.bot.formatters import bold_person_names, team_flag
 from worldcup_bot.bot.handlers import (
@@ -43,7 +44,7 @@ from worldcup_bot.bot.handlers import (
     cmd_ver_gol_callback,
     make_client,
 )
-from worldcup_bot.config import Settings, ai_enabled, load_settings
+from worldcup_bot.config import Settings, ai_enabled, image_ai_enabled, load_settings
 from worldcup_bot.espn.client import ESPNClient
 from worldcup_bot.espn.formatter import format_match_stats
 from worldcup_bot.porra import predictions as pred_loader
@@ -128,6 +129,29 @@ async def history_backfill_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
     except Exception:
         log.exception("history_backfill_job: error (non-fatal)")
+
+
+# ── daily rich-image evolution job ───────────────────────────────────────────
+
+
+async def rich_image_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily job: evolve the 'rich' image one wealth level and optionally send it."""
+    settings: Settings = context.bot_data["settings"]
+    if not image_ai_enabled(settings):
+        log.info("rich_image_job: image AI not configured, skipping")
+        return
+    try:
+        out_path, level, caption = await run_rich_iteration(settings)
+        log.info("rich image iteration %d -> %s", level, out_path)
+        if settings.telegram_group_id:
+            with open(out_path, "rb") as photo_fh:
+                await context.bot.send_photo(
+                    chat_id=settings.telegram_group_id,
+                    photo=photo_fh,
+                    caption=caption,
+                )
+    except Exception:
+        log.exception("rich_image_job: error (non-fatal)")
 
 
 async def _enrich_scorer(
@@ -814,6 +838,23 @@ def main() -> None:
     else:
         log.info(
             "Daily AI update DISABLED — set OPENAI_API_KEY/OPENAI_BASE_URL/OPENAI_MODEL to enable."
+        )
+
+    if image_ai_enabled(settings):
+        app.job_queue.run_daily(
+            rich_image_job,
+            time=dtime(hour=settings.rich_image_hour, minute=0, tzinfo=tz),
+            name="rich_image",
+        )
+        log.info(
+            "Rich image evolution enabled — running daily at %02d:00 %s",
+            settings.rich_image_hour,
+            settings.timezone,
+        )
+    else:
+        log.info(
+            "Rich image evolution DISABLED — set OPENAI_IMAGE_API_KEY/OPENAI_IMAGE_BASE_URL "
+            "(or OPENAI_API_KEY/OPENAI_BASE_URL) + OPENAI_IMAGE_MODEL to enable."
         )
 
     if settings.telegram_group_id:

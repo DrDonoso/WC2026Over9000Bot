@@ -1,0 +1,2076 @@
+"""Tests for the daily rich-image evolution feature.
+
+Covers: build_rich_prompt, select_base_image, load_level/save_level,
+edit_rich_image, run_rich_iteration, rich_image_job, and main() scheduling.
+"""
+
+from __future__ import annotations
+
+import base64
+import inspect
+import json
+import os
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from worldcup_bot.ai.rich_image import (
+    RICH_CAPTION_PROMPT,
+    RICH_CAPTIONS_MAX,
+    RICH_EDIT_PROMPT,
+    RICH_FACE_ANCHOR_CLAUSE,
+    RICH_HISTORY_MAX_LINES,
+    _normalize_caption,
+    append_caption,
+    append_history,
+    build_rich_prompt,
+    edit_rich_image,
+    find_original_image,
+    format_captions_for_prompt,
+    format_history_for_prompt,
+    generate_rich_caption,
+    load_captions,
+    load_history_lines,
+    load_level,
+    run_rich_iteration,
+    save_level,
+    select_base_image,
+)
+from worldcup_bot.config import (
+    Settings,
+    _effective_image_api_key,
+    _effective_image_base_url,
+    image_ai_enabled,
+)
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+
+def _make_settings(tmp_path, **overrides) -> Settings:
+    defaults = dict(
+        telegram_bot_token="tok",
+        football_data_api_key="key",
+        state_dir=str(tmp_path),
+        openai_api_key="sk-chat",
+        openai_base_url="http://litellm/v1",
+        openai_model="gpt-4",
+        openai_image_model="gpt-image-2",
+        openai_image_api_key="sk-img",
+        openai_image_base_url="http://litellm/v1",
+    )
+    defaults.update(overrides)
+    return Settings(**defaults)
+
+
+def _fake_client(b64_payload: str = base64.b64encode(b"PNGDATA").decode()):
+    """Return a fake AsyncOpenAI-like client whose images.edit returns b64_payload."""
+    img_obj = MagicMock()
+    img_obj.b64_json = b64_payload
+    resp = MagicMock()
+    resp.data = [img_obj]
+    client = MagicMock()
+    client.images.edit = AsyncMock(return_value=resp)
+    return client
+
+
+def _fake_caption_client(content: str = "¡Soy el más rico!"):
+    """Return a fake AsyncOpenAI-like client for chat caption generation."""
+    msg = MagicMock()
+    msg.content = f"  {content}  "
+    choice = MagicMock()
+    choice.message = msg
+    resp = MagicMock()
+    resp.choices = [choice]
+    client = MagicMock()
+    client.chat.completions.create = AsyncMock(return_value=resp)
+    return client
+
+
+def _make_context(settings: Settings) -> MagicMock:
+    ctx = MagicMock()
+    ctx.bot_data = {"settings": settings}
+    ctx.bot.send_photo = AsyncMock()
+    return ctx
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Config — new image fields
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestImageAIConfig:
+    def test_new_fields_default_values(self):
+        s = Settings(telegram_bot_token="t", football_data_api_key="k")
+        assert s.openai_image_model == "gpt-image-2"
+        assert s.openai_image_api_key == ""
+        assert s.openai_image_base_url == ""
+        assert s.rich_image_hour == 11
+
+    def test_image_ai_enabled_true_with_dedicated_key(self):
+        s = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_image_api_key="sk-img",
+            openai_image_base_url="http://litellm/v1",
+            openai_image_model="gpt-image-2",
+        )
+        assert image_ai_enabled(s) is True
+
+    def test_image_ai_enabled_falls_back_to_chat_key(self):
+        s = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="sk-chat",
+            openai_base_url="http://litellm/v1",
+            openai_image_model="gpt-image-2",
+        )
+        assert image_ai_enabled(s) is True
+
+    def test_image_ai_disabled_when_no_key(self):
+        s = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_image_base_url="http://litellm/v1",
+            openai_image_model="gpt-image-2",
+        )
+        assert image_ai_enabled(s) is False
+
+    def test_image_ai_disabled_when_no_base_url(self):
+        s = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_image_api_key="sk-img",
+            openai_image_model="gpt-image-2",
+        )
+        assert image_ai_enabled(s) is False
+
+    def test_image_ai_disabled_when_no_model(self):
+        s = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_image_api_key="sk-img",
+            openai_image_base_url="http://litellm/v1",
+            openai_image_model="",
+        )
+        assert image_ai_enabled(s) is False
+
+    def test_effective_key_prefers_image_key(self):
+        s = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="sk-chat",
+            openai_image_api_key="sk-img",
+        )
+        assert _effective_image_api_key(s) == "sk-img"
+
+    def test_effective_key_falls_back_to_chat_key(self):
+        s = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="sk-chat",
+            openai_image_api_key="",
+        )
+        assert _effective_image_api_key(s) == "sk-chat"
+
+    def test_effective_base_url_prefers_image_url(self):
+        s = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_base_url="http://chat/v1",
+            openai_image_base_url="http://img/v1",
+        )
+        assert _effective_image_base_url(s) == "http://img/v1"
+
+    def test_effective_base_url_falls_back_to_chat(self):
+        s = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_base_url="http://chat/v1",
+            openai_image_base_url="",
+        )
+        assert _effective_image_base_url(s) == "http://chat/v1"
+
+    def test_load_settings_reads_image_env_vars(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
+        monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "key")
+        monkeypatch.setenv("TELEGRAM_GROUP_ID", "-100")
+        monkeypatch.setenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+        monkeypatch.setenv("OPENAI_IMAGE_API_KEY", "sk-img")
+        monkeypatch.setenv("OPENAI_IMAGE_BASE_URL", "http://img/v1")
+        monkeypatch.setenv("RICH_IMAGE_HOUR", "11")
+        from worldcup_bot.config import load_settings
+        s = load_settings()
+        assert s.openai_image_model == "gpt-image-2"
+        assert s.openai_image_api_key == "sk-img"
+        assert s.openai_image_base_url == "http://img/v1"
+        assert s.rich_image_hour == 11
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# build_rich_prompt
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBuildRichPrompt:
+    def test_no_arg_returns_base_prompt(self):
+        assert build_rich_prompt() == RICH_EDIT_PROMPT
+
+    def test_empty_history_gives_same_result_as_no_arg(self):
+        assert build_rich_prompt(history="") == build_rich_prompt()
+
+    def test_history_nonempty_adds_no_repeat_clause(self):
+        history = "- 2026-06-01 | iter 1 | Rolls-Royce, Mónaco"
+        p = build_rich_prompt(history=history)
+        lower = p.lower()
+        assert "different" in lower or "not repeat" in lower or "do not" in lower
+        assert history in p
+
+    def test_history_clause_appended_after_base(self):
+        history = "- 2026-06-01 | iter 1 | Rolls-Royce"
+        p = build_rich_prompt(history=history)
+        assert p.startswith(RICH_EDIT_PROMPT)
+
+    def test_history_nonempty_differs_from_no_history(self):
+        history = "- 2026-06-01 | iter 1 | yate, Mónaco"
+        assert build_rich_prompt(history=history) != build_rich_prompt()
+
+    def test_returns_string(self):
+        assert isinstance(build_rich_prompt(), str)
+
+    def test_deterministic(self):
+        assert build_rich_prompt() == build_rich_prompt()
+
+    def test_identity_preservation(self):
+        assert "same face" in build_rich_prompt().lower()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RICH_EDIT_PROMPT — pose allowed, identity-preservation scope
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichEditPromptContent:
+    def test_preserves_skin_tone(self):
+        assert "skin tone" in RICH_EDIT_PROMPT.lower()
+
+    def test_preserves_body(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "head" in lower or "features" in lower
+
+    def test_preserves_features(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "features" in lower or "traits" in lower
+
+    def test_explicitly_allows_pose_change(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "pose" in lower or "posture" in lower
+
+    def test_new_pose_required(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "new" in lower and "pose" in lower
+
+    def test_identity_preservation_still_includes_face(self):
+        assert "same face" in RICH_EDIT_PROMPT.lower()
+
+    def test_allows_hands_and_gestures(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "hands" in lower or "gestures" in lower
+
+    def test_allows_other_people_around_subject(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "other people" in lower or "entourage" in lower or "friends" in lower
+
+    def test_mentions_luxury_vehicles(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "vehicle" in lower or "car" in lower or "yacht" in lower or "plane" in lower or "helicopter" in lower
+
+    def test_mentions_varied_settings(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "setting" in lower or "island" in lower or "mansion" in lower or "pool" in lower
+
+    def test_instructs_not_all_at_once(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "not add everything at once" in lower or "few" in lower
+
+    def test_instructs_vary(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "vari" in lower or "different" in lower
+
+# ══════════════════════════════════════════════════════════════════════════════
+# select_base_image
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSelectBaseImage:
+    def test_prefers_state_rich_modified(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "rich_modified.png").write_bytes(b"evolved")
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"original")
+        result = select_base_image(str(state_dir), str(data_dir))
+        assert result == str(state_dir / "rich_modified.png")
+
+    def test_falls_back_to_original_jpg(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.jpg"
+        orig.write_bytes(b"original")
+        result = select_base_image(str(state_dir), str(data_dir))
+        assert result == str(orig)
+
+    def test_falls_back_to_original_png(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.png"
+        orig.write_bytes(b"original")
+        result = select_base_image(str(state_dir), str(data_dir))
+        assert result == str(orig)
+
+    def test_raises_when_neither_exists(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        with pytest.raises(FileNotFoundError):
+            select_base_image(str(state_dir), str(data_dir))
+
+    def test_state_dir_without_modified_falls_back(self, tmp_path):
+        # state_dir exists but rich_modified.png is absent
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.jpg"
+        orig.write_bytes(b"x")
+        result = select_base_image(str(state_dir), str(data_dir))
+        assert result == str(orig)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# load_level / save_level
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestLevelPersistence:
+    def test_load_returns_0_when_file_missing(self, tmp_path):
+        assert load_level(str(tmp_path)) == 0
+
+    def test_round_trip(self, tmp_path):
+        save_level(str(tmp_path), 7)
+        assert load_level(str(tmp_path)) == 7
+
+    def test_overwrite(self, tmp_path):
+        save_level(str(tmp_path), 3)
+        save_level(str(tmp_path), 5)
+        assert load_level(str(tmp_path)) == 5
+
+    def test_returns_0_on_corrupt_json(self, tmp_path):
+        (tmp_path / "rich_state.json").write_text("not-json")
+        assert load_level(str(tmp_path)) == 0
+
+    def test_returns_0_on_missing_key(self, tmp_path):
+        (tmp_path / "rich_state.json").write_text('{"other": 1}')
+        assert load_level(str(tmp_path)) == 0
+
+    def test_save_creates_directory_if_needed(self, tmp_path):
+        nested = tmp_path / "deep" / "state"
+        save_level(str(nested), 4)
+        assert load_level(str(nested)) == 4
+
+    def test_persisted_as_json(self, tmp_path):
+        save_level(str(tmp_path), 9)
+        data = json.loads((tmp_path / "rich_state.json").read_text())
+        assert data == {"level": 9}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# edit_rich_image
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestEditRichImage:
+    async def test_returns_decoded_bytes(self, tmp_path):
+        img_path = tmp_path / "input.jpg"
+        img_path.write_bytes(b"JPEG")
+        fake = _fake_client(base64.b64encode(b"PNGDATA").decode())
+        result = await edit_rich_image(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-image-2",
+            image_path=str(img_path),
+            prompt="make rich",
+            _client=fake,
+        )
+        assert result == b"PNGDATA"
+
+    async def test_passes_model_and_prompt_to_client(self, tmp_path):
+        img_path = tmp_path / "input.jpg"
+        img_path.write_bytes(b"JPEG")
+        fake = _fake_client()
+        await edit_rich_image(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-image-2",
+            image_path=str(img_path),
+            prompt="ultra rich",
+            _client=fake,
+        )
+        call_kwargs = fake.images.edit.call_args
+        assert call_kwargs.kwargs["model"] == "gpt-image-2"
+        assert call_kwargs.kwargs["prompt"] == "ultra rich"
+
+    async def test_raises_runtime_error_on_client_failure(self, tmp_path):
+        img_path = tmp_path / "input.jpg"
+        img_path.write_bytes(b"JPEG")
+        bad_client = MagicMock()
+        bad_client.images.edit = AsyncMock(side_effect=Exception("API error"))
+        with pytest.raises(RuntimeError, match="edit_rich_image failed"):
+            await edit_rich_image(
+                api_key="k",
+                base_url="http://x",
+                model="gpt-image-2",
+                image_path=str(img_path),
+                prompt="rich",
+                _client=bad_client,
+            )
+
+    async def test_raises_runtime_error_when_image_missing(self, tmp_path):
+        # File doesn't exist → open() raises, should wrap to RuntimeError
+        bad_client = MagicMock()
+        bad_client.images.edit = AsyncMock(return_value=MagicMock())
+        with pytest.raises(RuntimeError, match="edit_rich_image failed"):
+            await edit_rich_image(
+                api_key="k",
+                base_url="http://x",
+                model="gpt-image-2",
+                image_path=str(tmp_path / "nonexistent.jpg"),
+                prompt="rich",
+                _client=bad_client,
+            )
+
+    async def test_default_size_is_1024(self, tmp_path):
+        img_path = tmp_path / "input.jpg"
+        img_path.write_bytes(b"JPEG")
+        fake = _fake_client()
+        await edit_rich_image(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-image-2",
+            image_path=str(img_path),
+            prompt="rich",
+            _client=fake,
+        )
+        assert fake.images.edit.call_args.kwargs["size"] == "1024x1024"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# generate_rich_caption
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGenerateRichCaption:
+    async def test_non_json_returns_raw_text_with_empty_memo(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"OLDJPEG")
+        new_img.write_bytes(b"NEWPNG")
+        fake = _fake_caption_client("¡Soy el más rico!")
+        caption, memo = await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=3,
+            _client=fake,
+        )
+        assert caption == "¡Soy el más rico!"
+        assert memo == ""
+
+    async def test_json_response_returns_caption_and_memo(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        payload = json.dumps(
+            {"caption": "¡Soy el más rico!", "memo": "Lamborghini, Mónaco"},
+            ensure_ascii=False,
+        )
+        fake = _fake_caption_client(payload)
+        caption, memo = await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=2,
+            _client=fake,
+        )
+        assert caption == "¡Soy el más rico!"
+        assert memo == "Lamborghini, Mónaco"
+
+    async def test_fenced_json_is_stripped(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        inner = json.dumps({"caption": "Pringados", "memo": "Rolls, Marbella"})
+        fenced = f"```json\n{inner}\n```"
+        msg = MagicMock()
+        msg.content = fenced
+        choice = MagicMock()
+        choice.message = msg
+        resp = MagicMock()
+        resp.choices = [choice]
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=resp)
+        caption, memo = await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=4,
+            _client=client,
+        )
+        assert caption == "Pringados"
+        assert memo == "Rolls, Marbella"
+
+    async def test_plain_text_non_json_returns_empty_memo(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("just text")
+        caption, memo = await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            _client=fake,
+        )
+        assert caption == "just text"
+        assert memo == ""
+
+    async def test_history_injected_in_request_when_provided(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("text")
+        history = "- 2026-06-16 | iter 1 | Rolls-Royce, Mónaco"
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=2,
+            history=history,
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        assert "Rolls-Royce" in combined
+        assert "NO" in combined
+
+    async def test_no_history_text_when_history_empty(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("text")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            history="",
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        assert "Memos ya usados" not in combined
+
+    async def test_recent_captions_injected_when_provided(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("text")
+        recent = "caption from last week"
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=2,
+            recent_captions=recent,
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        assert "caption from last week" in combined
+        assert "TEXTOS ANTERIORES" in combined
+
+    async def test_no_recent_captions_text_when_empty(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("text")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            recent_captions="",
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        assert "TEXTOS ANTERIORES" not in combined
+
+    async def test_jpg_old_image_uses_jpeg_mime(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client()
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        old_img_url = user_content[1]["image_url"]["url"]
+        assert old_img_url.startswith("data:image/jpeg;base64,")
+
+    async def test_png_old_image_uses_png_mime(self, tmp_path):
+        old_img = tmp_path / "before.png"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client()
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=2,
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        old_img_url = user_content[1]["image_url"]["url"]
+        assert old_img_url.startswith("data:image/png;base64,")
+
+    async def test_request_has_two_image_url_parts(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client()
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        image_parts = [p for p in user_content if p.get("type") == "image_url"]
+        assert len(image_parts) == 2
+        assert image_parts[0]["image_url"]["url"].startswith("data:")
+        assert image_parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+    async def test_level_in_user_message(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client()
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=7,
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        assert "7" in " ".join(text_parts)
+
+    async def test_uses_max_completion_tokens_not_max_tokens(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client()
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            _client=fake,
+        )
+        call_kwargs = fake.chat.completions.create.call_args.kwargs
+        assert "max_completion_tokens" in call_kwargs
+        assert "max_tokens" not in call_kwargs
+
+    async def test_raises_runtime_error_on_failure(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        bad_client = MagicMock()
+        bad_client.chat.completions.create = AsyncMock(side_effect=Exception("API down"))
+        with pytest.raises(RuntimeError, match="generate_rich_caption failed"):
+            await generate_rich_caption(
+                api_key="k",
+                base_url="http://x",
+                model="gpt-4",
+                old_image_path=str(old_img),
+                new_image_path=str(new_img),
+                level=1,
+                _client=bad_client,
+            )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# History helpers — append_history / load_history_lines / format_history_for_prompt
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichHistory:
+    def test_append_creates_file_with_correct_line(self, tmp_path):
+        append_history(str(tmp_path), "2026-06-17", 3, "Lamborghini, Mónaco")
+        hist = tmp_path / "rich_history.txt"
+        assert hist.exists()
+        assert "2026-06-17 | iter 3 | Lamborghini, Mónaco" in hist.read_text(encoding="utf-8")
+
+    def test_append_skips_empty_memo(self, tmp_path):
+        append_history(str(tmp_path), "2026-06-17", 1, "")
+        assert not (tmp_path / "rich_history.txt").exists()
+
+    def test_append_skips_whitespace_memo(self, tmp_path):
+        append_history(str(tmp_path), "2026-06-17", 1, "   ")
+        assert not (tmp_path / "rich_history.txt").exists()
+
+    def test_append_caps_at_max_lines(self, tmp_path):
+        for i in range(35):
+            append_history(str(tmp_path), f"2026-05-{i + 1:02d}", i + 1, f"memo_{i}")
+        lines = load_history_lines(str(tmp_path))
+        assert len(lines) == RICH_HISTORY_MAX_LINES
+        # newest 30 kept (indices 5–34, i.e. memo_5 … memo_34)
+        assert any("memo_34" in ln for ln in lines)
+        assert not any("memo_0" in ln for ln in lines)
+        assert not any("memo_4" in ln for ln in lines)
+
+    def test_append_multiple_lines_in_order(self, tmp_path):
+        append_history(str(tmp_path), "2026-06-01", 1, "Rolls-Royce")
+        append_history(str(tmp_path), "2026-06-02", 2, "Mónaco")
+        lines = load_history_lines(str(tmp_path))
+        assert len(lines) == 2
+        assert "Rolls-Royce" in lines[0]
+        assert "Mónaco" in lines[1]
+
+    def test_load_history_lines_returns_empty_when_missing(self, tmp_path):
+        assert load_history_lines(str(tmp_path)) == []
+
+    def test_load_history_lines_round_trip(self, tmp_path):
+        append_history(str(tmp_path), "2026-06-17", 3, "Lamborghini, Mónaco")
+        lines = load_history_lines(str(tmp_path))
+        assert len(lines) == 1
+        assert "Lamborghini, Mónaco" in lines[0]
+
+    def test_load_history_lines_strips_blanks(self, tmp_path):
+        (tmp_path / "rich_history.txt").write_text("line1\n\n  \nline2\n", encoding="utf-8")
+        lines = load_history_lines(str(tmp_path))
+        assert lines == ["line1", "line2"]
+
+    def test_format_history_empty_returns_empty_string(self, tmp_path):
+        assert format_history_for_prompt(str(tmp_path)) == ""
+
+    def test_format_history_nonempty_prefixes_with_dash(self, tmp_path):
+        append_history(str(tmp_path), "2026-06-17", 3, "Lamborghini, Mónaco")
+        result = format_history_for_prompt(str(tmp_path))
+        assert result.startswith("- ")
+        assert "Lamborghini, Mónaco" in result
+
+    def test_format_history_multiple_lines(self, tmp_path):
+        append_history(str(tmp_path), "2026-06-01", 1, "Rolls-Royce")
+        append_history(str(tmp_path), "2026-06-02", 2, "yate")
+        result = format_history_for_prompt(str(tmp_path))
+        assert "Rolls-Royce" in result
+        assert "yate" in result
+
+    def test_format_history_max_items_limits_output(self, tmp_path):
+        for i in range(4):
+            append_history(str(tmp_path), f"2026-06-{i + 1:02d}", i + 1, f"memo{i}")
+        result = format_history_for_prompt(str(tmp_path), max_items=2)
+        result_lines = [ln for ln in result.split("\n") if ln]
+        assert len(result_lines) == 2
+        assert "memo3" in result
+        assert "memo2" in result
+        assert "memo0" not in result
+        assert "memo1" not in result
+
+    def test_format_history_max_items_none_returns_all(self, tmp_path):
+        for i in range(4):
+            append_history(str(tmp_path), f"2026-06-{i + 1:02d}", i + 1, f"memo{i}")
+        result = format_history_for_prompt(str(tmp_path), max_items=None)
+        result_lines = [ln for ln in result.split("\n") if ln]
+        assert len(result_lines) == 4
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# append_caption / load_captions / format_captions_for_prompt
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichCaptions:
+    def test_append_caption_creates_file(self, tmp_path):
+        append_caption(str(tmp_path), "caption text here")
+        assert (tmp_path / "rich_captions.txt").exists()
+
+    def test_append_caption_collapses_newlines(self, tmp_path):
+        append_caption(str(tmp_path), "line one\nline two\nline three")
+        lines = load_captions(str(tmp_path))
+        assert len(lines) == 1
+        assert " / " not in lines[0]
+        assert "\n" not in lines[0]
+        assert "line one" in lines[0]
+        assert "line two" in lines[0]
+
+    def test_append_caption_stores_no_slash_separator(self, tmp_path):
+        append_caption(str(tmp_path), "first line\nsecond line\nthird line")
+        lines = load_captions(str(tmp_path))
+        assert len(lines) == 1
+        assert "/" not in lines[0]
+        assert "\n" not in lines[0]
+        assert "first line" in lines[0]
+
+    def test_format_captions_for_prompt_has_no_slash_separator(self, tmp_path):
+        append_caption(str(tmp_path), "fruta\nverdura\npescado")
+        result = format_captions_for_prompt(str(tmp_path))
+        assert " / " not in result
+
+    def test_append_caption_skips_empty(self, tmp_path):
+        append_caption(str(tmp_path), "")
+        assert not (tmp_path / "rich_captions.txt").exists()
+
+    def test_append_caption_skips_whitespace(self, tmp_path):
+        append_caption(str(tmp_path), "   ")
+        assert not (tmp_path / "rich_captions.txt").exists()
+
+    def test_append_caption_caps_at_max(self, tmp_path):
+        for i in range(8):
+            append_caption(str(tmp_path), f"caption_{i}")
+        captions = load_captions(str(tmp_path))
+        assert len(captions) == RICH_CAPTIONS_MAX
+        assert any("caption_7" in c for c in captions)
+        assert not any("caption_0" in c for c in captions)
+        assert not any("caption_1" in c for c in captions)
+
+    def test_load_captions_empty_returns_empty_list(self, tmp_path):
+        assert load_captions(str(tmp_path)) == []
+
+    def test_load_captions_round_trip(self, tmp_path):
+        append_caption(str(tmp_path), "Mi yacht en Mónaco")
+        captions = load_captions(str(tmp_path))
+        assert len(captions) == 1
+        assert "Mi yacht en Mónaco" in captions[0]
+
+    def test_format_captions_for_prompt_empty(self, tmp_path):
+        assert format_captions_for_prompt(str(tmp_path)) == ""
+
+    def test_format_captions_for_prompt_nonempty(self, tmp_path):
+        append_caption(str(tmp_path), "caption uno")
+        append_caption(str(tmp_path), "caption dos")
+        result = format_captions_for_prompt(str(tmp_path))
+        assert result != ""
+        assert "caption uno" in result
+        assert "caption dos" in result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# run_rich_iteration
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRunRichIteration:
+    async def test_first_iteration_uses_original_and_returns_level_1(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.jpg"
+        orig.write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake = _fake_client(base64.b64encode(b"PNG1").decode())
+        fake_cap = _fake_caption_client("Primera riqueza")
+        with patch(
+            "worldcup_bot.ai.rich_image.select_base_image",
+            return_value=str(orig),
+        ):
+            out_path, level, caption = await run_rich_iteration(
+                settings, _client=fake, _caption_client=fake_cap
+            )
+
+        assert level == 1
+        assert out_path == str(state_dir / "rich_modified.png")
+        assert Path(out_path).read_bytes() == b"PNG1"
+        assert caption == "Primera riqueza"
+
+    async def test_second_iteration_uses_modified_and_returns_level_2(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.jpg"
+        orig.write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake1 = _fake_client(base64.b64encode(b"PNG1").decode())
+        fake_cap1 = _fake_caption_client("Nivel 1")
+        await run_rich_iteration(
+            settings, _client=fake1, _caption_client=fake_cap1, _data_dir=str(data_dir)
+        )
+
+        fake2 = _fake_client(base64.b64encode(b"PNG2").decode())
+        fake_cap2 = _fake_caption_client("Nivel 2")
+        out_path2, level2, caption2 = await run_rich_iteration(
+            settings, _client=fake2, _caption_client=fake_cap2, _data_dir=str(data_dir)
+        )
+
+        assert level2 == 2
+        assert Path(out_path2).read_bytes() == b"PNG2"
+        assert caption2 == "Nivel 2"
+
+    async def test_second_run_old_image_is_previous_modified(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.jpg"
+        orig.write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img1 = _fake_client(base64.b64encode(b"PNG1").decode())
+        fake_cap1 = _fake_caption_client()
+        await run_rich_iteration(
+            settings, _client=fake_img1, _caption_client=fake_cap1, _data_dir=str(data_dir)
+        )
+
+        fake_img2 = _fake_client(base64.b64encode(b"PNG2").decode())
+        fake_cap2 = _fake_caption_client()
+        await run_rich_iteration(
+            settings, _client=fake_img2, _caption_client=fake_cap2, _data_dir=str(data_dir)
+        )
+
+        # Second run: OLD image is the previous rich_modified.png (PNG extension)
+        messages = fake_cap2.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        before_url = user_content[1]["image_url"]["url"]
+        assert before_url.startswith("data:image/png;base64,")
+
+    async def test_level_persisted_between_calls(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake = _fake_client()
+        fake_cap = _fake_caption_client()
+
+        await run_rich_iteration(
+            settings, _client=fake, _caption_client=fake_cap, _data_dir=str(data_dir)
+        )
+        assert load_level(str(state_dir)) == 1
+
+        await run_rich_iteration(
+            settings, _client=fake, _caption_client=fake_cap, _data_dir=str(data_dir)
+        )
+        assert load_level(str(state_dir)) == 2
+
+    async def test_overwrite_rich_modified_each_time(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_cap = _fake_caption_client()
+
+        fake_a = _fake_client(base64.b64encode(b"ITERATION_A").decode())
+        await run_rich_iteration(
+            settings, _client=fake_a, _caption_client=fake_cap, _data_dir=str(data_dir)
+        )
+        assert Path(state_dir / "rich_modified.png").read_bytes() == b"ITERATION_A"
+
+        fake_b = _fake_client(base64.b64encode(b"ITERATION_B").decode())
+        await run_rich_iteration(
+            settings, _client=fake_b, _caption_client=fake_cap, _data_dir=str(data_dir)
+        )
+        assert Path(state_dir / "rich_modified.png").read_bytes() == b"ITERATION_B"
+
+    async def test_temp_file_removed_after_rename(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake = _fake_client(base64.b64encode(b"PNG1").decode())
+        fake_cap = _fake_caption_client()
+
+        await run_rich_iteration(
+            settings, _client=fake, _caption_client=fake_cap, _data_dir=str(data_dir)
+        )
+        assert not (state_dir / "rich_modified.new.png").exists()
+        assert (state_dir / "rich_modified.png").exists()
+
+    async def test_caption_from_caption_client_returned(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake = _fake_client()
+        fake_cap = _fake_caption_client("Soy millonario, pringados")
+
+        _, _, caption = await run_rich_iteration(
+            settings, _client=fake, _caption_client=fake_cap, _data_dir=str(data_dir)
+        )
+        assert caption == "Soy millonario, pringados"
+
+    async def test_caption_falls_back_when_caption_client_raises(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake = _fake_client()
+        bad_cap = MagicMock()
+        bad_cap.chat.completions.create = AsyncMock(side_effect=RuntimeError("caption API down"))
+
+        out_path, level, caption = await run_rich_iteration(
+            settings, _client=fake, _caption_client=bad_cap, _data_dir=str(data_dir)
+        )
+        assert caption == "🤑 Cada día más rico a vuestra costa"
+        assert Path(out_path).exists()
+
+    async def test_caption_falls_back_when_chat_not_configured(self, tmp_path):
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(
+            tmp_path,
+            state_dir=str(state_dir),
+            openai_api_key="",
+            openai_base_url="",
+            openai_model="",
+        )
+        fake = _fake_client()
+        out_path, level, caption = await run_rich_iteration(
+            settings, _client=fake, _data_dir=str(data_dir)
+        )
+        assert caption == "🤑 Cada día más rico a vuestra costa"
+        assert Path(out_path).exists()
+
+    async def test_history_appended_after_json_caption_memo(self, tmp_path):
+        """When caption client returns valid JSON with a memo, history file is created."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        payload = json.dumps({"caption": "¡Soy millonario!", "memo": "Lamborghini, Mónaco"}, ensure_ascii=False)
+        fake_cap = _fake_caption_client(payload)
+        fixed_now = datetime(2026, 6, 17, 11, 0, 0, tzinfo=pytz.UTC)
+
+        out_path, level, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=fixed_now,
+        )
+
+        assert caption == "¡Soy millonario!"
+        assert Path(out_path).exists()
+        hist_lines = load_history_lines(str(state_dir))
+        assert len(hist_lines) == 1
+        assert "Lamborghini, Mónaco" in hist_lines[0]
+        assert "2026-06-17" in hist_lines[0]
+        assert "iter" in hist_lines[0]
+        captions = load_captions(str(state_dir))
+        assert len(captions) == 1
+        assert "¡Soy millonario!" in captions[0]
+
+    async def test_second_run_history_injected_into_image_prompt(self, tmp_path):
+        """Second run must pass prior history to the image-edit prompt."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fixed_now = datetime(2026, 6, 17, 11, 0, 0, tzinfo=pytz.UTC)
+
+        # Run 1 — JSON caption so a memo gets persisted
+        payload1 = json.dumps({"caption": "Nivel 1", "memo": "Rolls-Royce, Marbella"}, ensure_ascii=False)
+        fake_img1 = _fake_client(base64.b64encode(b"PNG1").decode())
+        fake_cap1 = _fake_caption_client(payload1)
+        await run_rich_iteration(
+            settings,
+            _client=fake_img1,
+            _caption_client=fake_cap1,
+            _data_dir=str(data_dir),
+            _now=fixed_now,
+        )
+
+        # Run 2 — check that the image prompt includes the memo from run 1
+        fake_img2 = _fake_client(base64.b64encode(b"PNG2").decode())
+        fake_cap2 = _fake_caption_client("Nivel 2")
+        await run_rich_iteration(
+            settings,
+            _client=fake_img2,
+            _caption_client=fake_cap2,
+            _data_dir=str(data_dir),
+            _now=fixed_now,
+        )
+
+        img_call_kwargs = fake_img2.images.edit.call_args.kwargs
+        assert "Rolls-Royce" in img_call_kwargs["prompt"]
+
+    async def test_second_run_history_injected_into_caption_request(self, tmp_path):
+        """Second run must pass prior history to the caption request messages."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fixed_now = datetime(2026, 6, 17, 11, 0, 0, tzinfo=pytz.UTC)
+
+        # Run 1 — persist a memo
+        payload1 = json.dumps({"caption": "Nivel 1", "memo": "yate, Canarias"}, ensure_ascii=False)
+        fake_img1 = _fake_client(base64.b64encode(b"PNG1").decode())
+        fake_cap1 = _fake_caption_client(payload1)
+        await run_rich_iteration(
+            settings,
+            _client=fake_img1,
+            _caption_client=fake_cap1,
+            _data_dir=str(data_dir),
+            _now=fixed_now,
+        )
+
+        # Run 2 — check caption messages include history
+        fake_img2 = _fake_client(base64.b64encode(b"PNG2").decode())
+        fake_cap2 = _fake_caption_client("Nivel 2")
+        await run_rich_iteration(
+            settings,
+            _client=fake_img2,
+            _caption_client=fake_cap2,
+            _data_dir=str(data_dir),
+            _now=fixed_now,
+        )
+
+        cap_call_kwargs = fake_cap2.chat.completions.create.call_args.kwargs
+        messages = cap_call_kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        assert "yate" in combined or "Canarias" in combined
+
+    async def test_caption_error_memo_not_appended_image_still_written(self, tmp_path):
+        """When caption raises, no history line is written, but image is saved."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        bad_cap = MagicMock()
+        bad_cap.chat.completions.create = AsyncMock(side_effect=RuntimeError("down"))
+
+        out_path, level, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=bad_cap,
+            _data_dir=str(data_dir),
+        )
+
+        assert caption == "🤑 Cada día más rico a vuestra costa"
+        assert Path(out_path).exists()
+        # Nothing appended on caption failure
+        assert load_history_lines(str(state_dir)) == []
+        assert load_captions(str(state_dir)) == []
+
+
+    async def test_caption_appended_to_captions_file(self, tmp_path):
+        """Successful caption generation stores caption in rich_captions.txt."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        payload = json.dumps({"caption": "Soy millonario hoy", "memo": "yacht"}, ensure_ascii=False)
+        fake_cap = _fake_caption_client(payload)
+
+        await run_rich_iteration(
+            settings, _client=fake_img, _caption_client=fake_cap, _data_dir=str(data_dir)
+        )
+
+        captions = load_captions(str(state_dir))
+        assert len(captions) == 1
+        assert "Soy millonario hoy" in captions[0]
+
+    async def test_image_prompt_limits_to_12_memos(self, tmp_path):
+        """Image-edit prompt uses at most the last 12 history memos."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        # Pre-populate 13 history lines
+        for i in range(13):
+            append_history(str(state_dir), f"2026-05-{i + 1:02d}", i + 1, f"memo-item-{i}")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("caption")
+
+        await run_rich_iteration(
+            settings, _client=fake_img, _caption_client=fake_cap, _data_dir=str(data_dir)
+        )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        # Oldest entry should be excluded (only last 12 shown)
+        assert "memo-item-0" not in img_prompt
+        # Most recent entry should be present
+        assert "memo-item-12" in img_prompt
+
+    async def test_second_run_caption_receives_recent_captions(self, tmp_path):
+        """Caption call must include recent captions from rich_captions.txt."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        # Pre-populate captions store
+        append_caption(str(state_dir), "previous caption one")
+        append_caption(str(state_dir), "previous caption two")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("new caption")
+
+        await run_rich_iteration(
+            settings, _client=fake_img, _caption_client=fake_cap, _data_dir=str(data_dir)
+        )
+
+        messages = fake_cap.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        assert "previous caption one" in combined
+        assert "TEXTOS ANTERIORES" in combined
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# rich_image_job
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichImageJob:
+    async def test_sends_photo_when_group_id_set(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-1001234567890")
+        ctx = _make_context(settings)
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with patch(
+            "worldcup_bot.__main__.run_rich_iteration",
+            new=AsyncMock(return_value=(str(out_file), 1, "¡Soy rico!")),
+        ):
+            await main_mod.rich_image_job(ctx)
+
+        ctx.bot.send_photo.assert_awaited_once()
+        call_kwargs = ctx.bot.send_photo.call_args
+        assert call_kwargs.kwargs["chat_id"] == "-1001234567890"
+        assert call_kwargs.kwargs["caption"] == "¡Soy rico!"
+
+    async def test_no_send_when_group_id_empty(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="")
+        ctx = _make_context(settings)
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with patch(
+            "worldcup_bot.__main__.run_rich_iteration",
+            new=AsyncMock(return_value=(str(out_file), 1, "caption")),
+        ):
+            await main_mod.rich_image_job(ctx)
+
+        ctx.bot.send_photo.assert_not_awaited()
+
+    async def test_skips_when_image_ai_not_configured(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = Settings(
+            telegram_bot_token="tok",
+            football_data_api_key="key",
+            state_dir=str(tmp_path),
+            # No image keys configured
+        )
+        ctx = _make_context(settings)
+
+        with patch("worldcup_bot.__main__.run_rich_iteration") as mock_run:
+            await main_mod.rich_image_job(ctx)
+
+        mock_run.assert_not_called()
+
+    async def test_does_not_raise_on_iteration_error(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-1001234567890")
+        ctx = _make_context(settings)
+
+        with patch(
+            "worldcup_bot.__main__.run_rich_iteration",
+            new=AsyncMock(side_effect=RuntimeError("API down")),
+        ):
+            # Must NOT raise
+            await main_mod.rich_image_job(ctx)
+
+    async def test_does_not_raise_on_send_error(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-1001234567890")
+        ctx = _make_context(settings)
+        ctx.bot.send_photo = AsyncMock(side_effect=Exception("Telegram down"))
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with patch(
+            "worldcup_bot.__main__.run_rich_iteration",
+            new=AsyncMock(return_value=(str(out_file), 1, "caption")),
+        ):
+            await main_mod.rich_image_job(ctx)  # must not raise
+
+    async def test_uses_caption_from_run_rich_iteration(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-1001234567890")
+        ctx = _make_context(settings)
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with patch(
+            "worldcup_bot.__main__.run_rich_iteration",
+            new=AsyncMock(return_value=(str(out_file), 5, "🤑 Pringados de la porra!")),
+        ):
+            await main_mod.rich_image_job(ctx)
+
+        caption = ctx.bot.send_photo.call_args.kwargs["caption"]
+        assert caption == "🤑 Pringados de la porra!"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Scheduling — main() wires up rich_image job
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichImageScheduling:
+    def test_main_schedules_rich_image_job(self):
+        """main() source contains run_daily(rich_image_job, ...)."""
+        import worldcup_bot.__main__ as main_mod
+
+        src = inspect.getsource(main_mod.main)
+        assert "rich_image_job" in src
+        assert "run_daily" in src
+
+    def test_main_uses_rich_image_hour(self):
+        """main() scheduling block references rich_image_hour from settings."""
+        import worldcup_bot.__main__ as main_mod
+
+        src = inspect.getsource(main_mod.main)
+        assert "rich_image_hour" in src
+
+    def test_main_names_job_rich_image(self):
+        """Job is registered with name='rich_image'."""
+        import worldcup_bot.__main__ as main_mod
+
+        src = inspect.getsource(main_mod.main)
+        assert '"rich_image"' in src or "'rich_image'" in src
+
+    def test_main_gates_on_image_ai_enabled(self):
+        """Scheduling is conditional on image_ai_enabled(settings)."""
+        import worldcup_bot.__main__ as main_mod
+
+        src = inspect.getsource(main_mod.main)
+        assert "image_ai_enabled" in src
+
+    def test_rich_image_job_importable_and_async(self):
+        """rich_image_job is a top-level importable coroutine."""
+        import asyncio
+        from worldcup_bot.__main__ import rich_image_job
+
+        assert callable(rich_image_job)
+        assert asyncio.iscoroutinefunction(rich_image_job)
+
+    def test_run_rich_iteration_importable(self):
+        """run_rich_iteration is importable from rich_image module (for E2E use)."""
+        from worldcup_bot.ai.rich_image import run_rich_iteration
+        import asyncio
+
+        assert callable(run_rich_iteration)
+        assert asyncio.iscoroutinefunction(run_rich_iteration)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RICH_EDIT_PROMPT — luxury outfit + pose changes (moderation-safe framing)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichEditPromptMandatoryChanges:
+    def test_clothing_change_required(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "outfit" in lower or "attire" in lower
+        assert "fully clothed" in lower
+
+    def test_new_luxury_attire_per_iteration(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "new" in lower and (
+            "clothing" in lower or "outfit" in lower or "attire" in lower
+        )
+
+    def test_pose_change_required(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "posture" in lower or "pose" in lower
+
+    def test_only_face_and_skin_preserved_not_clothing(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "same face" in lower
+        assert "skin tone" in lower
+        assert "clothing" in lower or "outfit" in lower
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# build_rich_prompt — anchor parameter
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBuildRichPromptAnchor:
+    def test_anchor_false_omits_anchor_clause(self):
+        p = build_rich_prompt(anchor=False)
+        assert RICH_FACE_ANCHOR_CLAUSE not in p
+
+    def test_anchor_true_includes_anchor_clause(self):
+        p = build_rich_prompt(anchor=True)
+        assert RICH_FACE_ANCHOR_CLAUSE in p
+
+    def test_anchor_true_contains_exact_match_language(self):
+        p = build_rich_prompt(anchor=True)
+        lower = p.lower()
+        assert "exactly" in lower and "original" in lower
+
+    def test_anchor_true_contains_original_language(self):
+        p = build_rich_prompt(anchor=True)
+        lower = p.lower()
+        assert "original" in lower
+
+    def test_anchor_true_contains_invent_new_clothing_and_pose(self):
+        p = build_rich_prompt(anchor=True)
+        lower = p.lower()
+        assert "new" in lower and ("clothing" in lower or "outfit" in lower)
+        assert "new" in lower and "pose" in lower
+        assert "fully" in lower and "clothed" in lower
+
+    def test_history_and_anchor_both_present(self):
+        history = "- iter 1 | yacht"
+        p = build_rich_prompt(history=history, anchor=True)
+        assert RICH_FACE_ANCHOR_CLAUSE in p
+        assert history in p
+        assert p.startswith(RICH_EDIT_PROMPT)
+
+    def test_anchor_false_with_history_no_anchor_clause(self):
+        history = "- iter 1 | yacht"
+        p = build_rich_prompt(history=history, anchor=False)
+        assert RICH_FACE_ANCHOR_CLAUSE not in p
+        assert history in p
+
+    def test_anchor_true_no_history_starts_with_base(self):
+        p = build_rich_prompt(anchor=True)
+        assert p.startswith(RICH_EDIT_PROMPT)
+
+    def test_anchor_false_no_history_equals_base_prompt(self):
+        assert build_rich_prompt(anchor=False) == RICH_EDIT_PROMPT
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# edit_rich_image — anchor_path support
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestEditRichImageAnchor:
+    async def test_anchor_path_sends_list_of_two(self, tmp_path):
+        base_img = tmp_path / "base.jpg"
+        anchor_img = tmp_path / "anchor.jpg"
+        base_img.write_bytes(b"BASE")
+        anchor_img.write_bytes(b"ANCHOR")
+        fake = _fake_client()
+        await edit_rich_image(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-image-2",
+            image_path=str(base_img),
+            anchor_path=str(anchor_img),
+            prompt="rich",
+            _client=fake,
+        )
+        call_kwargs = fake.images.edit.call_args.kwargs
+        assert isinstance(call_kwargs["image"], list)
+        assert len(call_kwargs["image"]) == 2
+
+    async def test_no_anchor_sends_single_image_not_list(self, tmp_path):
+        base_img = tmp_path / "base.jpg"
+        base_img.write_bytes(b"BASE")
+        fake = _fake_client()
+        await edit_rich_image(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-image-2",
+            image_path=str(base_img),
+            prompt="rich",
+            _client=fake,
+        )
+        call_kwargs = fake.images.edit.call_args.kwargs
+        assert not isinstance(call_kwargs["image"], list)
+
+    async def test_anchor_same_as_image_path_sends_single(self, tmp_path):
+        base_img = tmp_path / "base.jpg"
+        base_img.write_bytes(b"BASE")
+        fake = _fake_client()
+        await edit_rich_image(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-image-2",
+            image_path=str(base_img),
+            anchor_path=str(base_img),  # same → no anchor
+            prompt="rich",
+            _client=fake,
+        )
+        call_kwargs = fake.images.edit.call_args.kwargs
+        assert not isinstance(call_kwargs["image"], list)
+
+    async def test_anchor_error_raises_runtime_error(self, tmp_path):
+        base_img = tmp_path / "base.jpg"
+        anchor_img = tmp_path / "anchor.jpg"
+        base_img.write_bytes(b"BASE")
+        anchor_img.write_bytes(b"ANCHOR")
+        bad_client = MagicMock()
+        bad_client.images.edit = AsyncMock(side_effect=Exception("fail"))
+        with pytest.raises(RuntimeError, match="edit_rich_image failed"):
+            await edit_rich_image(
+                api_key="k",
+                base_url="http://x",
+                model="gpt-image-2",
+                image_path=str(base_img),
+                anchor_path=str(anchor_img),
+                prompt="rich",
+                _client=bad_client,
+            )
+
+    async def test_anchor_returns_decoded_bytes(self, tmp_path):
+        base_img = tmp_path / "base.jpg"
+        anchor_img = tmp_path / "anchor.jpg"
+        base_img.write_bytes(b"BASE")
+        anchor_img.write_bytes(b"ANCHOR")
+        fake = _fake_client(base64.b64encode(b"RESULT").decode())
+        result = await edit_rich_image(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-image-2",
+            image_path=str(base_img),
+            anchor_path=str(anchor_img),
+            prompt="rich",
+            _client=fake,
+        )
+        assert result == b"RESULT"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# find_original_image
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFindOriginalImage:
+    def test_returns_jpg_original(self, tmp_path):
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.jpg"
+        orig.write_bytes(b"JPG")
+        result = find_original_image(str(data_dir))
+        assert result == str(orig)
+
+    def test_returns_png_original(self, tmp_path):
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.png"
+        orig.write_bytes(b"PNG")
+        result = find_original_image(str(data_dir))
+        assert result == str(orig)
+
+    def test_raises_when_no_original_exists(self, tmp_path):
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        with pytest.raises(FileNotFoundError):
+            find_original_image(str(data_dir))
+
+    def test_raises_when_rich_dir_missing(self, tmp_path):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        with pytest.raises(FileNotFoundError):
+            find_original_image(str(data_dir))
+
+    def test_returns_original_when_evolved_exists_in_state(self, tmp_path):
+        """Returns the data-dir original even when a state-dir evolved image exists."""
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.jpg"
+        orig.write_bytes(b"JPG")
+        # Evolved image lives in state dir, not in data_dir/rich
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "rich_modified.png").write_bytes(b"EVOLVED")
+        result = find_original_image(str(data_dir))
+        assert result == str(orig)
+
+    def test_never_returns_rich_modified(self, tmp_path):
+        """find_original_image must never return rich_modified.png."""
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.jpg"
+        orig.write_bytes(b"JPG")
+        result = find_original_image(str(data_dir))
+        assert "rich_modified" not in result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# run_rich_iteration — anchor wiring
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRunRichIterationAnchor:
+    async def test_first_run_no_evolved_single_image_no_anchor_clause(self, tmp_path):
+        """First run: no evolved image → single image call, prompt without anchor clause."""
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake = _fake_client(base64.b64encode(b"PNG1").decode())
+        fake_cap = _fake_caption_client("caption")
+
+        await run_rich_iteration(
+            settings, _client=fake, _caption_client=fake_cap, _data_dir=str(data_dir)
+        )
+
+        call_kwargs = fake.images.edit.call_args.kwargs
+        assert not isinstance(call_kwargs["image"], list)
+        assert RICH_FACE_ANCHOR_CLAUSE not in call_kwargs["prompt"]
+
+    async def test_second_run_evolved_uses_list_with_anchor_clause(self, tmp_path):
+        """Second run: evolved exists → list of 2 images, prompt has anchor clause."""
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+
+        # Run 1 to create the evolved image
+        fake1 = _fake_client(base64.b64encode(b"PNG1").decode())
+        fake_cap1 = _fake_caption_client("caption1")
+        await run_rich_iteration(
+            settings, _client=fake1, _caption_client=fake_cap1, _data_dir=str(data_dir)
+        )
+
+        # Run 2 — evolved now exists
+        fake2 = _fake_client(base64.b64encode(b"PNG2").decode())
+        fake_cap2 = _fake_caption_client("caption2")
+        await run_rich_iteration(
+            settings, _client=fake2, _caption_client=fake_cap2, _data_dir=str(data_dir)
+        )
+
+        call_kwargs = fake2.images.edit.call_args.kwargs
+        assert isinstance(call_kwargs["image"], list)
+        assert len(call_kwargs["image"]) == 2
+        assert RICH_FACE_ANCHOR_CLAUSE in call_kwargs["prompt"]
+
+    async def test_second_run_original_is_anchor_path(self, tmp_path):
+        """Second run: edit_rich_image receives anchor_path pointing to the original."""
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        orig = data_dir / "rich" / "rich_original.jpg"
+        orig.write_bytes(b"JPEG")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+
+        # Run 1
+        fake1 = _fake_client(base64.b64encode(b"PNG1").decode())
+        await run_rich_iteration(
+            settings, _client=fake1, _data_dir=str(data_dir)
+        )
+
+        # Run 2 — capture edit_rich_image kwargs
+        captured: dict = {}
+
+        async def mock_edit(**kwargs):
+            captured.update(kwargs)
+            return b"PNG2"
+
+        with patch("worldcup_bot.ai.rich_image.edit_rich_image", side_effect=mock_edit):
+            await run_rich_iteration(settings, _data_dir=str(data_dir))
+
+        assert captured.get("anchor_path") is not None
+        assert os.path.abspath(captured["anchor_path"]) == os.path.abspath(str(orig))
+
+    async def test_first_run_anchor_path_is_none(self, tmp_path):
+        """First run (no evolved): anchor_path is None in edit call."""
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        captured: dict = {}
+
+        async def mock_edit(**kwargs):
+            captured.update(kwargs)
+            return b"PNG1"
+
+        with patch("worldcup_bot.ai.rich_image.edit_rich_image", side_effect=mock_edit):
+            await run_rich_iteration(settings, _data_dir=str(data_dir))
+
+        assert captured.get("anchor_path") is None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# _normalize_caption
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestNormalizeCaption:
+    def test_literal_backslash_n_becomes_real_newline(self):
+        assert _normalize_caption("a\\nb") == "a\nb"
+
+    def test_literal_backslash_rn_becomes_real_newline(self):
+        assert _normalize_caption("a\\r\\nb") == "a\nb"
+
+    def test_real_crlf_normalized_to_lf(self):
+        assert _normalize_caption("a\r\nb") == "a\nb"
+
+    def test_three_newlines_collapsed_to_two(self):
+        assert _normalize_caption("a\n\n\nb") == "a\n\nb"
+
+    def test_four_newlines_collapsed_to_two(self):
+        assert _normalize_caption("a\n\n\n\nb") == "a\n\nb"
+
+    def test_two_newlines_kept_as_is(self):
+        assert _normalize_caption("a\n\nb") == "a\n\nb"
+
+    def test_strips_whole_string(self):
+        assert _normalize_caption("  hello  ") == "hello"
+
+    def test_strips_trailing_spaces_on_each_line(self):
+        result = _normalize_caption("line one   \nline two   ")
+        assert result == "line one\nline two"
+
+    def test_empty_string_returns_empty(self):
+        assert _normalize_caption("") == ""
+
+    def test_no_escapes_returns_stripped(self):
+        assert _normalize_caption("  ¡Soy rico!  ") == "¡Soy rico!"
+
+    def test_mixed_real_and_escaped_newlines(self):
+        result = _normalize_caption("a\\nb\r\nc")
+        assert result == "a\nb\nc"
+
+    def test_space_slash_space_becomes_newline(self):
+        assert _normalize_caption("a / b / c") == "a\nb\nc"
+
+    def test_slash_with_leading_space_and_trailing_newline_becomes_newline(self):
+        assert _normalize_caption("a /\n b") == "a\nb"
+
+    def test_slash_with_leading_newline_and_trailing_space_becomes_newline(self):
+        assert _normalize_caption("a\n/ b") == "a\nb"
+
+    def test_slash_without_space_preserved_24_7(self):
+        assert "24/7" in _normalize_caption("available 24/7")
+
+    def test_slash_without_space_preserved_and_or(self):
+        assert "and/or" in _normalize_caption("and/or option")
+
+    def test_slash_separator_in_sentence_becomes_newline(self):
+        result = _normalize_caption("con hucha. / Me he regalado algo.")
+        assert " / " not in result
+        assert "\n" in result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# generate_rich_caption — _normalize_caption applied
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGenerateRichCaptionNormalization:
+    async def test_json_caption_with_escaped_newline_is_normalized(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        payload = json.dumps(
+            {"caption": "x\\ny", "memo": "Lamborghini"},
+            ensure_ascii=False,
+        )
+        fake = _fake_caption_client(payload)
+        caption, memo = await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            _client=fake,
+        )
+        assert caption == "x\ny"
+        assert "\n" in caption
+        assert memo == "Lamborghini"
+
+    async def test_non_json_caption_with_escaped_newline_is_normalized(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("line one\\nline two")
+        caption, memo = await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            _client=fake,
+        )
+        assert caption == "line one\nline two"
+        assert memo == ""
+
+    async def test_json_memo_is_stripped(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        payload = json.dumps({"caption": "texto", "memo": "  Mónaco  "}, ensure_ascii=False)
+        fake = _fake_caption_client(payload)
+        _, memo = await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            _client=fake,
+        )
+        assert memo == "Mónaco"
+
+    async def test_slash_separator_in_caption_is_normalized_to_newline(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        payload = json.dumps(
+            {"caption": "Me compré un yate. / Me fui de vacaciones. / Pringados.", "memo": "yate"},
+            ensure_ascii=False,
+        )
+        fake = _fake_caption_client(payload)
+        caption, _ = await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            _client=fake,
+        )
+        assert " / " not in caption
+        assert "\n" in caption
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RICH_CAPTION_PROMPT — line-break instruction
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichCaptionPromptLineBreaks:
+    def test_mentions_saltos_de_linea(self):
+        lower = RICH_CAPTION_PROMPT.lower()
+        assert "saltos de línea" in lower or "salto de línea" in lower
+
+    def test_forbids_slashes_with_nunca(self):
+        lower = RICH_CAPTION_PROMPT.lower()
+        assert "nunca" in lower
+
+    def test_slash_character_mentioned_as_forbidden(self):
+        assert "/" in RICH_CAPTION_PROMPT
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RICH_EDIT_PROMPT — richer emphasis + optional accessories
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichEditPromptRicherEmphasis:
+    def test_must_look_richer_than_input(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "richer" in lower or "more luxurious" in lower
+
+    def test_escalate_noticeably(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "escalat" in lower or "noticeably" in lower or "noticeabl" in lower
+
+    def test_richer_than_before_framing(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "before" in lower or "input" in lower or "previous" in lower
+
+    def test_optional_sunglasses_or_hat_mentioned(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "sunglasses" in lower or "hat" in lower
+
+    def test_accessories_framed_as_optional(self):
+        lower = RICH_EDIT_PROMPT.lower()
+        assert "may" in lower or "occasionally" in lower
+
+    def test_still_fully_clothed(self):
+        assert "fully clothed" in RICH_EDIT_PROMPT.lower()
+
+    def test_still_preserves_face(self):
+        assert "same face" in RICH_EDIT_PROMPT.lower()
+
+    def test_still_preserves_skin_tone(self):
+        assert "skin tone" in RICH_EDIT_PROMPT.lower()
+
+    def test_still_preserves_features(self):
+        assert "features" in RICH_EDIT_PROMPT.lower()
+
+
+class TestRichFaceAnchorClauseRicherEmphasis:
+    def test_surpass_wealthy_style_mentioned(self):
+        lower = RICH_FACE_ANCHOR_CLAUSE.lower()
+        assert "surpass" in lower or "exceed" in lower or "richer" in lower
+
+    def test_not_merely_match_framing(self):
+        lower = RICH_FACE_ANCHOR_CLAUSE.lower()
+        assert "not merely" in lower or "not just" in lower or "surpass" in lower
+
+    def test_still_fully_clothed(self):
+        assert "fully" in RICH_FACE_ANCHOR_CLAUSE.lower()
+        assert "clothed" in RICH_FACE_ANCHOR_CLAUSE.lower()
+
+    def test_still_preserves_face_exactly(self):
+        assert "exactly" in RICH_FACE_ANCHOR_CLAUSE.lower()
+        assert "original" in RICH_FACE_ANCHOR_CLAUSE.lower()

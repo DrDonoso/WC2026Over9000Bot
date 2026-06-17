@@ -29,5 +29,9 @@ data/predictions.yml
 data/tongo_gifs/*
 !data/tongo_gifs/.gitkeep
 
+# Personal base image for the daily 'rich' feature — drop rich_original.jpg into data/rich/ on the server (mounted, not committed).
+data/rich/*
+!data/rich/.gitkeep
+
 # Corporate CA bundle for SSL-inspection remediation — generated locally, never committed
 certs/

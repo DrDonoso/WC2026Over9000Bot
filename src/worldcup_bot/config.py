@@ -34,6 +34,10 @@ class Settings:
     state_dir: str = "/app/state"
     espn_league_slug: str = "fifa.world"
     finished_poll_interval_seconds: int = 120
+    openai_image_model: str = "gpt-image-2"
+    openai_image_api_key: str = ""
+    openai_image_base_url: str = ""
+    rich_image_hour: int = 11
 
 
 def ai_enabled(settings: "Settings") -> bool:
@@ -43,6 +47,25 @@ def ai_enabled(settings: "Settings") -> bool:
         and settings.openai_base_url
         and settings.openai_model
     )
+
+
+def image_ai_enabled(settings: "Settings") -> bool:
+    """Return True when image-model key, base_url, and model are all resolvable."""
+    return bool(
+        _effective_image_api_key(settings)
+        and _effective_image_base_url(settings)
+        and settings.openai_image_model
+    )
+
+
+def _effective_image_api_key(settings: "Settings") -> str:
+    """Return the image-specific API key, falling back to the chat key."""
+    return settings.openai_image_api_key or settings.openai_api_key
+
+
+def _effective_image_base_url(settings: "Settings") -> str:
+    """Return the image-specific base URL, falling back to the chat base URL."""
+    return settings.openai_image_base_url or settings.openai_base_url
 
 
 def load_settings() -> Settings:
@@ -89,4 +112,8 @@ def load_settings() -> Settings:
         state_dir=os.getenv("STATE_DIR", "/app/state"),
         espn_league_slug=os.getenv("ESPN_LEAGUE_SLUG", "fifa.world"),
         finished_poll_interval_seconds=int(os.getenv("FINISHED_POLL_INTERVAL_SECONDS", "120")),
+        openai_image_model=os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
+        openai_image_api_key=os.getenv("OPENAI_IMAGE_API_KEY", ""),
+        openai_image_base_url=os.getenv("OPENAI_IMAGE_BASE_URL", ""),
+        rich_image_hour=int(os.getenv("RICH_IMAGE_HOUR", "11")),
     )
