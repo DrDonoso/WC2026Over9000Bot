@@ -5,6 +5,15 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260617.13] - 2026-06-17
+
+- feat: /endirecto now sends only the header and goals, with an inline keyboard offering Tarjetas, Alineación and Cambios
+- feat: tapping a button edits the message in place to add that section, always rendered in a fixed order (goles → tarjetas → alineación → cambios) regardless of click order
+- feat: persist a per-match snapshot of that moment to the state volume (endirecto.json) so the buttons keep working across bot restarts; entries auto-prune after 6h
+- feat: extract the current lineup (starting XI with substitutions applied) from the Reddit match thread as part of the AI information extractor
+- chore: register a dedicated callback handler (pattern ^ed|) separate from the goal-clip "Ver gol" callback
+
+
 ## [20260617.12] - 2026-06-17
 
 - feat: enrich the /endirecto command with live match detail — current minute, goals (scorer + minute), yellow/red cards and substitutions
