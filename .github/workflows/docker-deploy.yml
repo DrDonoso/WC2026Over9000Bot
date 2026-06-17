@@ -53,24 +53,53 @@ jobs:
     - name: Generate release notes from commits
       id: releasenotes
       run: |
-        PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
-
-        if [ -n "$PREV_TAG" ]; then
-          RANGE="$PREV_TAG..HEAD"
-        else
-          RANGE="HEAD"
-        fi
-
-        {
-          git log "$RANGE" --no-merges --pretty=format:'%s' \
-            | grep -v -i '^\.squad:' \
-            | grep -v -i '^docs: update changelog' \
-            | grep -v -i '^Merge ' \
-            | grep -v -i '^chore:' \
-            | sed -E 's/^(feat|fix|perf|refactor|docs)(\([^)]+\))?: //' \
-            | sed 's/^/- /'
-        } > release_notes.md || true
-
+        python3 - <<'PYEOF' > release_notes.md
+        import subprocess
+        def git(*args):
+            r = subprocess.run(['git'] + list(args), capture_output=True, text=True)
+            return r.stdout.strip()
+        prev = git('describe', '--tags', '--abbrev=0')
+        rng = f"{prev}..HEAD" if prev else "HEAD"
+        shas_out = git('log', rng, '--no-merges', '--format=%H')
+        shas = [s.strip() for s in shas_out.splitlines() if s.strip()]
+        SKIP = ('.squad:', 'chore:', 'docs: update changelog', 'merge ')
+        bullets = []
+        for sha in shas:
+            msg = git('log', '-1', '--format=%B', sha)
+            lines = msg.splitlines()
+            if not lines:
+                continue
+            subject = lines[0]
+            if any(subject.strip().lower().startswith(p) for p in SKIP):
+                continue
+            body = lines[1:]
+            commit_bullets = []
+            current = None
+            for line in body:
+                if line.strip().lower().startswith('co-authored-by:'):
+                    break
+                if current is not None and len(line) >= 2 and line[0] == ' ' and line[1] == ' ':
+                    part = line.strip()
+                    if part:
+                        current += ' ' + part
+                    continue
+                stripped = line.lstrip(' ')
+                if stripped.startswith('- '):
+                    if current is not None:
+                        commit_bullets.append(current)
+                    current = '- ' + stripped[2:]
+                    continue
+                if current is not None:
+                    commit_bullets.append(current)
+                    current = None
+            if current is not None:
+                commit_bullets.append(current)
+            if commit_bullets:
+                bullets.extend(commit_bullets)
+            else:
+                bullets.append(f"- {subject}")
+        print('\n'.join(bullets))
+        PYEOF
         if [ -s release_notes.md ]; then
           echo "has_notes=true" >> "$GITHUB_OUTPUT"
         else
