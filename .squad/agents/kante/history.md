@@ -4,7 +4,7 @@
 - **Project:** WorldCup2026Over9000TelegramBot — Telegram porra bot (betting pool predictions vs real fixtures).
 - **Stack:** Python (python-telegram-bot), football-data.org API, Docker + compose, GitHub Actions → Docker Hub.
 - **Created:** 2026-06-15
-- **Status:** 1205 tests green (/endirecto live enrichment via Reddit + OpenAI — 2026-06-17).
+- **Status:** 1248 tests green (/endirecto inline-reveal button redesign — 2026-06-17).
 
 ## Latest Session: /endirecto Live Detail Enrichment (2026-06-17)
 
@@ -128,3 +128,56 @@ Key refinements completed:
 
 Detailed decisions archived in .squad/decisions.md (inbox merged 2026-06-17).
 Detailed history archived in history-archive.md (58534 bytes → summarized).
+
+## Latest Session: /endirecto Inline-Reveal Button Redesign (2026-06-17)
+
+David requested that /endirecto stop dumping ALL live match detail inline (goals + cards + subs + lineup in one wall of text). New design: send only header + goals, with inline buttons to reveal tarjetas/alineación/cambios on demand. Each click edits the message in place; sections always render in FIXED order regardless of click order.
+
+### New Module: `src/worldcup_bot/bot/endirecto_store.py`
+
+Persists per-match snapshots to `{state_dir}/endirecto.json` (a dict keyed by 8-hex token). Schema: `{token, match_id, minute, home_name, away_name, home_tla, away_tla, home_score, away_score, goals, cards, subs, lineup, revealed, created}`. All functions best-effort, never raise.
+
+- `new_token()` → `secrets.token_hex(4)` (8 hex chars)
+- `save_snapshot(path, snap)` → add to store, save, then prune
+- `load_snapshot(path, token)` → dict|None
+- `set_revealed(path, token, section)` → idempotent append, persist, return updated snap
+- `prune(path, max_age_secs=21600)` → drop entries older than ~6 h
+
+### Extended: `src/worldcup_bot/ai/match_events.py`
+
+- `_MAX_THREAD_CHARS` raised 6000 → 8000 (to fit Starting XI section).
+- `_trim_events_region` now anchors on the EARLIER of "Starting XI" or "MATCH EVENTS".
+- `_SYSTEM_TEMPLATE` extended with `lineup` field in JSON schema; LLM asked for current XI (starters minus subbed-off + subbed-on players).
+- `_EMPTY_EVENTS` now includes `"lineup": {"home": [], "away": []}`.
+- Added `_coerce_lineup(raw)` inside `_coerce_events`; coerces lineup to `{"home": [...], "away": [...]}` of string lists; never raises.
+- `max_completion_tokens` raised 900 → 1200.
+
+### New Formatter: `render_endirecto` in `src/worldcup_bot/bot/formatters.py`
+
+Returns `(text, keyboard_rows)`. Text always contains header + goles. Additional sections only appear when `"tarjetas"/"alineacion"/"cambios"` in `snap["revealed"]`. FIXED render order: goles → tarjetas → alineacion → cambios, regardless of click order. Keyboard buttons use `callback_data=f"ed|{token}|{code}"` (code t/l/c). When all revealed → empty keyboard. Imports `InlineKeyboardButton` from telegram.
+
+### Handler changes: `src/worldcup_bot/bot/handlers.py`
+
+- `cmd_en_directo` reworked: now sends ONE message per live match (not a joined block). If AI enabled + thread found: builds snapshot, saves it, renders with buttons. Fallback (AI disabled or no thread): sends plain `format_match`. Per-match try/except → fallback on error.
+- New `cmd_endirecto_callback`: parses `"ed|{token}|{code}"`, calls `set_revealed`, renders updated snap, edits the message. Alert if token missing. Never raises.
+
+### Registration: `src/worldcup_bot/__main__.py`
+
+Added `CallbackQueryHandler(cmd_endirecto_callback, pattern=r"^ed\|")`. Does NOT collide with existing `^vergol:` pattern.
+
+### Key learnings
+
+- Snapshot store must be restart-resilient: persisted JSON dict avoids losing button context after bot restart, unlike the in-memory clip_store approach used for "Ver gol".
+- render_endirecto enforces FIXED section order in code (not driven by click order) — this is the correct approach for consistent UX. The `revealed` set is order-independent; the render loop iterates `_ED_SECTION_ORDER` always.
+- `_trim_events_region` now anchors on the earlier of "Starting XI" or "MATCH EVENTS" — the Starting XI section (which appears BEFORE MATCH EVENTS) is now in the LLM window. This gives the LLM enough context to infer the current lineup.
+- `InlineKeyboardMarkup` takes a list-of-rows; `render_endirecto` returns one row of all non-revealed buttons (up to 3 buttons in one row).
+
+### Tests
+
+43 new tests across 4 files:
+- `tests/test_endirecto_store.py` (new, 14 tests): new_token uniqueness/length; save/load round-trip; set_revealed appends/persists/dedupes; load missing token; corrupt file safe; prune drops old.
+- `tests/test_match_events.py` (updated + 5 new): lineup parsed from real sample; empty fallback; never raises with lineup key; trim anchors on Starting XI; cap updated to 8000; max_completion_tokens updated to 1200.
+- `tests/test_formatters.py` (17 new in TestRenderEndirecto): header/goals always present; 3 buttons when nothing revealed; fixed section order regardless of click order; all revealed → no keyboard; sin goles fallback; flags via tla; callback_data format.
+- `tests/test_handlers.py` (7 new): cmd_en_directo saves snapshot + sends buttons; AI disabled → no store write; callback reveals section and edits; expired token → alert; __main__ registers ^ed\| handler.
+
+Final count: **1248 passed** (up from 1205).
