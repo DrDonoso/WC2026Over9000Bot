@@ -5,6 +5,13 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260617.11] - 2026-06-17
+
+- fix: make the scorer match robust to r/soccer title variants — accent-fold names, ignore the trailing "goal"/"penalty" words and single-letter initials, and match on shared surname tokens (e.g. "Wissa Y. goal" now matches "Yoane Wissa")
+- fix: widen the goal-minute tolerance from ±2 to ±3 to absorb added-time discrepancies between football-data and the Reddit clip title
+- fix: when Reddit's JSON search is blocked, search the HTML results AND the /new/ listing merged (deduplicated) so a very recent clip that isn't in the search index yet is still found
+
+
 ## [20260617.10] - 2026-06-17
 
 - fix: normalize team names with dots so "D.R. Congo" matches "Congo DR" (strip periods before alias lookup) — was breaking the clip match for that fixture
