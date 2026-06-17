@@ -37,7 +37,7 @@ class Settings:
     openai_image_model: str = "gpt-image-2"
     openai_image_api_key: str = ""
     openai_image_base_url: str = ""
-    rich_image_hour: int = 11
+    rich_image_hour: int = 0
 
 
 def ai_enabled(settings: "Settings") -> bool:
@@ -115,5 +115,5 @@ def load_settings() -> Settings:
         openai_image_model=os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
         openai_image_api_key=os.getenv("OPENAI_IMAGE_API_KEY", ""),
         openai_image_base_url=os.getenv("OPENAI_IMAGE_BASE_URL", ""),
-        rich_image_hour=int(os.getenv("RICH_IMAGE_HOUR", "11")),
+        rich_image_hour=int(os.getenv("RICH_IMAGE_HOUR", "0")),
     )

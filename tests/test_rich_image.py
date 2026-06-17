@@ -106,7 +106,7 @@ class TestImageAIConfig:
         assert s.openai_image_model == "gpt-image-2"
         assert s.openai_image_api_key == ""
         assert s.openai_image_base_url == ""
-        assert s.rich_image_hour == 11
+        assert s.rich_image_hour == 0
 
     def test_image_ai_enabled_true_with_dedicated_key(self):
         s = Settings(

@@ -32,7 +32,7 @@ services:
       OPENAI_IMAGE_MODEL: "${OPENAI_IMAGE_MODEL:-gpt-image-2}"
       OPENAI_IMAGE_API_KEY: "${OPENAI_IMAGE_API_KEY:-}"
       OPENAI_IMAGE_BASE_URL: "${OPENAI_IMAGE_BASE_URL:-}"
-      RICH_IMAGE_HOUR: "${RICH_IMAGE_HOUR:-11}"
+      RICH_IMAGE_HOUR: "${RICH_IMAGE_HOUR:-0}"
 
       # --- Persistent state directory for porra snapshot ---
       STATE_DIR: /app/state
