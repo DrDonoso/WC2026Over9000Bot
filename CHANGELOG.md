@@ -5,6 +5,22 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260617.09] - 2026-06-17
+
+- Merged all 6 inbox decisions into decisions.md (kante-25, kante-26, kante-27, kante-29, maldini-10)
+- Deleted inbox files after merge
+- Updated decisions.md compaction warning (date-gate can fire, entries span 3 days)
+- Archived kante/history.md (58534 bytes → summarized to history-archive.md)
+- Trimmed kante/history.md to lightweight project context (1263 bytes)
+- Maldini history unchanged (12283 bytes, under 15360 threshold)
+- Hybrid multi-image face-anchor (run 2+ uses [evolved, original])
+- Azure moderation-safe framing (positive-dressing language)
+- Caption newline normalization (fixes literal \n)
+- No slash separators in captions (model no longer imitates \/" / \")
+- Escalation emphasis (PRIMARY critical ask)
+- Rich photo gitignore (personal base photo never committed)
+
+
 ## [20260617.08] - 2026-06-17
 
 - feat: new daily job (11:00 Europe/Madrid) that edits a base photo with gpt-image-2 (via LiteLLM) to make the subject look progressively richer and posts it to the group
