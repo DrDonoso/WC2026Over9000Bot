@@ -66,6 +66,13 @@
 
 ## Learnings
 
+### CI Trigger Optimization (2026-06-17)
+- Added `paths-ignore` filter to `docker-deploy.yml` workflow `push` trigger: `.squad/**` and `CHANGELOG.md` no longer trigger build+release.
+- Rationale: Team memory commits (Scribe) and auto-changelog commits are infrastructure-only, never affect bot image; skipping them reduces wasted Docker Hub builds and empty GitHub Releases.
+- Complementary to existing `[skip ci]` on auto-changelog commits (belt-and-suspenders pattern for defense-in-depth).
+- GitHub Actions runs workflow only if at least one changed file is NOT in `paths-ignore` — pure `.squad/**` or `CHANGELOG.md` pushes are skipped entirely.
+- Code/config changes (src, tests, Dockerfile, compose, workflow itself, etc.) still trigger normally because they fall outside the ignore list.
+
 ### Auto-Changelog Mechanism (2026-06-17)
 - Commit-derived notes via `git log "$RANGE" --no-merges --pretty=format:'%s'`; range from previous release tag to HEAD (`git describe --tags --abbrev=0`).
 - Internal-commit filtering: drop `.squad:` (Scribe memory commits), `docs: update changelog` (auto-commit loop prevention), `Merge ` (merge commits), `chore:` (non-user-facing). Pattern `'^\.squad:'` matches literal leading dot via BRE `\.`.
