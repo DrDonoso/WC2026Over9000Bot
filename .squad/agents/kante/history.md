@@ -4,8 +4,39 @@
 - **Project:** WorldCup2026Over9000TelegramBot — Telegram porra bot (betting pool predictions vs real fixtures).
 - **Stack:** Python (python-telegram-bot), football-data.org API, Docker + compose, GitHub Actions → Docker Hub.
 - **Created:** 2026-06-15
+- **Status:** 962 tests green, awaiting coordinator trigger for git commit + image rebuild.
 
-## Recent Accomplishments (Phases 1–23)
+## Current Session: Multi-Block Porra Evolution Completion (2026-06-17)
+
+**2026-06-17 (BLOCK 4c — porra-evolution exact latest + startup backfill):** `ensure_history` latest jornada now uses exact live ranking; history auto-backfilled at startup + refreshed daily. 962 tests green (+12 from 950 baseline).
+
+Key changes:
+- `porra/history.py` — `ensure_history` now calls `engine.compute_general_ranking(predictions, client, official=False)` for the **latest** jornada instead of `compute_ranking_at_jornada`. Past jornadas keep using reconstruction (fine for trend). Removed `_check_reconstruction_vs_api` and `_safe_jornada_le` (no longer needed; latest is exact by construction). Single `log.info` at end reports jornada count.
+- `__main__.py` — added `history_backfill_job` (async, try/except around everything). Imported `ensure_history` at top level. In `main()`: `app.job_queue.run_once(history_backfill_job, when=15)` (always, not gated on telegram_group_id) + `app.job_queue.run_daily(history_backfill_job, time=dtime(9,5,tzinfo=tz))`. Logs "Porra history refresh enabled — startup (15s) + daily 09:05 {tz}".
+- `tests/test_history.py` — updated all `TestEnsureHistory` tests to patch `worldcup_bot.porra.engine.compute_general_ranking` instead of `compute_ranking_at_jornada` for cases where the jornada tested is the latest. Added `TestEnsureHistoryLatestUsesLiveRanking` (3 tests).
+- `tests/test_history_backfill.py` (NEW) — `TestHistoryBackfillJob` (5 tests: calls ensure_history, skips on no predictions, swallows API error, swallows predictions load error, logs jornada count). `TestHistoryBackfillScheduling` (4 tests: source-code inspection of `main()` verifying `run_once(when=15)`, `run_daily`, log message, importability).
+
+Pattern: When patching `ensure_history` behavior in tests, always patch `worldcup_bot.porra.engine.compute_general_ranking` (the exact path the function resolves to after `from worldcup_bot.porra import engine` inside `ensure_history`). Patch path `worldcup_bot.porra.history.compute_ranking_at_jornada` still works for past jornadas.
+
+
+
+Key changes:
+- `porra/history.py` fully rewritten: `build_checkpoint_dates` removed; replaced with `football_day_of(match, tz, anchor_hour)` (same 9am→9am windowing as `/hoy`/`/ayer`), `build_jornadas(matches, tz, anchor_hour)`, `reconstruct_group_standings(finished_group_matches)` (points→GD→GF→TLA ordering, no head-to-head needed for chart), `compute_ranking_at_jornada(predictions, all_matches, jornada, tz, anchor_hour)`. `ensure_history` now calls `get_all_matches()` once and reconstructs all rankings from match data — zero per-jornada API calls. Sanity check added: `_check_reconstruction_vs_api` compares reconstructed top-3 vs live API standings for latest jornada (logs warnings for mismatches, acceptable for tie-break differences).
+- `porra/engine.py`: removed dead `compute_ranking_at_date` (was the old `?date=` path).
+- `porra/chart.py`: removed 📈 emoji from matplotlib title (DejaVu Sans has no emoji glyph); x-axis labels changed from `YYYY-MM-DD` to `DD/MM` (short, rotated); x-axis label now "Jornada" instead of "Fecha". Telegram caption in `cmd_evolucion` keeps the emoji.
+
+Pattern for reconstruction validation: `ensure_history` calls `_check_reconstruction_vs_api(rec, client.get_standings())` after computing the latest jornada — logs INFO on PASS, WARNING with per-group diff on mismatch.
+
+**2026-06-17 (BLOCK 4 — /evolucion):** Added `/evolucion` command — bump chart image of porra ranking evolution since first match. 936 tests green (+54 from 882 baseline).
+
+Key additions:
+- `api/client.py`: `get_standings(date=...)` optional param + params-aware `_get()` with deterministic cache key (`url?key=val`).
+- `porra/engine.py`: `compute_general_ranking_from(predictions, actual_standings, actual_winners)` — pure scoring loop with DI. `compute_ranking_at_date(predictions, client, date)` — historical standings via `?date=` + knockout matches filtered by `utc_date <= {date}T23:59:59Z`. Refactored `compute_general_ranking` to call `compute_general_ranking_from` (no behaviour change).
+- `porra/history.py`: `load_history`/`save_history` (JSON, best-effort). `build_checkpoint_dates(matches, tz)` → sorted distinct local FINISHED-match dates. `ensure_history(client, predictions, settings, path)` — computes missing + always refreshes latest date.
+- `porra/chart.py`: `render_evolution_png(history, out_path)` — matplotlib Agg bump chart (rank=y inverted, dates=x rotated, tab20 colormap, legend outside right). Handles 0/1/N checkpoints.
+- `pyproject.toml`: `matplotlib>=3.8` added to deps.
+- `bot/handlers.py`: `cmd_evolucion` — load predictions → ensure_history (asyncio.to_thread) → render PNG → send_photo. Friendly errors on all branches.
+- `__main__.py`: registered `CommandHandler("evolucion", cmd_evolucion)`. `/start` help updated.
 
 **2026-06-17 (BLOCK 3 refinement):** Always-porra-commentary — removed `live_diff.changed` gate from `poll_finished_matches_job`. Commentary now generated whenever `ai_enabled(settings)` AND `bool(ranking)`, regardless of ranking movement. Added `render_porra_context(diff, ranking)` to `porra/live.py` — always returns meaningful text with "CLASIFICACIÓN ACTUAL" (top-5) and "CAMBIOS CON ESTE RESULTADO" (movements or "Ninguno…" note). Updated `build_commentary_messages` system prompt to handle no-change case gracefully: instructs commentator to acknowledge "Ninguno" text and remind leader, never invent movements. `render_changes_text` preserved unchanged for any other callers. 882 tests green (+16 from 866 baseline).
 

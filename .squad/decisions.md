@@ -2628,3 +2628,231 @@ on:
 - ✅ Workflow YAML is syntactically valid
 - ✅ `paths-ignore` is correctly nested
 - ✅ No other workflow sections modified
+
+---
+
+# Decision: porra-evolution checkpoints by jornada (football-day reconstruction)
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-17  
+**Status:** DONE — 950 tests green
+
+---
+
+## Context
+
+The original `/evolucion` feature (BLOCK 4) computed ranking history keyed by local
+calendar date and reconstructed group standings via the `?date=` query parameter of the
+football-data.org standings endpoint. That approach had a fundamental flaw: consecutive
+football-days share UTC calendar dates (a match at 02:00 local on June 14 is still
+June 13 UTC), so the `?date=` param cannot represent the 9am→9am football-day window
+that `/hoy` and `/ayer` use.
+
+## Decision
+
+**Rebuild checkpoints entirely from match results, keyed by football-day label.**
+
+The "football-day" is the same 9am→9am window (configurable via `settings.football_day_start_hour`)
+already used by `get_football_day_matches`. A match's football-day label is:
+- local date if `local_hour >= anchor_hour`
+- local date minus 1 day otherwise
+
+Group standings are **reconstructed** from the match results directly (points W=3/D=1/L=0,
+GD, GF, then TLA alpha for remaining ties). Knockout winners come from finished knockout
+matches in the same pass. No `?date=` API calls are made during history construction.
+
+## Key new functions (`porra/history.py`)
+
+| Function | Purpose |
+|---|---|
+| `football_day_of(match, tz, anchor_hour)` | Football-day label for a match (YYYY-MM-DD) |
+| `build_jornadas(matches, tz, anchor_hour)` | Sorted distinct jornadas with ≥1 finished match |
+| `reconstruct_group_standings(finished_group_matches)` | Points/GD/GF ordering per group |
+| `compute_ranking_at_jornada(predictions, all_matches, jornada, tz, anchor_hour)` | Full ranking as of a jornada |
+| `_check_reconstruction_vs_api(reconstructed, api_standings_raw)` | Sanity-log top-3 match vs live API |
+
+`ensure_history` calls `get_all_matches()` once, derives all jornadas, reconstructs all
+rankings from that single batch. The sanity check logs `INFO` on full match, `WARNING`
+with per-group diffs on any top-3 mismatch (tie-break differences are acceptable).
+
+## Removed dead code
+
+- `build_checkpoint_dates` (replaced by `build_jornadas`)
+- `engine.compute_ranking_at_date` (used `?date=` param, now unused)
+
+`get_standings(date=...)` is **kept** in `api/client.py` (harmless, tested separately).
+
+## Chart fixes
+
+- matplotlib title: removed `📈` emoji → "Evolución de la porra" (DejaVu Sans has no emoji glyph, causing missing-box rendering)
+- x-axis: labels changed from `YYYY-MM-DD` to `DD/MM` short form; axis label "Jornada" instead of "Fecha"
+- Telegram caption in `cmd_evolucion` keeps `📈` (Telegram renders emoji fine)
+
+## Test count
+
+936 → **950** (+14). Removed `TestBuildCheckpointDates` (6) + `TestComputeRankingAtDate` (7);
+added `TestFootballDayOf` (5) + `TestBuildJornadas` (7) + `TestReconstructGroupStandings` (9)
++ `TestComputeRankingAtJornada` (4) + updated `TestEnsureHistory` (7) + chart tests (2).
+
+
+---
+
+# Decision: porra-evolution exact latest jornada + startup/daily backfill
+
+**Author:** Kanté (Backend)  
+**Date:** 2026-06-17  
+**Status:** IMPLEMENTED — 962 tests green.
+
+## Context
+
+`porra/history.py ensure_history` was building per-jornada ranking history by reconstructing group standings from match results for ALL jornadas, including the latest. The reconstruction approximates FIFA tie-breaks (no head-to-head), so the latest data point could differ ±1–2 positions from the live `/actual` ranking. Additionally, history was only populated when a user ran `/evolucion`.
+
+## Decisions
+
+### 1. Latest jornada uses exact live ranking
+
+**Decision:** For the latest (most recent) jornada only, `ensure_history` now calls `engine.compute_general_ranking(predictions, client, official=False)` instead of `compute_ranking_at_jornada`. Past jornadas keep using reconstruction (acceptable approximation for a trend chart).
+
+**Rationale:** The newest data point in the chart is the most visible and most compared against `/actual`. Using the exact live ranking eliminates the tie-break mismatch at the tip of the chart. The reconstruction is still accurate enough for the trend shape of all past jornadas.
+
+**Implementation:**
+- Inside the `for jornada in jornadas` loop, branch on `if jornada == latest`.
+- Import `engine` lazily inside `ensure_history` (already the pattern for `compute_ranking_at_jornada`).
+- Removed `_check_reconstruction_vs_api` and `_safe_jornada_le` helpers — they were only used by the now-removed sanity check. The sanity check was comparing reconstruction to API; it's no longer needed since the latest is exact.
+
+### 2. Auto-backfill at startup + daily refresh
+
+**Decision:** `history_backfill_job` is scheduled unconditionally (not gated on `telegram_group_id`) in `main()`:
+- `run_once(history_backfill_job, when=15)` — 15 seconds after startup, to populate the volume on first launch.
+- `run_daily(history_backfill_job, time=dtime(9,5,tzinfo=tz))` — 09:05 local time daily, just after the typical football-day close window (09:00).
+
+**Rationale:** Users should not have to run `/evolucion` to trigger history generation. The volume should be pre-populated so the command is fast (only latest jornada recomputed). The daily refresh at 09:05 catches newly-completed jornadas automatically.
+
+**Implementation note:** `history_backfill_job` wraps everything in `try/except` so it can never crash other jobs. Skips early if predictions file has no participants.
+
+### 3. `/evolucion` command unchanged
+
+`cmd_evolucion` still calls `ensure_history` (incremental) on demand. Since past jornadas are cached in the JSON file and only the latest is recomputed, the command is fast.
+
+## Files changed
+
+- `src/worldcup_bot/porra/history.py` — modified `ensure_history`; removed `_check_reconstruction_vs_api`, `_safe_jornada_le`
+- `src/worldcup_bot/__main__.py` — added `history_backfill_job`; added `run_once` + `run_daily` scheduling in `main()`; added `from worldcup_bot.porra.history import ensure_history` import
+- `tests/test_history.py` — updated `TestEnsureHistory` to patch `worldcup_bot.porra.engine.compute_general_ranking` for latest-jornada tests; added `TestEnsureHistoryLatestUsesLiveRanking` (3 tests)
+- `tests/test_history_backfill.py` (NEW) — 9 tests covering job behaviour + scheduling wiring
+
+
+---
+
+# Decision: Porra Evolution Chart — /evolucion command
+
+**Author:** Kanté (Backend)
+**Date:** 2026-06-17
+**Status:** READY — 936 tests green, awaiting coordinator commit + container rebuild.
+
+---
+
+## Summary
+
+Adds `/evolucion` — a Telegram photo command that renders a **bump chart** showing how the porra (prediction-pool) ranking has evolved over the tournament, one line per participant.
+
+---
+
+## Architecture Decisions
+
+### 1. `get_standings(date=...)` — backward-compatible param extension
+- Added optional `date: str | None = None` to `FootballDataClient.get_standings()`.
+- Extended `_get(url, params=None)` to accept optional query-params dict; cache key is deterministically built as `url?key=val` (sorted), so `no-date` and `with-date` have distinct cache entries.
+- No existing callers need changes — `date=None` produces identical behaviour to the old signature.
+
+### 2. Dependency-injection refactor in `engine.py`
+- Extracted `compute_general_ranking_from(predictions, actual_standings, actual_winners)` — the pure scoring loop with no client dependency.
+- `compute_general_ranking` retains its current signature and delegates to it (zero behaviour change; all existing tests pass).
+- `compute_ranking_at_date(predictions, client, date)`:
+  - Calls `client.get_standings(date=date)` for historical group standings.
+  - Filters to groups with `played > 0` (safe for partially-started days).
+  - Derives knockout winners from `client.get_all_matches()` filtered by `status=FINISHED` and `utc_date <= {date}T23:59:59Z` — string comparison works because format is ISO UTC.
+  - Returns `compute_general_ranking_from(...)`.
+
+### 3. History module (`porra/history.py`)
+- Persistence file: `{state_dir}/porra_history.json` — dict keyed by `"YYYY-MM-DD"`, values `{username: {pos, pts, name}}`.
+- `build_checkpoint_dates`: converts FINISHED match UTC timestamps → local dates via pytz (settings.timezone), deduplicates, returns sorted list.
+- `ensure_history`: for each checkpoint NOT in stored history → compute; **always recompute the latest date** so it stays fresh. Best-effort save. API errors return existing history unchanged.
+
+### 4. Chart (`porra/chart.py`)
+- `matplotlib.use("Agg")` set at module import time (before pyplot) — no display/GUI required in container.
+- Bump chart: x = dates (sorted), y = rank (1 at top, `ax.invert_yaxis()`), one line+markers per participant, `tab20` colormap for up to 20 users, legend outside right panel.
+- Degenerate cases (0 dates, 0 users, 1 date) all handled — always write a valid PNG.
+- Font warning for 📈 glyph is cosmetic only (DejaVu Sans fallback); PNG is valid.
+
+### 5. `matplotlib>=3.8` in `pyproject.toml`
+- Wheels are self-contained on `python:3.12-slim`; no additional system libs needed for the Agg backend.
+
+---
+
+## Public API for E2E (coordinator)
+
+```python
+from worldcup_bot.porra.history import ensure_history
+from worldcup_bot.porra.chart import render_evolution_png
+```
+
+- `ensure_history(client, predictions, settings, path)` — build history from live API, returns dict.
+- `render_evolution_png(history, out_path)` — render PNG, returns out_path.
+
+---
+
+## Caveats
+
+- The emoji `📈` in the chart title renders as a missing-glyph box on the default matplotlib font (DejaVu Sans). This is cosmetic — the PNG is valid and the chart is readable. A font upgrade in the container could fix it but is not required.
+- `ensure_history` re-fetches the latest checkpoint date on every invocation of `/evolucion`. With the shared TTL cache this is a cache hit most of the time.
+
+
+---
+
+# Decision: Changelog from Commit-Body Bullets
+
+**Author:** Maldini (DevOps)  
+**Date:** 2026-06-17  
+**Status:** DONE — workflow updated, verified locally.
+
+## Context
+
+The `docker-deploy.yml` "Generate release notes from commits" step previously used `git log --pretty='%s'` to generate one bullet per commit subject line. For a squash-merge commit this yields a single generic bullet even when the body contains detailed, itemised bullet points.
+
+## Decision
+
+Replace the shell grep/sed chain with a `python3 - <<'PYEOF'` quoted heredoc. The Python script:
+
+1. Determines range: `prev = git describe --tags --abbrev=0`; `rng = "{prev}..HEAD"` if prev else `"HEAD"`.
+2. Enumerates commit SHAs via `git log rng --no-merges --format=%H`.
+3. For each SHA: fetches full message via `git log -1 --format=%B`; skips commits whose subject starts with `.squad:`, `chore:`, `docs: update changelog`, or `merge ` (case-insensitive).
+4. Scans the body for bullet blocks: lines starting with `- ` (after optional indent) begin a bullet; lines with 2+ leading spaces that follow a bullet are continuations (folded with a single space); any blank or non-bullet non-indented line ends the block; scanning stops at `Co-authored-by:` trailer.
+5. Emits body bullets verbatim (prefixes kept). Falls back to `- {subject}` when no body bullets exist.
+6. Writes to stdout; redirected to `release_notes.md`.
+
+## Rationale
+
+Squash commits produced by the team contain rich bullet-per-change bodies. The old approach discarded that information. The Python heredoc handles multi-line folding, trailer exclusion, and internal-commit filtering reliably without requiring extra shell tools.
+
+## Verification
+
+Local test against range `20260617.04^..48edda9` (single commit `48edda9`) produced 4 elaborate folded bullets:
+
+```
+- Detect goals from football-data SCORE CHANGES (reliable; ends the Reddit-parse flip-flop) with persistent per-match score state. Enrich scorer/minute via an OpenAI information extractor that handles any r/soccer thread format (ESPN-structured or human-narrated). VAR score decreases post a Gol anulado.
+- Send the goal message immediately WITHOUT a button; a 45s job polls for the clip, downloads it to the state volume, then edits the message to add the Ver gol button; the tap replies with the video. Survives restarts.
+- Match-finish ALWAYS posts a Final result; ESPN stats card when available; and ALWAYS a /porra recap by a random commentator (acknowledges when nothing moved), sections separated by ---.
+- New /estadisticas command: a persistent per-user Ver gol view counter.
+```
+
+YAML parse: `python -c "import yaml; yaml.safe_load(open('.github/workflows/docker-deploy.yml'))"` → exit 0.
+
+## Files Changed
+
+- `.github/workflows/docker-deploy.yml` — "Generate release notes from commits" step `run:` block replaced.
+
+
+---
+
+
