@@ -155,38 +155,3 @@ def parse_goal_events(selftext: str, post_id: str = "") -> list[GoalEvent]:
         )
 
     return events
-
-
-# ── dedup helper (pure, testable) ─────────────────────────────────────────────
-
-
-def compute_new_goals(
-    thread_id: str,
-    current_events: list[GoalEvent],
-    notified_set: set[str],
-    seeded_set: set[str],
-) -> tuple[list[GoalEvent], set[str], set[str]]:
-    """Determine which goal events are new and need a notification.
-
-    First time a thread is seen (not in seeded_set): seed all current goal keys
-    into notified_set WITHOUT returning any goals (prevent spamming pre-existing
-    goals).  On subsequent polls: return events whose key is not yet notified.
-
-    Returns (new_goals, updated_notified_set, updated_seeded_set) — all immutable
-    inputs, new sets returned so the function is pure / easy to test.
-    """
-    if thread_id not in seeded_set:
-        # First poll for this thread — seed, notify nothing
-        return (
-            [],
-            notified_set | {e.key for e in current_events},
-            seeded_set | {thread_id},
-        )
-
-    # Already seeded — find genuinely new goals
-    new_goals = [e for e in current_events if e.key not in notified_set]
-    return (
-        new_goals,
-        notified_set | {e.key for e in new_goals},
-        seeded_set,
-    )

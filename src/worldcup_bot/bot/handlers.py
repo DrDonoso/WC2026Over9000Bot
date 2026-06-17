@@ -8,7 +8,6 @@ Spanish user-facing strings throughout.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import html
 import logging
 import random
@@ -38,11 +37,20 @@ from worldcup_bot.data.gender import infer_gender
 from worldcup_bot.data.gifs import list_tongo_gifs
 from worldcup_bot.porra import engine, predictions as pred_loader
 from worldcup_bot.reddit.clip_finder import find_goal_clip
+from worldcup_bot.reddit.clip_store import (
+    add_entry as _cs_add_entry,
+    goal_token as _goal_token,
+    save_clips as _cs_save_clips,
+)
 from worldcup_bot.reddit.downloader import MediaDownloader
 from worldcup_bot.reddit.models import GoalEvent
 from worldcup_bot.reddit.notifier import build_goal_keyboard, format_goal_notification
 from worldcup_bot.reddit.parser import parse_goal_events
 from worldcup_bot.reddit.scanner import RedditMatchScanner, _teams_match
+from worldcup_bot.reddit.vergol_stats import leaderboard as _vs_leaderboard
+from worldcup_bot.reddit.vergol_stats import load_stats as _vs_load_stats
+from worldcup_bot.reddit.vergol_stats import record_view as _vs_record_view
+from worldcup_bot.reddit.vergol_stats import save_stats as _vs_save_stats
 from worldcup_bot.reddit.video import VideoTooLargeError, compress_if_needed, probe_video
 
 log = logging.getLogger(__name__)
@@ -145,6 +153,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/endirecto — partidos en directo\n"
         "/mispredicciones — ver tus predicciones\n"
         "/participantes — lista de participantes\n"
+        "/estadisticas — quién ve más goles 🏆\n"
         "/tongo — revelar la verdad 👀"
     )
 
@@ -525,184 +534,145 @@ async def cmd_participantes(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+async def cmd_estadisticas(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show who has watched the most goal clips (/estadisticas)."""
+    settings: Settings = context.bot_data["settings"]
+    path = f"{settings.state_dir}/vergol_stats.json"
+
+    try:
+        data = _vs_load_stats(path)
+        board = _vs_leaderboard(data)
+    except Exception:
+        log.exception("cmd_estadisticas: failed to load stats")
+        board = []
+
+    if not board:
+        await update.message.reply_text(
+            "Aún no hay estadísticas de 'Ver gol'.",
+            parse_mode="HTML",
+        )
+        return
+
+    lines = ["🏆 <b>Quién ve más goles</b>", ""]
+    for i, (name, count) in enumerate(board, 1):
+        lines.append(f"{i}. <b>{html.escape(name)}</b> — {count}")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 # ── "Ver gol" callback handler ────────────────────────────────────────────────
 
 
-def _goal_token(key: str) -> str:
-    """Derive a short stable token from a goal event key (sha1[:12])."""
-    return hashlib.sha1(key.encode()).hexdigest()[:12]
+def _record_vergol_view(settings: Settings, query, token: str) -> None:
+    """Best-effort: record a vergol view in the persistent stats file.
+
+    Never raises — a stats failure must never break video delivery.
+    """
+    try:
+        user = query.from_user
+        if not user:
+            return
+        user_id = user.id
+        name = (
+            (user.full_name or "").strip()
+            or (user.username or "").strip()
+            or f"id:{user_id}"
+        )
+        path = f"{settings.state_dir}/vergol_stats.json"
+        data = _vs_load_stats(path)
+        _vs_record_view(data, user_id, name, token)
+        _vs_save_stats(path, data)
+    except Exception:
+        log.warning("vergol stats: failed to record view for token %s", token)
 
 
 async def cmd_ver_gol_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle 'Ver gol' inline button — find, download and send the goal clip."""
+    """Handle 'Ver gol' inline button — send the downloaded goal clip as a reply.
+
+    Flow (Block 2):
+    - The button only appears once poll_goal_clips_job has set status='ready'
+      and edited the goal message to add the keyboard.
+    - On tap: read the clip-store entry, send the clip file as a reply to the
+      original goal message.
+    - File_id is cached in the entry after the first upload so subsequent taps
+      skip the file I/O.
+    - In-flight set prevents a double-send if the user taps twice quickly.
+
+    TODO [Block 4]: increment per-goal click counter here.
+    """
     query = update.callback_query
     token = query.data.split(":", 1)[1] if ":" in query.data else ""
 
-    goal_clips: dict = context.bot_data.get("goal_clips", {})
-    info: dict | None = goal_clips.get(token)
+    clip_store: dict = context.bot_data.get("clip_store", {})
+    entry: dict | None = clip_store.get(token)
 
-    if info is None:
+    if entry is None:
         await query.answer("No tengo los datos de ese gol.", show_alert=True)
         return
 
-    # Status guards (belt)
-    if info["status"] == "sending":
-        await query.answer("Ya estoy enviando el vídeo…")
-        return
-    if info["status"] == "sent":
-        await query.answer("El vídeo ya se envió.")
+    # Button should not appear unless status='ready', but guard gracefully
+    if entry.get("status") != "ready" or not entry.get("clip_path"):
+        await query.answer("⏳ El vídeo aún no está listo, espera un momento.")
         return
 
-    # Explicit non-blocking in-flight lock (suspenders) — atomic check-and-add
-    # (no await between check and add, so safe on the single-threaded event loop)
+    # Non-blocking in-flight guard — atomic check-and-add (no await between)
     inflight: set = context.bot_data.setdefault("vergol_inflight", set())
     if token in inflight:
         await query.answer("Ya estoy enviando el vídeo…")
         return
     inflight.add(token)
-    info["status"] = "sending"
 
-    await query.answer("⏳ Buscando el vídeo del gol…")
+    await query.answer()
 
-    chat_id = query.message.chat_id
-    msg_id = query.message.message_id
-
-    clip_file_ids: dict = context.bot_data.setdefault("clip_file_ids", {})
-
-    downloaded_path = None
-    compressed_path = None
-    media_url: str | None = None
+    settings: Settings = context.bot_data["settings"]
+    chat_id = entry["chat_id"]
+    message_id = entry["message_id"]
 
     try:
-        # ── Fast path A: cached file_id on this specific goal ──────────────────
-        cached_fid = info.get("file_id")
+        # Fast path: file_id already cached in the clip-store entry
+        cached_fid = entry.get("file_id")
         if cached_fid:
             try:
                 await context.bot.send_video(
                     chat_id=chat_id,
                     video=cached_fid,
-                    reply_to_message_id=msg_id,
+                    reply_to_message_id=message_id,
                     supports_streaming=True,
                 )
-                info["status"] = "sent"
-                try:
-                    await query.edit_message_reply_markup(reply_markup=None)
-                except Exception as exc:
-                    log.debug("Could not remove keyboard from goal message: %s", exc)
+                _record_vergol_view(settings, query, token)
                 return
             except Exception as exc:
                 log.warning(
-                    "cmd_ver_gol_callback: cached file_id %s is stale, evicting: %s",
+                    "cmd_ver_gol_callback: stale file_id %s evicted: %s",
                     cached_fid,
                     exc,
                 )
-                info.pop("file_id", None)
-                # Also evict from global map if present
-                for url, fid in list(clip_file_ids.items()):
-                    if fid == cached_fid:
-                        clip_file_ids.pop(url, None)
-                        break
-                info["status"] = "pending"
-                raise
+                entry.pop("file_id", None)
+                # Fall through to fresh send
 
-        # Reuse shared scanner instance if available
-        scanner: RedditMatchScanner | None = context.bot_data.get("reddit_scanner")
-        if scanner is None:
-            settings: Settings = context.bot_data["settings"]
-            scanner = RedditMatchScanner(user_agent=settings.reddit_user_agent)
-            context.bot_data["reddit_scanner"] = scanner
-
-        # Parse minute (strip stoppage-time suffix, e.g. "45+2" → 45)
-        minute_raw = info.get("minute_text", "0")
-        try:
-            minute = int(minute_raw.split("+")[0].rstrip("'"))
-        except (ValueError, IndexError):
-            minute = 0
-
-        media_url = await asyncio.to_thread(
-            find_goal_clip,
-            scanner,
-            info["home_team"],
-            info["away_team"],
-            info["home_score"],
-            info["away_score"],
-            info["scorer"],
-            minute,
-        )
-
-        if media_url is None:
-            info["status"] = "pending"  # allow retry
+        # Fresh send: open clip from the persistent volume
+        clip_path = Path(entry["clip_path"])
+        if not clip_path.exists():
+            log.error(
+                "cmd_ver_gol_callback: clip_path %s missing for token %s",
+                clip_path,
+                token,
+            )
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="⏳ El clip aún no está disponible en r/soccer, inténtalo en un minuto.",
-                reply_to_message_id=msg_id,
+                text="❌ No encuentro el archivo del vídeo. El clip fue limpiado del disco.",
+                reply_to_message_id=message_id,
             )
             return
 
-        # ── Fast path B: cached file_id for this media URL ────────────────────
-        if media_url in clip_file_ids:
-            cached_url_fid = clip_file_ids[media_url]
-            try:
-                await context.bot.send_video(
-                    chat_id=chat_id,
-                    video=cached_url_fid,
-                    reply_to_message_id=msg_id,
-                    supports_streaming=True,
-                )
-                info["file_id"] = cached_url_fid
-                info["status"] = "sent"
-                try:
-                    await query.edit_message_reply_markup(reply_markup=None)
-                except Exception as exc:
-                    log.debug("Could not remove keyboard from goal message: %s", exc)
-                return
-            except Exception as exc:
-                log.warning(
-                    "cmd_ver_gol_callback: cached url file_id %s is stale, evicting: %s",
-                    cached_url_fid,
-                    exc,
-                )
-                clip_file_ids.pop(media_url, None)
-                info.pop("file_id", None)
-                info["status"] = "pending"
-                raise
-
-        # Download
-        downloader = MediaDownloader()
-        downloaded_path = await downloader.download(media_url)
-        if downloaded_path is None:
-            info["status"] = "pending"
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="❌ No pude descargar el vídeo del gol.",
-                reply_to_message_id=msg_id,
-            )
-            return
-
-        # Compress if needed
-        try:
-            send_path = await compress_if_needed(downloaded_path)
-            if send_path != downloaded_path:
-                compressed_path = send_path
-        except VideoTooLargeError as exc:
-            log.warning("Video too large / uncompressible: %s", exc)
-            info["status"] = "pending"
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ El vídeo es demasiado grande para Telegram.",
-                reply_to_message_id=msg_id,
-            )
-            return
-
-        # Probe dimensions and send; capture returned message to store file_id
-        meta = await probe_video(send_path)
-        with open(send_path, "rb") as f:
+        meta = await probe_video(clip_path)
+        with open(clip_path, "rb") as f:
             sent_msg = await context.bot.send_video(
                 chat_id=chat_id,
                 video=f,
-                reply_to_message_id=msg_id,
+                reply_to_message_id=message_id,
                 supports_streaming=True,
                 read_timeout=120,
                 write_timeout=120,
@@ -710,43 +680,27 @@ async def cmd_ver_gol_callback(
                 **meta,
             )
 
-        # Cache the Telegram file_id for future instant re-sends
-        if sent_msg and sent_msg.video:
-            fid = sent_msg.video.file_id
-            info["file_id"] = fid
-            if media_url:
-                clip_file_ids[media_url] = fid
+        _record_vergol_view(settings, query, token)
 
-        info["status"] = "sent"
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception as exc:
-            log.debug("Could not remove keyboard from goal message: %s", exc)
+        # Cache the Telegram file_id so the next tap is instant
+        if sent_msg and sent_msg.video:
+            entry["file_id"] = sent_msg.video.file_id
+            clips_path = f"{settings.state_dir}/goal_clips.json"
+            _cs_save_clips(clips_path, clip_store)
 
     except Exception as exc:
         log.exception("cmd_ver_gol_callback: unexpected error: %s", exc)
-        info["status"] = "pending"
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="❌ Error inesperado al obtener el vídeo. Inténtalo de nuevo.",
-                reply_to_message_id=msg_id,
+                text="❌ Error inesperado al enviar el vídeo. Inténtalo de nuevo.",
+                reply_to_message_id=message_id,
             )
         except Exception:
             pass
 
     finally:
         inflight.discard(token)
-        if downloaded_path is not None:
-            try:
-                downloaded_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-        if compressed_path is not None:
-            try:
-                compressed_path.unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 # ── /simulagol — test command ─────────────────────────────────────────────────
@@ -843,8 +797,9 @@ async def cmd_simula_gol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     Falls back to the fixed Sweden 3-1 Tunisia, Gyökeres 60' goal if no random
     goal can be found, so the command never fully fails.
 
-    Stores goal context in bot_data["goal_clips"] so the 'Ver gol' inline button
-    works exactly as it does for real goals from poll_goals_job.
+    Stores a clip-store entry with status='searching' so poll_goal_clips_job
+    will search for the clip and edit the message to add the 'Ver gol' button.
+    The goal notification is sent WITHOUT a keyboard (same flow as real goals).
     """
     settings: Settings = context.bot_data["settings"]
     client = make_client(settings)
@@ -870,28 +825,32 @@ async def cmd_simula_gol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     token = _goal_token(goal.key)
 
-    context.bot_data.setdefault("goal_clips", {})[token] = {
-        "home_team": goal.home_team,
-        "away_team": goal.away_team,
-        "home_score": goal.home_score,
-        "away_score": goal.away_score,
-        "scorer": goal.scorer,
-        "minute_text": goal.minute_text,
-        "scoring_team": goal.scoring_team,
-        "home_tla": home_tla,
-        "away_tla": away_tla,
-        "status": "pending",
-    }
-
     text = format_goal_notification(goal, home_tla, away_tla)
-    keyboard = build_goal_keyboard(token)
+
+    # Send WITHOUT keyboard — poll_goal_clips_job will edit the message once ready
+    sent = await update.message.reply_text(f"🧪 [SIMULACIÓN]\n{text}")
+
+    # Record clip-store entry for background clip search
+    clip_store: dict = context.bot_data.setdefault("clip_store", {})
+    _cs_add_entry(
+        clip_store,
+        token=token,
+        chat_id=update.effective_chat.id,
+        message_id=sent.message_id,
+        home_name=goal.home_team,
+        away_name=goal.away_team,
+        home_tla=home_tla,
+        away_tla=away_tla,
+        home_score=goal.home_score,
+        away_score=goal.away_score,
+        scoring_team=goal.scoring_team,
+        scorer=goal.scorer,
+        minute=goal.minute_text,
+    )
+    clips_path = f"{settings.state_dir}/goal_clips.json"
+    _cs_save_clips(clips_path, clip_store)
 
     log.info("Simulated goal fired (token=%s): %s", token, goal.key)
-
-    await update.message.reply_text(
-        f"🧪 [SIMULACIÓN]\n{text}",
-        reply_markup=keyboard,
-    )
 
 
 # ── /updatediario — hidden AI daily update trigger ────────────────────────────

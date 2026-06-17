@@ -6,24 +6,28 @@ Builds the Telegram Application, registers all handlers, starts polling.
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
+import shutil
 import sys
 from datetime import datetime, time as dtime
+from pathlib import Path
 
 import pytz
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
-from worldcup_bot.api.client import FootballAPIError
 from worldcup_bot.ai.client import AIClient
 from worldcup_bot.ai.commentators import generate_porra_commentary, pick_commentator
 from worldcup_bot.ai.daily_update import generate_daily_update
-from worldcup_bot.bot.formatters import bold_person_names
+from worldcup_bot.ai.goal_extractor import extract_scorer
+from worldcup_bot.api.client import FootballAPIError
+from worldcup_bot.bot.formatters import bold_person_names, team_flag
 from worldcup_bot.bot.handlers import (
-    _goal_token,
     cmd_actual,
     cmd_ayer,
     cmd_clasificacion,
     cmd_en_directo,
+    cmd_estadisticas,
     cmd_general,
     cmd_hoy,
     cmd_lista_aciertos,
@@ -43,20 +47,35 @@ from worldcup_bot.espn.client import ESPNClient
 from worldcup_bot.espn.formatter import format_match_stats
 from worldcup_bot.porra import predictions as pred_loader
 from worldcup_bot.porra.engine import compute_general_ranking
-from worldcup_bot.porra.live import build_state, diff_live, load_live, render_changes_text, save_live
+from worldcup_bot.porra.live import build_state, diff_live, load_live, render_porra_context, save_live
 from worldcup_bot.reddit.notifier import (
     _is_silent_hour,
     build_goal_keyboard,
-    format_goal_notification,
+    format_disallowed_message,
+    format_new_goal_message,
 )
-from worldcup_bot.reddit.parser import compute_new_goals
-from worldcup_bot.reddit.scanner import RedditMatchScanner
+from worldcup_bot.reddit.parser import parse_goal_events
+from worldcup_bot.reddit.scanner import RedditMatchScanner, _teams_match
+from worldcup_bot.reddit.score_state import GoalDelta, diff_scores, load_scores, save_scores
+from worldcup_bot.reddit.clip_finder import find_goal_clip
+from worldcup_bot.reddit.clip_store import (
+    add_entry as _cs_add_entry,
+    goal_token as _cs_goal_token,
+    load_clips,
+    prune_old_entries,
+    save_clips,
+)
+from worldcup_bot.reddit.downloader import MediaDownloader
+from worldcup_bot.reddit.video import VideoTooLargeError, compress_if_needed
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger(__name__)
+
+# Max search attempts before giving up on a clip (~18 min at 45s interval)
+_MAX_CLIP_ATTEMPTS = 25
 
 
 # ── daily AI update job ───────────────────────────────────────────────────────
@@ -81,111 +100,403 @@ async def daily_update_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("daily_update_job failed")
 
 
+async def _enrich_scorer(
+    delta: GoalDelta,
+    match,
+    scanner: RedditMatchScanner,
+    settings: Settings,
+) -> tuple[str | None, str | None]:
+    """Try to find scorer + minute via Reddit thread → OpenAI → parse_goal_events.
+
+    Returns (scorer | None, minute | None). Never raises.
+    """
+    try:
+        permalink = await asyncio.to_thread(
+            scanner.find_match_thread, match.home_name, match.away_name
+        )
+        if permalink is None:
+            log.info(
+                "_enrich_scorer: no Reddit thread for %s vs %s",
+                match.home_name, match.away_name,
+            )
+            return None, None
+
+        thread_text = await asyncio.to_thread(scanner.get_thread_body, permalink)
+        if not thread_text:
+            return None, None
+
+        if ai_enabled(settings):
+            ai = AIClient(
+                settings.openai_api_key,
+                settings.openai_base_url,
+                settings.openai_model,
+            )
+            scorer, minute = await extract_scorer(
+                ai=ai,
+                thread_text=thread_text,
+                scoring_team=delta.scoring_team,
+                home_team=match.home_name,
+                away_team=match.away_name,
+                new_home=delta.new_home,
+                new_away=delta.new_away,
+            )
+            if scorer:
+                return scorer, minute
+
+        # Fallback: parse_goal_events — find the most recent goal for the scoring team
+        events = parse_goal_events(thread_text)
+        for event in reversed(events):
+            if (
+                event.home_score == delta.new_home
+                and event.away_score == delta.new_away
+                and _teams_match(event.scoring_team, delta.scoring_team)
+            ):
+                return event.scorer, event.minute_text
+
+        return None, None
+
+    except Exception as exc:
+        log.warning(
+            "_enrich_scorer failed for %s vs %s: %s",
+            match.home_name, match.away_name, exc,
+        )
+        return None, None
+
+
+async def _process_goal_delta(
+    delta: GoalDelta,
+    match,
+    scanner: RedditMatchScanner,
+    settings: Settings,
+    context: ContextTypes.DEFAULT_TYPE,
+    silent: bool,
+) -> None:
+    """Send a goal or disallowed notification for a single score-change delta."""
+    if delta.kind == "disallowed":
+        text = format_disallowed_message(
+            home_name=match.home_name,
+            away_name=match.away_name,
+            home_score=delta.new_home,
+            away_score=delta.new_away,
+            home_tla=match.home_tla,
+            away_tla=match.away_tla,
+        )
+        await context.bot.send_message(
+            chat_id=settings.telegram_group_id,
+            text=text,
+            parse_mode="HTML",
+            disable_notification=silent,
+        )
+        log.info(
+            "Disallowed goal sent: %s vs %s (%d-%d)",
+            match.home_name, match.away_name, delta.new_home, delta.new_away,
+        )
+        return
+
+    scorer, minute = await _enrich_scorer(delta, match, scanner, settings)
+
+    text = format_new_goal_message(
+        scoring_team=delta.scoring_team,
+        home_name=match.home_name,
+        away_name=match.away_name,
+        home_score=delta.new_home,
+        away_score=delta.new_away,
+        home_tla=match.home_tla,
+        away_tla=match.away_tla,
+        scorer=scorer,
+        minute=minute,
+    )
+    sent = await context.bot.send_message(
+        chat_id=settings.telegram_group_id,
+        text=text,
+        parse_mode="HTML",
+        disable_notification=silent,
+    )
+    log.info(
+        "Goal notification sent: %s vs %s (%d-%d) scorer=%s minute=%s",
+        match.home_name, match.away_name, delta.new_home, delta.new_away,
+        scorer, minute,
+    )
+
+    # Record a clip-store entry so poll_goal_clips_job can search in the background
+    clips_path = f"{settings.state_dir}/goal_clips.json"
+    clip_data: dict = context.bot_data.setdefault("clip_store", {})
+    token_key = f"{match.id}:{delta.scoring_team}:{delta.new_home}-{delta.new_away}"
+    tok = _cs_goal_token(token_key)
+    _cs_add_entry(
+        clip_data,
+        token=tok,
+        chat_id=settings.telegram_group_id,
+        message_id=sent.message_id,
+        home_name=match.home_name,
+        away_name=match.away_name,
+        home_tla=match.home_tla,
+        away_tla=match.away_tla,
+        home_score=delta.new_home,
+        away_score=delta.new_away,
+        scoring_team=delta.scoring_team,
+        scorer=scorer,
+        minute=minute,
+    )
+    save_clips(clips_path, clip_data)
+    log.debug("Clip-store entry created: token=%s key=%s", tok, token_key)
+
+
 # ── polling job ───────────────────────────────────────────────────────────────
 
 
 async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Repeating job: discover new Reddit match-thread goals and notify the group.
+    """Repeating job: detect new goals via football-data score changes.
 
-    Scheduled every settings.goal_poll_interval_seconds seconds.
-    TELEGRAM_GROUP_ID is guaranteed set by load_settings (RuntimeError if missing).
+    Detection strategy (score-based, block 1):
+    1. Load persistent score state from live_scores.json.
+    2. Get all matches from football-data.org (cached).
+    3. Relevant matches: IN_PLAY / PAUSED, OR FINISHED that we were tracking.
+    4. First-seen match → SEED (store current score, notify nothing).
+    5. Subsequent tick: diff against stored score.
+       Score increase → goal notification (enrich via Reddit + OpenAI/parse fallback).
+       Score decrease → disallowed-goal notification.
+    6. Persist updated state.
 
-    Dedup strategy: on the FIRST poll for a thread, all current goal keys are
-    seeded into the notified set WITHOUT sending — prevents spamming goals that
-    existed before the bot started watching.  On subsequent polls, any new key
-    triggers a notification.
+    Night-silent: 00:00–08:59 local → disable_notification=True (still sends).
     """
     try:
         settings: Settings = context.bot_data["settings"]
+        state_path = f"{settings.state_dir}/live_scores.json"
 
-        # Lazy-initialise dedup state
-        if "notified_goal_keys" not in context.bot_data:
-            context.bot_data["notified_goal_keys"] = set()
-        if "seeded_threads" not in context.bot_data:
-            context.bot_data["seeded_threads"] = set()
+        scores: dict = load_scores(state_path)
 
-        # Lazy-initialise the scanner (persists session + state across ticks)
         if context.bot_data.get("reddit_scanner") is None:
             context.bot_data["reddit_scanner"] = RedditMatchScanner(
                 user_agent=settings.reddit_user_agent
             )
         scanner: RedditMatchScanner = context.bot_data["reddit_scanner"]
 
-        # Get live matches — cheapest call first
         client = make_client(settings)
         try:
-            live = client.get_live_matches()
+            all_matches = client.get_all_matches()
         except FootballAPIError as exc:
-            log.warning("poll_goals_job: could not get live matches: %s", exc)
+            log.warning("poll_goals_job: could not get matches: %s", exc)
             return
 
-        if not live:
+        # IN_PLAY/PAUSED are live; FINISHED matches already in state catch final goals + FT
+        relevant = [
+            m for m in all_matches
+            if m.status in ("IN_PLAY", "PAUSED")
+            or (m.status == "FINISHED" and str(m.id) in scores)
+        ]
+
+        if not relevant:
             return
-
-        # Scan Reddit for matched threads
-        thread_results = scanner.scan_live_matches(live)
-
-        notified: set[str] = context.bot_data["notified_goal_keys"]
-        seeded: set[str] = context.bot_data["seeded_threads"]
 
         local_tz = pytz.timezone(settings.timezone)
         now_local = datetime.now(local_tz)
         silent = _is_silent_hour(now_local)
 
-        if "goal_clips" not in context.bot_data:
-            context.bot_data["goal_clips"] = {}
+        changed = False
 
-        for result in thread_results:
-            thread_id = result.thread.post_id
-            new_goals, notified, seeded = compute_new_goals(
-                thread_id, result.events, notified, seeded
-            )
-            for event in new_goals:
-                token = _goal_token(event.key)
-                context.bot_data["goal_clips"][token] = {
-                    "home_team": event.home_team,
-                    "away_team": event.away_team,
-                    "home_score": event.home_score,
-                    "away_score": event.away_score,
-                    "scorer": event.scorer,
-                    "minute_text": event.minute_text,
-                    "scoring_team": event.scoring_team,
-                    "home_tla": result.home_tla,
-                    "away_tla": result.away_tla,
-                    "status": "pending",
-                }
-                text = format_goal_notification(
-                    event,
-                    home_tla=result.home_tla,
-                    away_tla=result.away_tla,
+        for match in relevant:
+            match_key = str(match.id)
+            stored = scores.get(match_key)
+
+            deltas = diff_scores(stored, match)
+
+            if stored is None:
+                log.info(
+                    "poll_goals_job: seeding match %d (%s vs %s) at %d-%d",
+                    match.id, match.home_name, match.away_name,
+                    match.home_score or 0, match.away_score or 0,
                 )
-                keyboard = build_goal_keyboard(token)
+                scores[match_key] = {
+                    "home": match.home_score or 0,
+                    "away": match.away_score or 0,
+                    "status": match.status,
+                }
+                changed = True
+                continue
+
+            if not deltas:
+                if scores[match_key].get("status") != match.status:
+                    scores[match_key]["status"] = match.status
+                    changed = True
+                continue
+
+            for delta in deltas:
                 try:
-                    await context.bot.send_message(
-                        chat_id=settings.telegram_group_id,
-                        text=text,
-                        reply_markup=keyboard,
-                        disable_notification=silent,
-                    )
-                    log.info(
-                        "Goal notification sent: %s (thread %s)", event.key, thread_id
+                    await _process_goal_delta(
+                        delta, match, scanner, settings, context, silent
                     )
                 except Exception as exc:
                     log.error(
-                        "Failed to send goal notification for %s: %s",
-                        event.key,
-                        exc,
+                        "poll_goals_job: error processing delta for match %d: %s",
+                        match.id, exc,
                     )
 
-        # Persist updated dedup sets
-        context.bot_data["notified_goal_keys"] = notified
-        context.bot_data["seeded_threads"] = seeded
+            scores[match_key] = {
+                "home": match.home_score or 0,
+                "away": match.away_score or 0,
+                "status": match.status,
+            }
+            changed = True
+
+        if changed:
+            save_scores(state_path, scores)
 
     except Exception as exc:
         log.exception("poll_goals_job: unexpected error (will retry next tick): %s", exc)
 
 
-# ── finished-match stats + porra commentary job ───────────────────────────────
+# ── background clip-search job ────────────────────────────────────────────────
+
+
+async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Repeating job: search Reddit for goal clips and edit goal messages once found.
+
+    For every clip-store entry with status='searching':
+    1. Increment attempts.  If > _MAX_CLIP_ATTEMPTS → mark 'timeout', give up.
+    2. Call find_goal_clip (sync, via asyncio.to_thread).  None → persist attempts,
+       continue.
+    3. Found: download, compress if needed, move to persistent clips volume, then
+       edit the original goal message to add the 'Ver gol' inline keyboard.
+    4. Any per-entry exception is caught so one failure cannot disrupt others.
+    5. Prune entries/files older than 7 days each tick.
+    """
+    try:
+        settings: Settings = context.bot_data["settings"]
+        clips_path = f"{settings.state_dir}/goal_clips.json"
+        clips_dir = Path(settings.state_dir) / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use the authoritative in-memory state; fall back to disk only if absent
+        clip_data: dict = context.bot_data.setdefault(
+            "clip_store", load_clips(clips_path)
+        )
+
+        if context.bot_data.get("reddit_scanner") is None:
+            context.bot_data["reddit_scanner"] = RedditMatchScanner(
+                user_agent=settings.reddit_user_agent
+            )
+        scanner: RedditMatchScanner = context.bot_data["reddit_scanner"]
+
+        # Prune old entries / clip files each tick
+        prune_old_entries(clip_data, clips_dir)
+
+        searching = {
+            tok: entry
+            for tok, entry in clip_data.items()
+            if entry.get("status") == "searching"
+        }
+        if not searching:
+            return
+
+        changed = False
+
+        for token, entry in searching.items():
+            try:
+                entry["attempts"] = entry.get("attempts", 0) + 1
+                changed = True
+
+                if entry["attempts"] > _MAX_CLIP_ATTEMPTS:
+                    entry["status"] = "timeout"
+                    log.info(
+                        "poll_goal_clips_job: token %s timed out after %d attempts",
+                        token,
+                        entry["attempts"],
+                    )
+                    continue
+
+                # Parse minute string ("45+2" → 45, None → 0)
+                minute_str = entry.get("minute") or "0"
+                try:
+                    minute = int(str(minute_str).split("+")[0].rstrip("'"))
+                except (ValueError, IndexError):
+                    minute = 0
+                scorer = entry.get("scorer") or ""
+
+                media_url: str | None = await asyncio.to_thread(
+                    find_goal_clip,
+                    scanner,
+                    entry["home_name"],
+                    entry["away_name"],
+                    entry["home_score"],
+                    entry["away_score"],
+                    scorer,
+                    minute,
+                )
+
+                if media_url is None:
+                    log.debug(
+                        "poll_goal_clips_job: no clip yet for token %s (attempt %d)",
+                        token,
+                        entry["attempts"],
+                    )
+                    continue
+
+                # Download to temp path
+                downloader = MediaDownloader()
+                temp_path = await downloader.download(media_url)
+                if temp_path is None:
+                    log.warning(
+                        "poll_goal_clips_job: download returned None for token %s", token
+                    )
+                    continue
+
+                try:
+                    # Compress in temp dir if over 50 MB
+                    send_path = await compress_if_needed(temp_path)
+
+                    # Move to persistent clips volume
+                    persistent_path = clips_dir / f"{token}.mp4"
+                    if persistent_path.exists():
+                        persistent_path.unlink()
+                    shutil.move(str(send_path), str(persistent_path))
+
+                    # Edit the original goal message to add the 'Ver gol' keyboard
+                    try:
+                        await context.bot.edit_message_reply_markup(
+                            chat_id=entry["chat_id"],
+                            message_id=entry["message_id"],
+                            reply_markup=build_goal_keyboard(token),
+                        )
+                    except Exception as edit_exc:
+                        log.warning(
+                            "poll_goal_clips_job: could not edit message for token %s: %s",
+                            token,
+                            edit_exc,
+                        )
+
+                    entry["status"] = "ready"
+                    entry["clip_path"] = str(persistent_path)
+                    log.info(
+                        "poll_goal_clips_job: clip ready for token %s → %s",
+                        token,
+                        persistent_path,
+                    )
+
+                except VideoTooLargeError as exc:
+                    log.warning(
+                        "poll_goal_clips_job: clip too large for token %s: %s", token, exc
+                    )
+                    entry["status"] = "timeout"
+
+                finally:
+                    # Clean up any temp file that was not moved
+                    try:
+                        if temp_path.exists():
+                            temp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+            except Exception as exc:
+                log.exception(
+                    "poll_goal_clips_job: error processing token %s: %s", token, exc
+                )
+
+        if changed:
+            save_clips(clips_path, clip_data)
+
+    except Exception as exc:
+        log.exception("poll_goal_clips_job: unexpected error: %s", exc)
 
 
 async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -289,15 +600,15 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     old_state = load_live(live_path)
                     live_diff = diff_live(old_state, new_state)
 
-                    if live_diff.changed and ai_enabled(settings):
+                    if ai_enabled(settings) and bool(ranking):
                         ai = AIClient(
                             settings.openai_api_key,
                             settings.openai_base_url,
                             settings.openai_model,
                         )
                         persona = pick_commentator()
-                        changes_text = render_changes_text(live_diff)
-                        raw_commentary = await generate_porra_commentary(ai, persona, changes_text)
+                        context_text = render_porra_context(live_diff, ranking)
+                        raw_commentary = await generate_porra_commentary(ai, persona, context_text)
                         commentary_text = bold_person_names(raw_commentary, participant_names)
                         log.info(
                             "Generated porra commentary (%s) for match %d", persona, match_id
@@ -308,28 +619,41 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception as exc:
                     log.error("Part B failed for match %d: %s", match_id, exc)
 
-                # ── Combine and send ONE message ──────────────────────────────
-                if stats_text and commentary_text:
-                    combined = stats_text + "\n\n----\n\n" + commentary_text
-                elif stats_text:
-                    combined = stats_text
-                elif commentary_text:
-                    combined = commentary_text
-                else:
-                    combined = None
+                # ── Section 1 (always): final result ─────────────────────────
+                h_flag = team_flag(match.home_tla)
+                a_flag = team_flag(match.away_tla)
+                hs = match.home_score if match.home_score is not None else 0
+                as_ = match.away_score if match.away_score is not None else 0
+                h_name = html.escape(match.home_name, quote=False)
+                a_name = html.escape(match.away_name, quote=False)
+                if match.winner == "HOME_TEAM":
+                    h_name = f"<b>{h_name}</b>"
+                elif match.winner == "AWAY_TEAM":
+                    a_name = f"<b>{a_name}</b>"
+                result_section = (
+                    f"🏁 <b>Final</b>\n"
+                    f"{h_flag} {h_name} {hs}-{as_} {a_name} {a_flag}"
+                )
 
-                if combined:
-                    await context.bot.send_message(
-                        chat_id=settings.telegram_group_id,
-                        text=combined,
-                        parse_mode="HTML",
-                    )
-                    log.info(
-                        "Sent match-finish message for match %d (%s vs %s)",
-                        match_id,
-                        match.home_name,
-                        match.away_name,
-                    )
+                # ── Assemble sections and always send ─────────────────────────
+                sections: list[str] = [result_section]
+                if stats_text:
+                    sections.append(stats_text)
+                if commentary_text:
+                    sections.append(commentary_text)
+                combined = "\n\n---\n\n".join(sections)
+
+                await context.bot.send_message(
+                    chat_id=settings.telegram_group_id,
+                    text=combined,
+                    parse_mode="HTML",
+                )
+                log.info(
+                    "Sent match-finish message for match %d (%s vs %s)",
+                    match_id,
+                    match.home_name,
+                    match.away_name,
+                )
 
             except Exception as exc:
                 log.error("poll_finished_matches_job: error processing match %d: %s", match_id, exc)
@@ -350,16 +674,13 @@ def build_app(settings: Settings) -> Application:
 
     # Store settings in bot_data for handler access
     app.bot_data["settings"] = settings
-    # Initialise dedup state eagerly so tests can inspect it
-    app.bot_data["notified_goal_keys"] = set()
-    app.bot_data["seeded_threads"] = set()
     app.bot_data["reddit_scanner"] = None
-    # goal_clips maps short token → goal context dict for "Ver gol" callbacks
-    app.bot_data["goal_clips"] = {}
-    # in-flight lock set — tokens currently being processed (non-blocking guard)
+    # Load persistent clip-store from disk (restart resilience: 'ready' entries
+    # keep working, 'searching' entries resume in poll_goal_clips_job)
+    clips_path = f"{settings.state_dir}/goal_clips.json"
+    app.bot_data["clip_store"] = load_clips(clips_path)
+    # In-flight lock set — tokens currently being processed by cmd_ver_gol_callback
     app.bot_data["vergol_inflight"] = set()
-    # Telegram file_id cache: media_url → file_id (skip re-upload on repeat sends)
-    app.bot_data["clip_file_ids"] = {}
     # finished-match tracker: seeded on first poll_finished_matches_job run
     app.bot_data["espn_client"] = None
 
@@ -379,6 +700,7 @@ def build_app(settings: Settings) -> Application:
         # New approved improvements
         CommandHandler("mispredicciones", cmd_mis_predicciones),
         CommandHandler("participantes", cmd_participantes),
+        CommandHandler("estadisticas", cmd_estadisticas),
         # "Ver gol" inline button handler
         CallbackQueryHandler(cmd_ver_gol_callback, pattern=r"^vergol:"),
         # Test / utility
@@ -417,7 +739,7 @@ def main() -> None:
     app = build_app(settings)
 
     log.info(
-        "Goal notifier enabled — polling Reddit every %ds for group %s",
+        "Goal notifier enabled (score-based) — polling football-data every %ds for group %s",
         settings.goal_poll_interval_seconds,
         settings.telegram_group_id,
     )
@@ -456,6 +778,17 @@ def main() -> None:
         log.info(
             "Finished-match notifier enabled — polling every %ds for group %s",
             settings.finished_poll_interval_seconds,
+            settings.telegram_group_id,
+        )
+
+        app.job_queue.run_repeating(
+            poll_goal_clips_job,
+            interval=45,
+            first=20,
+            name="poll_goal_clips",
+        )
+        log.info(
+            "Goal-clip searcher enabled — polling every 45s for group %s",
             settings.telegram_group_id,
         )
 

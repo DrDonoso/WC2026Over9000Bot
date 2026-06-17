@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from worldcup_bot.reddit.models import GoalEvent
-from worldcup_bot.reddit.parser import compute_new_goals, parse_goal_events
+from worldcup_bot.reddit.parser import parse_goal_events
 
 # ── fixture: Sweden vs Tunisia sample selftext ────────────────────────────────
 
@@ -142,76 +142,3 @@ class TestParseGoalEvents:
 
     def test_no_match_events_section_returns_empty(self):
         assert parse_goal_events("No goals here, just chat", post_id="x") == []
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# compute_new_goals
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-def _make_event(key_suffix: str) -> GoalEvent:
-    return GoalEvent(
-        minute_text="1",
-        minute_sort=1.0,
-        scorer="Scorer",
-        scoring_team="TeamA",
-        home_team="TeamA",
-        away_team="TeamB",
-        home_score=1,
-        away_score=0,
-        raw="raw",
-        key=f"thread1:{key_suffix}",
-    )
-
-
-class TestComputeNewGoals:
-    def test_first_poll_returns_no_goals(self):
-        events = [_make_event("g1"), _make_event("g2")]
-        new_goals, notified, seeded = compute_new_goals("thread1", events, set(), set())
-        assert new_goals == []
-
-    def test_first_poll_seeds_all_keys(self):
-        events = [_make_event("g1"), _make_event("g2")]
-        _, notified, seeded = compute_new_goals("thread1", events, set(), set())
-        assert "thread1:g1" in notified
-        assert "thread1:g2" in notified
-        assert "thread1" in seeded
-
-    def test_second_poll_notifies_new_goal(self):
-        events_first = [_make_event("g1"), _make_event("g2")]
-        _, notified, seeded = compute_new_goals("thread1", events_first, set(), set())
-        # New goal appears
-        events_second = events_first + [_make_event("g3")]
-        new_goals, notified2, _ = compute_new_goals("thread1", events_second, notified, seeded)
-        assert len(new_goals) == 1
-        assert new_goals[0].key == "thread1:g3"
-        assert "thread1:g3" in notified2
-
-    def test_preexisting_goals_never_re_notified(self):
-        events = [_make_event("g1")]
-        _, notified, seeded = compute_new_goals("thread1", events, set(), set())
-        # Second poll: same events, no new ones
-        new_goals, _, _ = compute_new_goals("thread1", events, notified, seeded)
-        assert new_goals == []
-
-    def test_different_threads_seeded_independently(self):
-        e1 = [_make_event("g1")]
-        e2 = [_make_event("g2")]
-        # Seed thread1
-        _, notified, seeded = compute_new_goals("thread1", e1, set(), set())
-        # thread2 has not been seen — first poll for thread2 also seeds
-        new_goals2, notified2, seeded2 = compute_new_goals("thread2", e2, notified, seeded)
-        assert new_goals2 == []
-        assert "thread2" in seeded2
-        # Now a new goal in thread2
-        e2_new = e2 + [_make_event("g3")]
-        new_goals3, _, _ = compute_new_goals("thread2", e2_new, notified2, seeded2)
-        assert len(new_goals3) == 1
-
-    def test_immutability_of_input_sets(self):
-        events = [_make_event("g1")]
-        orig_notified: set[str] = set()
-        orig_seeded: set[str] = set()
-        compute_new_goals("thread1", events, orig_notified, orig_seeded)
-        assert orig_notified == set()
-        assert orig_seeded == set()

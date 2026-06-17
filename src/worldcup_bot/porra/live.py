@@ -157,3 +157,31 @@ def render_changes_text(diff: LiveDiff) -> str:
         )
 
     return "\n".join(lines)
+
+
+def render_porra_context(diff: LiveDiff, ranking: list) -> str:
+    """Build full context text for the AI commentator — always non-empty when ranking exists.
+
+    Returns two blocks:
+    - CLASIFICACIÓN ACTUAL: top-5 entries with position and points.
+    - CAMBIOS CON ESTE RESULTADO: movements if any, else an explicit "no movement" note.
+
+    Unlike render_changes_text, this is always meaningful even when diff.changed is False.
+    """
+    top5 = ranking[:5]
+    standing_lines = [
+        f"{idx + 1}. {entry.display_name} — {entry.total_score:.1f} pts"
+        for idx, entry in enumerate(top5)
+    ]
+    standing_block = "CLASIFICACIÓN ACTUAL:\n" + "\n".join(standing_lines)
+
+    changes = render_changes_text(diff)
+    if changes:
+        changes_block = "CAMBIOS CON ESTE RESULTADO:\n" + changes
+    else:
+        changes_block = (
+            "CAMBIOS CON ESTE RESULTADO:\n"
+            "Ninguno — la clasificación no se ha movido con este resultado."
+        )
+
+    return f"{standing_block}\n\n{changes_block}"

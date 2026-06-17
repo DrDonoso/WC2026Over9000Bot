@@ -19,6 +19,7 @@ from worldcup_bot.bot.handlers import (
     _send_ranking_with_top3_photos,
     cmd_actual,
     cmd_clasificacion,
+    cmd_estadisticas,
     cmd_general,
     cmd_lista_aciertos,
     cmd_lista_aciertos_actual,
@@ -1047,33 +1048,41 @@ def _make_vergol_update(token: str, **kwargs) -> MagicMock:
 def _make_vergol_context(
     fake_settings: Settings,
     token: str,
-    info: dict | None,
+    entry: dict | None,
 ) -> MagicMock:
     context = MagicMock()
     context.bot_data = {
         "settings": fake_settings,
-        "reddit_scanner": None,
-        "goal_clips": ({token: info} if info is not None else {}),
+        "clip_store": ({token: entry} if entry is not None else {}),
         "vergol_inflight": set(),
-        "clip_file_ids": {},
     }
     context.bot.send_message = AsyncMock()
     context.bot.send_video = AsyncMock()
     return context
 
 
-def _sample_goal_info(status: str = "pending") -> dict:
+def _sample_clip_entry(
+    status: str = "ready",
+    clip_path: str | None = "/app/state/clips/tok.mp4",
+    file_id: str | None = None,
+) -> dict:
     return {
-        "home_team": "Sweden",
-        "away_team": "Tunisia",
-        "home_score": 3,
-        "away_score": 1,
-        "scorer": "Viktor Gyökeres",
-        "minute_text": "60",
-        "scoring_team": "Sweden",
+        "chat_id": 99999,
+        "message_id": 42,
+        "home_name": "Sweden",
+        "away_name": "Tunisia",
         "home_tla": "SWE",
         "away_tla": "TUN",
+        "home_score": 3,
+        "away_score": 1,
+        "scoring_team": "Sweden",
+        "scorer": "Viktor Gyökeres",
+        "minute": "60",
         "status": status,
+        "clip_path": clip_path,
+        "file_id": file_id,
+        "attempts": 3,
+        "created_at": "2026-06-17T09:00:00+00:00",
     }
 
 
@@ -1094,10 +1103,10 @@ class TestCmdVerGolCallback:
     # ── unknown token ────────────────────────────────────────────────────────
 
     async def test_unknown_token_answers_alert_no_send(self, fake_settings):
-        """Unknown token → query.answer with show_alert; no video or message sent."""
+        """Unknown token → query.answer with show_alert; no video sent."""
         token = "notpresent"
         update = _make_vergol_update(token)
-        context = _make_vergol_context(fake_settings, token, info=None)
+        context = _make_vergol_context(fake_settings, token, entry=None)
 
         await cmd_ver_gol_callback(update, context)
 
@@ -1107,339 +1116,235 @@ class TestCmdVerGolCallback:
         context.bot.send_video.assert_not_called()
         context.bot.send_message.assert_not_called()
 
-    # ── concurrency guard: "sending" ─────────────────────────────────────────
+    # ── not-ready guard ──────────────────────────────────────────────────────
 
-    async def test_already_sending_answers_toast_no_double_send(self, fake_settings):
-        """Status 'sending' → quick toast answer, no second download."""
-        token = "tok123"
+    async def test_searching_status_answers_not_ready(self, fake_settings):
+        """Status 'searching' → answer 'aún no está listo'; no video sent."""
+        token = "searchtok"
+        entry = _sample_clip_entry(status="searching", clip_path=None)
         update = _make_vergol_update(token)
-        info = _sample_goal_info(status="sending")
-        context = _make_vergol_context(fake_settings, token, info)
+        context = _make_vergol_context(fake_settings, token, entry)
 
         await cmd_ver_gol_callback(update, context)
 
         update.callback_query.answer.assert_called_once()
         text = update.callback_query.answer.call_args[0][0]
-        assert "enviando" in text.lower()
+        assert "listo" in text.lower()
         context.bot.send_video.assert_not_called()
 
-    async def test_already_sent_answers_toast_no_send(self, fake_settings):
-        """Status 'sent' → toast answer, no further action."""
-        token = "tok456"
+    async def test_timeout_status_answers_not_ready(self, fake_settings):
+        """Status 'timeout' → answer 'aún no está listo'; no video sent."""
+        token = "timeouttok"
+        entry = _sample_clip_entry(status="timeout", clip_path=None)
         update = _make_vergol_update(token)
-        info = _sample_goal_info(status="sent")
-        context = _make_vergol_context(fake_settings, token, info)
+        context = _make_vergol_context(fake_settings, token, entry)
 
         await cmd_ver_gol_callback(update, context)
 
-        update.callback_query.answer.assert_called_once()
         text = update.callback_query.answer.call_args[0][0]
-        assert "envió" in text.lower()
+        assert "listo" in text.lower()
         context.bot.send_video.assert_not_called()
 
-    # ── clip not found ────────────────────────────────────────────────────────
-
-    async def test_clip_not_found_sends_not_available_message(self, fake_settings):
-        """Clip not on Reddit yet → sends 'aún no está disponible', keyboard kept."""
-        token = "tok789"
+    async def test_ready_no_clip_path_answers_not_ready(self, fake_settings):
+        """Status 'ready' but clip_path None → answer 'aún no está listo'."""
+        token = "noclipath"
+        entry = _sample_clip_entry(status="ready", clip_path=None)
         update = _make_vergol_update(token)
-        info = _sample_goal_info()
-        context = _make_vergol_context(fake_settings, token, info)
+        context = _make_vergol_context(fake_settings, token, entry)
 
-        with patch(
-            "worldcup_bot.bot.handlers.find_goal_clip", return_value=None
-        ):
-            with patch(
-                "worldcup_bot.bot.handlers.RedditMatchScanner"
-            ):
-                await cmd_ver_gol_callback(update, context)
+        await cmd_ver_gol_callback(update, context)
 
-        context.bot.send_message.assert_called_once()
-        text = context.bot.send_message.call_args[1]["text"]
-        assert "disponible" in text.lower()
-        # Keyboard must NOT be removed
-        update.callback_query.edit_message_reply_markup.assert_not_called()
-        # Status reset to pending (allow retry)
-        assert info["status"] == "pending"
-
-    # ── download fails ────────────────────────────────────────────────────────
-
-    async def test_download_failure_sends_error_message(self, fake_settings):
-        """Download returns None → error message sent, keyboard kept, status pending."""
-        token = "tokdl"
-        update = _make_vergol_update(token)
-        info = _sample_goal_info()
-        context = _make_vergol_context(fake_settings, token, info)
-
-        fake_downloader = MagicMock()
-        fake_downloader.download = AsyncMock(return_value=None)
-
-        with patch(
-            "worldcup_bot.bot.handlers.find_goal_clip",
-            return_value="https://streamin.link/v/abc",
-        ):
-            with patch("worldcup_bot.bot.handlers.RedditMatchScanner"):
-                with patch(
-                    "worldcup_bot.bot.handlers.MediaDownloader",
-                    return_value=fake_downloader,
-                ):
-                    await cmd_ver_gol_callback(update, context)
-
-        context.bot.send_message.assert_called_once()
-        msg_text = context.bot.send_message.call_args[1]["text"]
-        assert "descargar" in msg_text.lower() or "❌" in msg_text
+        text = update.callback_query.answer.call_args[0][0]
+        assert "listo" in text.lower()
         context.bot.send_video.assert_not_called()
-        assert info["status"] == "pending"
-
-    # ── happy path ────────────────────────────────────────────────────────────
-
-    async def test_happy_path_sends_video_with_meta_and_removes_keyboard(
-        self, tmp_path, fake_settings
-    ):
-        """Full success: find → download → probe → send_video; keyboard removed; status sent."""
-        token = "tokhappy"
-        update = _make_vergol_update(token)
-        info = _sample_goal_info()
-        context = _make_vergol_context(fake_settings, token, info)
-
-        fake_video = tmp_path / "clip.mp4"
-        fake_video.write_bytes(b"fakevideodata")
-
-        fake_downloader = MagicMock()
-        fake_downloader.download = AsyncMock(return_value=fake_video)
-
-        fake_meta = {"width": 1920, "height": 1080, "duration": 15}
-
-        # Mock the returned Message object so file_id capture doesn't crash
-        fake_sent_msg = MagicMock()
-        fake_sent_msg.video = MagicMock()
-        fake_sent_msg.video.file_id = "FAKEFID"
-        context.bot.send_video = AsyncMock(return_value=fake_sent_msg)
-
-        with patch(
-            "worldcup_bot.bot.handlers.find_goal_clip",
-            return_value="https://streamin.link/v/abc",
-        ):
-            with patch("worldcup_bot.bot.handlers.RedditMatchScanner"):
-                with patch(
-                    "worldcup_bot.bot.handlers.MediaDownloader",
-                    return_value=fake_downloader,
-                ):
-                    with patch(
-                        "worldcup_bot.bot.handlers.compress_if_needed",
-                        new=AsyncMock(return_value=fake_video),
-                    ):
-                        with patch(
-                            "worldcup_bot.bot.handlers.probe_video",
-                            new=AsyncMock(return_value=fake_meta),
-                        ):
-                            await cmd_ver_gol_callback(update, context)
-
-        # send_video called with width and height
-        context.bot.send_video.assert_called_once()
-        send_kwargs = context.bot.send_video.call_args[1]
-        assert send_kwargs["width"] == 1920
-        assert send_kwargs["height"] == 1080
-        assert send_kwargs["duration"] == 15
-
-        # Keyboard removed
-        update.callback_query.edit_message_reply_markup.assert_called_once_with(
-            reply_markup=None
-        )
-
-        # Status set to "sent"
-        assert info["status"] == "sent"
-
-    async def test_happy_path_reply_to_message_id(self, tmp_path, fake_settings):
-        """send_video reply_to_message_id matches the original goal message id."""
-        token = "tokrply"
-        update = _make_vergol_update(token, message_id=777, chat_id=88888)
-        info = _sample_goal_info()
-        context = _make_vergol_context(fake_settings, token, info)
-
-        fake_video = tmp_path / "clip.mp4"
-        fake_video.write_bytes(b"fakevideodata")
-
-        fake_downloader = MagicMock()
-        fake_downloader.download = AsyncMock(return_value=fake_video)
-
-        fake_sent_msg = MagicMock()
-        fake_sent_msg.video = MagicMock()
-        fake_sent_msg.video.file_id = "FAKEFID2"
-        context.bot.send_video = AsyncMock(return_value=fake_sent_msg)
-
-        with patch(
-            "worldcup_bot.bot.handlers.find_goal_clip",
-            return_value="https://streamff.link/v/abc",
-        ):
-            with patch("worldcup_bot.bot.handlers.RedditMatchScanner"):
-                with patch(
-                    "worldcup_bot.bot.handlers.MediaDownloader",
-                    return_value=fake_downloader,
-                ):
-                    with patch(
-                        "worldcup_bot.bot.handlers.compress_if_needed",
-                        new=AsyncMock(return_value=fake_video),
-                    ):
-                        with patch(
-                            "worldcup_bot.bot.handlers.probe_video",
-                            new=AsyncMock(return_value={}),
-                        ):
-                            await cmd_ver_gol_callback(update, context)
-
-        send_kwargs = context.bot.send_video.call_args[1]
-        assert send_kwargs["reply_to_message_id"] == 777
-        assert send_kwargs["chat_id"] == 88888
 
     # ── in-flight guard ───────────────────────────────────────────────────────
 
-    async def test_inflight_guard_answers_immediately_no_download(self, fake_settings):
-        """Pre-adding token to vergol_inflight → instant toast, no download or find."""
-        token = "tokinflight"
+    async def test_inflight_guard_answers_immediately_no_send(self, fake_settings, tmp_path):
+        """Token pre-added to vergol_inflight → instant answer, no send."""
+        token = "inflighttok"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"data")
+        entry = _sample_clip_entry(status="ready", clip_path=str(clip_file))
         update = _make_vergol_update(token)
-        info = _sample_goal_info(status="pending")
-        context = _make_vergol_context(fake_settings, token, info)
+        context = _make_vergol_context(fake_settings, token, entry)
         context.bot_data["vergol_inflight"].add(token)
 
-        with patch("worldcup_bot.bot.handlers.find_goal_clip") as mock_find:
-            await cmd_ver_gol_callback(update, context)
+        await cmd_ver_gol_callback(update, context)
 
-        update.callback_query.answer.assert_called_once()
         text = update.callback_query.answer.call_args[0][0]
         assert "enviando" in text.lower()
-        mock_find.assert_not_called()
         context.bot.send_video.assert_not_called()
 
-    async def test_inflight_token_discarded_after_successful_run(
-        self, tmp_path, fake_settings
-    ):
-        """After a normal successful send, token is removed from vergol_inflight."""
-        token = "tokfinallydisc"
+    async def test_inflight_token_discarded_after_send(self, fake_settings, tmp_path):
+        """After a successful send, token is removed from vergol_inflight."""
+        token = "discardtok"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"fakedata")
+        entry = _sample_clip_entry(status="ready", clip_path=str(clip_file))
         update = _make_vergol_update(token)
-        info = _sample_goal_info()
-        context = _make_vergol_context(fake_settings, token, info)
+        context = _make_vergol_context(fake_settings, token, entry)
 
-        fake_video = tmp_path / "clip.mp4"
-        fake_video.write_bytes(b"data")
-        fake_downloader = MagicMock()
-        fake_downloader.download = AsyncMock(return_value=fake_video)
+        fake_sent = MagicMock()
+        fake_sent.video = MagicMock()
+        fake_sent.video.file_id = "FID1"
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
 
-        fake_sent_msg = MagicMock()
-        fake_sent_msg.video = MagicMock()
-        fake_sent_msg.video.file_id = "DISCFID"
-        context.bot.send_video = AsyncMock(return_value=fake_sent_msg)
-
-        with patch("worldcup_bot.bot.handlers.find_goal_clip", return_value="https://x.com/v"):
-            with patch("worldcup_bot.bot.handlers.RedditMatchScanner"):
-                with patch("worldcup_bot.bot.handlers.MediaDownloader", return_value=fake_downloader):
-                    with patch("worldcup_bot.bot.handlers.compress_if_needed", new=AsyncMock(return_value=fake_video)):
-                        with patch("worldcup_bot.bot.handlers.probe_video", new=AsyncMock(return_value={})):
-                            await cmd_ver_gol_callback(update, context)
+        with patch(
+            "worldcup_bot.bot.handlers.probe_video",
+            new=AsyncMock(return_value={}),
+        ):
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_ver_gol_callback(update, context)
 
         assert token not in context.bot_data["vergol_inflight"]
 
-    # ── file_id cache: per-goal shortcut ─────────────────────────────────────
+    # ── happy path: ready → send from file ───────────────────────────────────
 
-    async def test_cached_file_id_on_info_resends_instantly_no_download(self, fake_settings):
-        """info['file_id'] set → resend via file_id, no find_goal_clip, status sent."""
-        token = "tokcachedgoal"
+    async def test_ready_sends_video_as_reply_with_dims(self, fake_settings, tmp_path):
+        """Status 'ready': send_video called as reply to original message with probed dims."""
+        token = "happytok"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"fakevideodata")
+        entry = _sample_clip_entry(
+            status="ready",
+            clip_path=str(clip_file),
+        )
+        update = _make_vergol_update(token, message_id=42, chat_id=99999)
+        context = _make_vergol_context(fake_settings, token, entry)
+
+        fake_sent = MagicMock()
+        fake_sent.video = MagicMock()
+        fake_sent.video.file_id = "NEWID"
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
+
+        fake_meta = {"width": 1920, "height": 1080, "duration": 15}
+
+        with patch(
+            "worldcup_bot.bot.handlers.probe_video",
+            new=AsyncMock(return_value=fake_meta),
+        ):
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_ver_gol_callback(update, context)
+
+        context.bot.send_video.assert_called_once()
+        kw = context.bot.send_video.call_args[1]
+        assert kw["chat_id"] == 99999
+        assert kw["reply_to_message_id"] == 42
+        assert kw["width"] == 1920
+        assert kw["height"] == 1080
+        assert kw["duration"] == 15
+
+    async def test_fresh_send_caches_file_id_in_entry(self, fake_settings, tmp_path):
+        """After a fresh send, file_id is stored in the clip-store entry and persisted."""
+        token = "cachefid"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"data")
+        entry = _sample_clip_entry(status="ready", clip_path=str(clip_file))
         update = _make_vergol_update(token)
-        info = _sample_goal_info()
-        info["file_id"] = "VID123"
-        context = _make_vergol_context(fake_settings, token, info)
+        context = _make_vergol_context(fake_settings, token, entry)
 
-        fake_sent_msg = MagicMock()
-        fake_sent_msg.video = MagicMock()
-        fake_sent_msg.video.file_id = "VID123"
-        context.bot.send_video = AsyncMock(return_value=fake_sent_msg)
+        fake_sent = MagicMock()
+        fake_sent.video = MagicMock()
+        fake_sent.video.file_id = "STORED_FID"
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
 
-        with patch("worldcup_bot.bot.handlers.find_goal_clip") as mock_find:
+        with patch(
+            "worldcup_bot.bot.handlers.probe_video",
+            new=AsyncMock(return_value={}),
+        ):
+            with patch("worldcup_bot.bot.handlers._cs_save_clips") as mock_save:
+                await cmd_ver_gol_callback(update, context)
+
+        assert entry["file_id"] == "STORED_FID"
+        mock_save.assert_called_once()
+
+    # ── file_id cache: instant re-send ────────────────────────────────────────
+
+    async def test_cached_file_id_resends_instantly_no_file_open(
+        self, fake_settings, tmp_path
+    ):
+        """file_id in entry → send via file_id directly; no file I/O."""
+        token = "fiidtok"
+        entry = _sample_clip_entry(
+            status="ready",
+            clip_path=str(tmp_path / "clip.mp4"),
+            file_id="CACHED_FID",
+        )
+        update = _make_vergol_update(token)
+        context = _make_vergol_context(fake_settings, token, entry)
+
+        fake_sent = MagicMock()
+        fake_sent.video = MagicMock()
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
+
+        with patch("worldcup_bot.bot.handlers.probe_video") as mock_probe:
             await cmd_ver_gol_callback(update, context)
 
         context.bot.send_video.assert_called_once()
-        send_kwargs = context.bot.send_video.call_args[1]
-        assert send_kwargs["video"] == "VID123"
-        mock_find.assert_not_called()
-        update.callback_query.edit_message_reply_markup.assert_called_once_with(reply_markup=None)
-        assert info["status"] == "sent"
+        kw = context.bot.send_video.call_args[1]
+        assert kw["video"] == "CACHED_FID"
+        # probe_video must NOT be called — we skip the file entirely
+        mock_probe.assert_not_called()
 
-    # ── file_id cache: per media_url shortcut ─────────────────────────────────
-
-    async def test_cached_file_id_per_media_url_resends_instantly(self, fake_settings):
-        """clip_file_ids[url] set → resend via that file_id, no download, info['file_id'] updated."""
-        token = "tokcachedurl"
+    async def test_stale_file_id_evicted_falls_through_to_file(
+        self, fake_settings, tmp_path
+    ):
+        """Stale file_id raises on send → evicted from entry, falls through to file send."""
+        token = "stalefid"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"real data")
+        entry = _sample_clip_entry(
+            status="ready",
+            clip_path=str(clip_file),
+            file_id="STALE",
+        )
         update = _make_vergol_update(token)
-        info = _sample_goal_info()
-        context = _make_vergol_context(fake_settings, token, info)
-        media_url = "https://streamin.link/v/xyz"
-        context.bot_data["clip_file_ids"][media_url] = "VID456"
+        context = _make_vergol_context(fake_settings, token, entry)
 
-        fake_sent_msg = MagicMock()
-        fake_sent_msg.video = MagicMock()
-        fake_sent_msg.video.file_id = "VID456"
-        context.bot.send_video = AsyncMock(return_value=fake_sent_msg)
+        call_count = 0
 
-        with patch("worldcup_bot.bot.handlers.find_goal_clip", return_value=media_url):
-            with patch("worldcup_bot.bot.handlers.RedditMatchScanner"):
-                with patch("worldcup_bot.bot.handlers.MediaDownloader") as mock_dl:
-                    await cmd_ver_gol_callback(update, context)
+        async def _send_video_side_effect(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            if kwargs.get("video") == "STALE":
+                raise Exception("Bad file id")
+            msg = MagicMock()
+            msg.video = MagicMock()
+            msg.video.file_id = "NEW_FID"
+            return msg
 
-        context.bot.send_video.assert_called_once()
-        send_kwargs = context.bot.send_video.call_args[1]
-        assert send_kwargs["video"] == "VID456"
-        mock_dl.assert_not_called()
-        assert info.get("file_id") == "VID456"
-        assert info["status"] == "sent"
+        context.bot.send_video = AsyncMock(side_effect=_send_video_side_effect)
 
-    # ── file_id capture on fresh send ─────────────────────────────────────────
+        with patch(
+            "worldcup_bot.bot.handlers.probe_video",
+            new=AsyncMock(return_value={}),
+        ):
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_ver_gol_callback(update, context)
 
-    async def test_fresh_send_stores_file_id_in_cache(self, tmp_path, fake_settings):
-        """After a fresh download+upload, file_id is stored in clip_file_ids and info."""
-        token = "tokfreshfid"
+        # First call with stale, second call from file
+        assert call_count == 2
+        assert "file_id" not in entry or entry.get("file_id") == "NEW_FID"
+
+    # ── clip file missing ─────────────────────────────────────────────────────
+
+    async def test_missing_clip_file_sends_error_message(self, fake_settings, tmp_path):
+        """clip_path doesn't exist on disk → sends an error message."""
+        token = "missingfile"
+        entry = _sample_clip_entry(
+            status="ready",
+            clip_path=str(tmp_path / "ghost.mp4"),  # doesn't exist
+        )
         update = _make_vergol_update(token)
-        info = _sample_goal_info()
-        context = _make_vergol_context(fake_settings, token, info)
-        media_url = "https://streamin.link/v/fresh"
+        context = _make_vergol_context(fake_settings, token, entry)
 
-        fake_video = tmp_path / "clip.mp4"
-        fake_video.write_bytes(b"videodata")
-        fake_downloader = MagicMock()
-        fake_downloader.download = AsyncMock(return_value=fake_video)
+        await cmd_ver_gol_callback(update, context)
 
-        fake_sent_msg = MagicMock()
-        fake_sent_msg.video = MagicMock()
-        fake_sent_msg.video.file_id = "NEWID"
-        context.bot.send_video = AsyncMock(return_value=fake_sent_msg)
-
-        with patch("worldcup_bot.bot.handlers.find_goal_clip", return_value=media_url):
-            with patch("worldcup_bot.bot.handlers.RedditMatchScanner"):
-                with patch("worldcup_bot.bot.handlers.MediaDownloader", return_value=fake_downloader):
-                    with patch("worldcup_bot.bot.handlers.compress_if_needed", new=AsyncMock(return_value=fake_video)):
-                        with patch("worldcup_bot.bot.handlers.probe_video", new=AsyncMock(return_value={})):
-                            await cmd_ver_gol_callback(update, context)
-
-        assert context.bot_data["clip_file_ids"][media_url] == "NEWID"
-        assert info["file_id"] == "NEWID"
-        assert info["status"] == "sent"
-
-    # ── bad file_id fallback ──────────────────────────────────────────────────
-
-    async def test_bad_file_id_evicted_and_status_reset(self, fake_settings):
-        """Stale file_id raises on send → evicted from info, status reset to pending."""
-        token = "tokbadfid"
-        update = _make_vergol_update(token)
-        info = _sample_goal_info()
-        info["file_id"] = "BAD"
-        context = _make_vergol_context(fake_settings, token, info)
-
-        context.bot.send_video = AsyncMock(side_effect=Exception("Bad file id"))
-
-        with patch("worldcup_bot.bot.handlers.find_goal_clip") as mock_find:
-            await cmd_ver_gol_callback(update, context)
-
-        assert "file_id" not in info
-        assert info["status"] == "pending"
-        mock_find.assert_not_called()
+        context.bot.send_message.assert_called_once()
+        text = context.bot.send_message.call_args[1]["text"]
+        assert "❌" in text
+        context.bot.send_video.assert_not_called()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1478,54 +1383,50 @@ def _make_finished_match(
 
 
 class TestCmdSimulaGol:
-    async def test_stores_goal_clips_with_correct_shape(self, fake_settings):
-        """Fallback path: stores fixed Sweden-Tunisia goal with expected shape."""
+    async def test_stores_clip_store_entry_with_correct_shape(self, fake_settings):
+        """Fallback path: stores fixed Sweden-Tunisia clip-store entry with expected shape."""
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data["goal_clips"] = {}
+        context.bot_data["clip_store"] = {}
 
         with _no_pick():
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
-        clips = context.bot_data["goal_clips"]
+        clips = context.bot_data["clip_store"]
         assert len(clips) == 1
         token, info = next(iter(clips.items()))
 
         assert len(token) == 12
         assert all(c in "0123456789abcdef" for c in token)
 
-        assert info["home_team"] == "Sweden"
-        assert info["away_team"] == "Tunisia"
+        assert info["home_name"] == "Sweden"
+        assert info["away_name"] == "Tunisia"
         assert info["home_score"] == 3
         assert info["away_score"] == 1
         assert info["scorer"] == "Viktor Gyökeres"
-        assert info["minute_text"] == "60"
+        assert info["minute"] == "60"
         assert info["scoring_team"] == "Sweden"
         assert info["home_tla"] == "SWE"
         assert info["away_tla"] == "TUN"
-        assert info["status"] == "pending"
+        assert info["status"] == "searching"
 
-    async def test_reply_text_called_with_keyboard(self, fake_settings):
-        """cmd_simula_gol sends ⏳ first, then the goal notification with an InlineKeyboardMarkup."""
+    async def test_reply_text_called_without_keyboard(self, fake_settings):
+        """cmd_simula_gol sends the goal notification WITHOUT an inline keyboard."""
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data["goal_clips"] = {}
+        context.bot_data["clip_store"] = {}
 
         with _no_pick():
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
         # At least 2 calls: ⏳ message + goal notification
         assert update.message.reply_text.await_count >= 2
 
-        # Last call carries the keyboard
+        # Last call must NOT carry a keyboard (keyboard comes later via job)
         last_kwargs = update.message.reply_text.call_args[1]
-        keyboard = last_kwargs["reply_markup"]
-        assert keyboard is not None
-
-        clips = context.bot_data["goal_clips"]
-        token = next(iter(clips))
-        button = keyboard.inline_keyboard[0][0]
-        assert button.callback_data == f"vergol:{token}"
+        assert last_kwargs.get("reply_markup") is None
 
     async def test_token_matches_goal_token_of_sim_key(self, fake_settings):
         """Fallback token is sha1[:12] of the fixed Sweden-Tunisia simulation key."""
@@ -1533,36 +1434,37 @@ class TestCmdSimulaGol:
 
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data["goal_clips"] = {}
+        context.bot_data["clip_store"] = {}
 
         with _no_pick():
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
-        clips = context.bot_data["goal_clips"]
-        assert expected_token in clips
+        assert expected_token in context.bot_data["clip_store"]
 
-    async def test_initialises_goal_clips_when_absent(self, fake_settings):
-        """cmd_simula_gol creates bot_data['goal_clips'] if it doesn't exist yet."""
+    async def test_initialises_clip_store_when_absent(self, fake_settings):
+        """cmd_simula_gol creates bot_data['clip_store'] if it doesn't exist yet."""
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data.pop("goal_clips", None)
+        context.bot_data.pop("clip_store", None)
 
         with _no_pick():
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
-        assert "goal_clips" in context.bot_data
-        assert len(context.bot_data["goal_clips"]) == 1
+        assert "clip_store" in context.bot_data
+        assert len(context.bot_data["clip_store"]) == 1
 
     async def test_reply_text_contains_simulation_marker(self, fake_settings):
         """The goal reply text contains a marker so users know it's a simulation."""
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data["goal_clips"] = {}
+        context.bot_data["clip_store"] = {}
 
         with _no_pick():
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
-        # last call is the goal notification
         text = update.message.reply_text.call_args[0][0]
         assert "SIMULACI" in text.upper()
 
@@ -1605,26 +1507,27 @@ class TestCmdSimulaGolRandomPath:
 
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data["goal_clips"] = {}
+        context.bot_data["clip_store"] = {}
         context.bot_data["reddit_scanner"] = fake_scanner
 
         with patch("worldcup_bot.bot.handlers.make_client", return_value=fake_client):
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
-        clips = context.bot_data["goal_clips"]
+        clips = context.bot_data["clip_store"]
         assert len(clips) == 1
         token, info = next(iter(clips.items()))
 
         assert len(token) == 12
-        assert info["home_team"] == "France"
-        assert info["away_team"] == "Morocco"
+        assert info["home_name"] == "France"
+        assert info["away_name"] == "Morocco"
         assert info["home_tla"] == "FRA"
         assert info["away_tla"] == "MAR"
         assert info["scorer"] in ("Kylian Mbappé", "Antoine Griezmann")
-        assert info["status"] == "pending"
+        assert info["status"] == "searching"
 
-    async def test_random_pick_keyboard_callback_data(self, fake_settings):
-        """Random path: button callback_data is vergol:<token> matching the stored key."""
+    async def test_random_pick_no_keyboard_on_message(self, fake_settings):
+        """Random path: the sent message has no inline keyboard (keyboard added later by job)."""
         fake_client = MagicMock()
         fake_client.get_all_matches.return_value = [_make_finished_match()]
 
@@ -1636,19 +1539,15 @@ class TestCmdSimulaGolRandomPath:
 
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data["goal_clips"] = {}
+        context.bot_data["clip_store"] = {}
         context.bot_data["reddit_scanner"] = fake_scanner
 
         with patch("worldcup_bot.bot.handlers.make_client", return_value=fake_client):
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
-        clips = context.bot_data["goal_clips"]
-        token = next(iter(clips))
         last_kwargs = update.message.reply_text.call_args[1]
-        keyboard = last_kwargs["reply_markup"]
-        assert keyboard is not None
-        button = keyboard.inline_keyboard[0][0]
-        assert button.callback_data == f"vergol:{token}"
+        assert last_kwargs.get("reply_markup") is None
 
     async def test_random_pick_tla_aligned_to_fixture(self, fake_settings):
         """Random path: TLAs from the API fixture are used, not invented."""
@@ -1667,13 +1566,14 @@ class TestCmdSimulaGolRandomPath:
 
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data["goal_clips"] = {}
+        context.bot_data["clip_store"] = {}
         context.bot_data["reddit_scanner"] = fake_scanner
 
         with patch("worldcup_bot.bot.handlers.make_client", return_value=fake_client):
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
-        info = next(iter(context.bot_data["goal_clips"].values()))
+        info = next(iter(context.bot_data["clip_store"].values()))
         assert info["home_tla"] == "FRA"
         assert info["away_tla"] == "MAR"
 
@@ -1687,14 +1587,15 @@ class TestCmdSimulaGolRandomPath:
 
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data["goal_clips"] = {}
+        context.bot_data["clip_store"] = {}
         context.bot_data["reddit_scanner"] = fake_scanner
 
         with patch("worldcup_bot.bot.handlers.make_client", return_value=fake_client):
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
-        info = next(iter(context.bot_data["goal_clips"].values()))
-        assert info["home_team"] == "Sweden"
+        info = next(iter(context.bot_data["clip_store"].values()))
+        assert info["home_name"] == "Sweden"
         assert info["scorer"] == "Viktor Gyökeres"
 
     async def test_falls_back_when_thread_has_no_goals(self, fake_settings):
@@ -1710,14 +1611,15 @@ class TestCmdSimulaGolRandomPath:
 
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data["goal_clips"] = {}
+        context.bot_data["clip_store"] = {}
         context.bot_data["reddit_scanner"] = fake_scanner
 
         with patch("worldcup_bot.bot.handlers.make_client", return_value=fake_client):
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
-        info = next(iter(context.bot_data["goal_clips"].values()))
-        assert info["home_team"] == "Sweden"
+        info = next(iter(context.bot_data["clip_store"].values()))
+        assert info["home_name"] == "Sweden"
         assert info["scorer"] == "Viktor Gyökeres"
 
     async def test_falls_back_when_no_finished_matches(self, fake_settings):
@@ -1727,13 +1629,14 @@ class TestCmdSimulaGolRandomPath:
 
         update = _make_update()
         context = _make_context(fake_settings)
-        context.bot_data["goal_clips"] = {}
+        context.bot_data["clip_store"] = {}
 
         with patch("worldcup_bot.bot.handlers.make_client", return_value=fake_client):
-            await cmd_simula_gol(update, context)
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                await cmd_simula_gol(update, context)
 
-        info = next(iter(context.bot_data["goal_clips"].values()))
-        assert info["home_team"] == "Sweden"
+        info = next(iter(context.bot_data["clip_store"].values()))
+        assert info["home_name"] == "Sweden"
         assert info["scorer"] == "Viktor Gyökeres"
 
 
@@ -2002,3 +1905,210 @@ class TestCmdTongoGifs:
 
         pool = mock_random.choice.call_args[0][0]
         assert all(isinstance(item, str) for item in pool)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_ver_gol_callback — vergol stats counter wiring (Block 4)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_vergol_update_with_user(
+    token: str,
+    user_id: int = 7,
+    full_name: str = "María García",
+    username: str | None = "mariagarcia",
+) -> MagicMock:
+    """Build a fake Update with a real-ish from_user on the CallbackQuery."""
+    update = _make_vergol_update(token)
+    user = MagicMock()
+    user.id = user_id
+    user.full_name = full_name
+    user.username = username
+    update.callback_query.from_user = user
+    return update
+
+
+class TestCmdVerGolCallbackStats:
+    """Test the vergol stats counter wiring added in Block 4."""
+
+    async def test_fresh_send_calls_record_view_with_correct_args(
+        self, fake_settings, tmp_path
+    ):
+        """After a fresh file send, record_view is called with correct user_id/name/token."""
+        token = "statstoken"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"data")
+        entry = _sample_clip_entry(status="ready", clip_path=str(clip_file))
+        update = _make_vergol_update_with_user(token, user_id=42, full_name="Alice")
+        context = _make_vergol_context(fake_settings, token, entry)
+
+        fake_sent = MagicMock()
+        fake_sent.video = MagicMock()
+        fake_sent.video.file_id = "FID"
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
+
+        with patch("worldcup_bot.bot.handlers.probe_video", new=AsyncMock(return_value={})):
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                with patch("worldcup_bot.bot.handlers._vs_record_view") as mock_rv:
+                    with patch("worldcup_bot.bot.handlers._vs_load_stats", return_value={}):
+                        with patch("worldcup_bot.bot.handlers._vs_save_stats"):
+                            await cmd_ver_gol_callback(update, context)
+
+        mock_rv.assert_called_once()
+        args = mock_rv.call_args[0]
+        assert args[1] == 42        # user_id
+        assert args[2] == "Alice"   # name
+        assert args[3] == token     # token
+
+    async def test_cached_file_id_send_calls_record_view(self, fake_settings, tmp_path):
+        """After a cached file_id send, record_view is also called."""
+        token = "cachedstats"
+        entry = _sample_clip_entry(
+            status="ready",
+            clip_path=str(tmp_path / "clip.mp4"),
+            file_id="CACHED",
+        )
+        update = _make_vergol_update_with_user(token, user_id=99, full_name="Bob")
+        context = _make_vergol_context(fake_settings, token, entry)
+
+        fake_sent = MagicMock()
+        fake_sent.video = MagicMock()
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
+
+        with patch("worldcup_bot.bot.handlers._vs_record_view") as mock_rv:
+            with patch("worldcup_bot.bot.handlers._vs_load_stats", return_value={}):
+                with patch("worldcup_bot.bot.handlers._vs_save_stats"):
+                    await cmd_ver_gol_callback(update, context)
+
+        mock_rv.assert_called_once()
+        args = mock_rv.call_args[0]
+        assert args[1] == 99
+        assert args[2] == "Bob"
+        assert args[3] == token
+
+    async def test_stats_failure_does_not_break_video_delivery(
+        self, fake_settings, tmp_path
+    ):
+        """If save_stats raises, the video is still delivered — counter failures are best-effort."""
+        token = "robusttoken"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"data")
+        entry = _sample_clip_entry(status="ready", clip_path=str(clip_file))
+        update = _make_vergol_update_with_user(token, user_id=1)
+        context = _make_vergol_context(fake_settings, token, entry)
+
+        fake_sent = MagicMock()
+        fake_sent.video = MagicMock()
+        fake_sent.video.file_id = "FID2"
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
+
+        with patch("worldcup_bot.bot.handlers.probe_video", new=AsyncMock(return_value={})):
+            with patch("worldcup_bot.bot.handlers._cs_save_clips"):
+                with patch(
+                    "worldcup_bot.bot.handlers._vs_save_stats",
+                    side_effect=OSError("disk full"),
+                ):
+                    with patch("worldcup_bot.bot.handlers._vs_load_stats", return_value={}):
+                        with patch("worldcup_bot.bot.handlers._vs_record_view"):
+                            # Must not raise
+                            await cmd_ver_gol_callback(update, context)
+
+        # Video was still sent
+        context.bot.send_video.assert_called_once()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_estadisticas
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCmdEstadisticas:
+    async def test_empty_stats_sends_no_data_message(self, fake_settings):
+        """No data → sends the 'aún no hay estadísticas' message."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers._vs_load_stats", return_value={}):
+            await cmd_estadisticas(update, context)
+
+        update.message.reply_text.assert_called_once()
+        text = update.message.reply_text.call_args[0][0]
+        assert "estadísticas" in text.lower()
+
+    async def test_leaderboard_formatted_with_bold_html_names(self, fake_settings):
+        """Leaderboard entries use <b>name</b> and the trophy header."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        fake_data = {
+            "1": {"name": "Alice", "tokens": ["a", "b", "c"]},
+            "2": {"name": "Bob", "tokens": ["a"]},
+        }
+
+        with patch("worldcup_bot.bot.handlers._vs_load_stats", return_value=fake_data):
+            await cmd_estadisticas(update, context)
+
+        update.message.reply_text.assert_called_once()
+        call = update.message.reply_text.call_args
+        text = call[0][0]
+        kwargs = call[1]
+
+        assert kwargs.get("parse_mode") == "HTML"
+        assert "🏆" in text
+        assert "<b>Alice</b>" in text
+        assert "<b>Bob</b>" in text
+        # Alice has more views → appears first
+        assert text.index("Alice") < text.index("Bob")
+
+    async def test_html_escapes_names(self, fake_settings):
+        """Names with HTML-special chars are escaped."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        fake_data = {
+            "1": {"name": "<script>alert(1)</script>", "tokens": ["a"]},
+        }
+
+        with patch("worldcup_bot.bot.handlers._vs_load_stats", return_value=fake_data):
+            await cmd_estadisticas(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "<script>" not in text
+        assert "&lt;script&gt;" in text
+
+    async def test_uses_count_from_tokens_length(self, fake_settings):
+        """The displayed count is len(tokens)."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        fake_data = {"1": {"name": "María", "tokens": ["a", "b", "c", "d", "e"]}}
+
+        with patch("worldcup_bot.bot.handlers._vs_load_stats", return_value=fake_data):
+            await cmd_estadisticas(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "5" in text
+
+    async def test_estadisticas_registered_in_app(self, fake_settings):
+        """/estadisticas is registered as a CommandHandler in build_app."""
+        from worldcup_bot.__main__ import build_app
+
+        app = build_app(fake_settings)
+
+        commands: set[str] = set()
+        for group_handlers in app.handlers.values():
+            for h in group_handlers:
+                if hasattr(h, "commands"):
+                    commands.update(h.commands)
+
+        assert "estadisticas" in commands
+
+    async def test_estadisticas_mentioned_in_cmd_start(self, fake_settings):
+        """/estadisticas appears in the /start help text."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        await cmd_start(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "/estadisticas" in text

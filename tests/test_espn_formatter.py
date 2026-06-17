@@ -73,9 +73,10 @@ class TestFormatMatchStats:
         assert "📊" in text
         assert "<b>" in text
         assert "Estadísticas" in text
-        assert "Spain" in text
-        assert "France" in text
-        assert "2-1" in text
+        # Scoreline no longer in stats header (it lives in section 1 / final result)
+        assert "2-1" not in text
+        assert "Spain" not in text
+        assert "France" not in text
 
     def test_possession_with_percent(self):
         text = format_match_stats(FakeMatch(), _full_stats())
@@ -163,15 +164,24 @@ class TestFormatMatchStats:
         text = format_match_stats(FakeMatch(), stats)
         assert "Posesión" not in text
 
-    def test_none_score_defaults_to_zero(self):
+    def test_none_score_still_renders(self):
+        # Scores are no longer shown in the stats card — verify the card renders fine
         match = FakeMatch(home_score=None, away_score=None)
         text = format_match_stats(match, _full_stats())
-        assert "0-0" in text
+        assert "📊" in text
+        assert "Estadísticas" in text
+        # Stat rows must still be present
+        assert "Posesión" in text
 
-    def test_html_escape_team_name(self):
+    def test_special_chars_in_team_name_no_crash(self):
+        # Team names are no longer rendered in the stats card header — verify no crash
         match = FakeMatch(home_name="<Spain&>", away_name="France")
         text = format_match_stats(match, _full_stats())
-        assert "&lt;Spain&amp;&gt;" in text
+        assert "📊" in text
+        assert "Estadísticas" in text
+        # Team names should NOT appear in the stats card
+        assert "Spain" not in text
+        assert "France" not in text
 
     def test_spanish_labels(self):
         text = format_match_stats(FakeMatch(), _full_stats())

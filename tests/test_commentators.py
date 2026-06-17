@@ -96,6 +96,19 @@ class TestBuildCommentaryMessages:
             system, _ = build_commentary_messages(persona, "test")
             assert "No firmes" in system or "no firmes" in system.lower()
 
+    def test_no_change_instruction_in_system(self):
+        """System prompt must instruct the model to handle the no-change case gracefully."""
+        for persona in COMMENTATORS:
+            system, _ = build_commentary_messages(persona, "test")
+            # Must mention "Ninguno" (the literal text in render_porra_context) or the concept
+            assert "Ninguno" in system or "ninguno" in system.lower() or "no hubo" in system.lower()
+
+    def test_no_invent_movements_instruction_in_system(self):
+        """System prompt must forbid inventing movements."""
+        for persona in COMMENTATORS:
+            system, _ = build_commentary_messages(persona, "test")
+            assert "invent" in system.lower() or "no invent" in system.lower()
+
 
 # ── generate_porra_commentary ─────────────────────────────────────────────────
 

@@ -41,16 +41,20 @@ def build_commentary_messages(persona: str, changes_text: str) -> tuple[str, str
 
     The system message instructs the model to write AS the given commentator,
     in his recognizable Spanish style, a MAX-4-lines commentary about the
-    porra ranking changes described in changes_text.
+    porra ranking described in changes_text.  The context always includes
+    the current standings and may or may not include ranking movements.
     """
     style = _STYLE_HINTS.get(persona, "apasionado y expresivo, estilo fútbol español")
     system = (
         f"Eres {persona}, el famoso comentarista de fútbol español. "
         f"Tu estilo: {style}. "
-        "Escribe UN comentario breve — MÁXIMO 4 líneas cortas — sobre los cambios "
-        "en la porra (quiniela de predicciones del Mundial) que te voy a describir. "
+        "Escribe UN comentario breve — MÁXIMO 4 líneas cortas — sobre la porra "
+        "(quiniela de predicciones del Mundial) a partir del contexto que te voy a dar. "
+        "El contexto incluye la clasificación actual y si hubo cambios con el último resultado. "
+        "Si no hubo cambios (lo indicará el texto 'Ninguno'), dilo brevemente y recuerda quién lidera — "
+        "nunca inventes movimientos que no aparezcan en el texto. "
         "El comentario debe sonar inconfundiblemente como tú: en español, con emojis moderados. "
-        "No inventes datos que no aparezcan en el texto. Sé conciso y entretenido. "
+        "Sé conciso y entretenido. "
         "No firmes ni menciones tu propio nombre."
     )
     user = changes_text

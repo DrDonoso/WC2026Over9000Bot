@@ -13,6 +13,7 @@ from worldcup_bot.porra.live import (
     diff_live,
     load_live,
     render_changes_text,
+    render_porra_context,
     save_live,
 )
 from worldcup_bot.porra.engine import UserRankEntry
@@ -226,3 +227,101 @@ class TestRenderChangesText:
         )
         text = render_changes_text(diff)
         assert "pts" not in text or "+0.0" not in text
+
+
+# ── render_porra_context ──────────────────────────────────────────────────────
+
+
+class TestRenderPorraContext:
+    def test_always_non_empty_with_ranking(self):
+        diff = LiveDiff(changed=False, movements=[], new_entries=[])
+        ranking = _ranking(("alice", "Alice", 10.0))
+        result = render_porra_context(diff, ranking)
+        assert result  # never empty
+
+    def test_includes_clasificacion_header(self):
+        diff = LiveDiff(changed=False, movements=[], new_entries=[])
+        ranking = _ranking(("alice", "Alice", 10.0))
+        result = render_porra_context(diff, ranking)
+        assert "CLASIFICACIÓN ACTUAL" in result
+
+    def test_includes_cambios_header(self):
+        diff = LiveDiff(changed=False, movements=[], new_entries=[])
+        ranking = _ranking(("alice", "Alice", 10.0))
+        result = render_porra_context(diff, ranking)
+        assert "CAMBIOS CON ESTE RESULTADO" in result
+
+    def test_ninguno_when_no_movements(self):
+        diff = LiveDiff(changed=False, movements=[], new_entries=[])
+        ranking = _ranking(("alice", "Alice", 10.0))
+        result = render_porra_context(diff, ranking)
+        assert "Ninguno" in result
+        assert "no se ha movido" in result
+
+    def test_standings_listed_with_pos_and_pts(self):
+        ranking = _ranking(
+            ("alice", "Alice", 10.0),
+            ("bob", "Bob", 7.5),
+            ("carol", "Carol", 5.0),
+        )
+        diff = LiveDiff(changed=False, movements=[], new_entries=[])
+        result = render_porra_context(diff, ranking)
+        assert "Alice" in result
+        assert "10.0" in result
+        assert "Bob" in result
+        assert "7.5" in result
+        assert "Carol" in result
+        assert "5.0" in result
+        # Positions 1, 2, 3
+        assert "1." in result
+        assert "2." in result
+        assert "3." in result
+
+    def test_at_most_5_entries_shown(self):
+        ranking = _ranking(
+            ("u1", "P1", 10.0),
+            ("u2", "P2", 9.0),
+            ("u3", "P3", 8.0),
+            ("u4", "P4", 7.0),
+            ("u5", "P5", 6.0),
+            ("u6", "P6", 5.0),  # should be excluded
+        )
+        diff = LiveDiff(changed=False, movements=[], new_entries=[])
+        result = render_porra_context(diff, ranking)
+        assert "P5" in result
+        assert "P6" not in result
+
+    def test_movements_listed_when_changed(self):
+        diff = LiveDiff(
+            changed=True,
+            movements=[
+                {"username": "bob", "name": "Bob", "old_pos": 2, "new_pos": 1,
+                 "old_pts": 7.0, "new_pts": 9.0},
+            ],
+            new_entries=[],
+        )
+        ranking = _ranking(("bob", "Bob", 9.0), ("alice", "Alice", 8.0))
+        result = render_porra_context(diff, ranking)
+        assert "Bob" in result
+        assert "sube" in result
+        assert "Ninguno" not in result
+
+    def test_no_ninguno_when_movements_exist(self):
+        diff = LiveDiff(
+            changed=True,
+            movements=[
+                {"username": "alice", "name": "Alice", "old_pos": 2, "new_pos": 1,
+                 "old_pts": 5.0, "new_pts": 7.0},
+            ],
+            new_entries=[],
+        )
+        ranking = _ranking(("alice", "Alice", 7.0), ("bob", "Bob", 5.0))
+        result = render_porra_context(diff, ranking)
+        assert "Ninguno" not in result
+
+    def test_empty_ranking_still_returns_non_empty(self):
+        """Even with an empty ranking, both blocks are returned (standings block empty content)."""
+        diff = LiveDiff(changed=False, movements=[], new_entries=[])
+        result = render_porra_context(diff, [])
+        assert "CLASIFICACIÓN ACTUAL" in result
+        assert "CAMBIOS CON ESTE RESULTADO" in result

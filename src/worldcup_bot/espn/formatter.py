@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import html
 import logging
-
-from worldcup_bot.bot.formatters import team_flag
 
 log = logging.getLogger(__name__)
 
@@ -45,24 +42,15 @@ def _compute_pass_pct(stats: dict) -> float | None:
 def format_match_stats(match, stats: dict) -> str:
     """Build an HTML stats card for a finished match.
 
-    ``match`` must have: home_tla, away_tla, home_name, away_name,
-    home_score, away_score.
+    ``match`` must have: home_tla, away_tla.
     ``stats`` is the dict returned by ESPNClient.get_match_stats().
+    The scoreline is intentionally omitted here — the caller's final-result
+    section (section 1) already shows it.
     """
     hs_data = stats.get("home", {}).get("stats", {})
     as_data = stats.get("away", {}).get("stats", {})
 
-    home_name = html.escape(match.home_name, quote=False)
-    away_name = html.escape(match.away_name, quote=False)
-    home_flag = team_flag(match.home_tla)
-    away_flag = team_flag(match.away_tla)
-    h_score = match.home_score if match.home_score is not None else 0
-    a_score = match.away_score if match.away_score is not None else 0
-
-    header = (
-        f"📊 <b>Estadísticas — "
-        f"{home_flag} {home_name} {h_score}-{a_score} {away_name} {away_flag}</b>"
-    )
+    header = "📊 <b>Estadísticas</b>"
 
     rows = [header, ""]
 
