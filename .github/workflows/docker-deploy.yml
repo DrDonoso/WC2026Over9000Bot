@@ -98,7 +98,8 @@ jobs:
                 bullets.extend(commit_bullets)
             else:
                 bullets.append(f"- {subject}")
-        print('\n'.join(bullets))
+        if bullets:
+            print('\n'.join(bullets))
         PYEOF
         if [ -s release_notes.md ]; then
           echo "has_notes=true" >> "$GITHUB_OUTPUT"

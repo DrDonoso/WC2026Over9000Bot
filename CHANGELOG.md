@@ -5,11 +5,6 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
-## [20260617.05] - 2026-06-17
-
-
-
-
 ## [20260617.04] - 2026-06-17
 
 - feat: score-based goal detection — goals are now detected from football-data score changes instead of parsing Reddit, fixing missed goals on human-narrated match threads and the 1-0 → 1-1 → 1-0 flip-flop.
