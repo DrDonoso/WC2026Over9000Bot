@@ -5,6 +5,14 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260617.12] - 2026-06-17
+
+- feat: enrich the /endirecto command with live match detail — current minute, goals (scorer + minute), yellow/red cards and substitutions
+- feat: since football-data does not expose these on our tier, extract them from the r/soccer match thread "MATCH EVENTS" feed via an OpenAI information extractor (new ai/match_events.py)
+- feat: render each live match as a readable block with ⚽ goles / 🟨 tarjetas / 🔄 cambios sections, omitting empty ones, multiple matches separated by a divider
+- fix: gracefully fall back to the score-only view per match when the thread or the AI is unavailable, so the command never fails
+
+
 ## [20260617.11] - 2026-06-17
 
 - fix: make the scorer match robust to r/soccer title variants — accent-fold names, ignore the trailing "goal"/"penalty" words and single-letter initials, and match on shared surname tokens (e.g. "Wissa Y. goal" now matches "Yoane Wissa")
