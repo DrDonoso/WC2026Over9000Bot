@@ -1,3 +1,76 @@
+# Decision: BELOVED_TEAMS get ❤️ in team_flag + AI daily-update love instruction
+
+**Author:** Kanté (Backend Developer)
+**Date:** 2026-06-18
+**Status:** IMPLEMENTED — 1313 tests green, not yet committed (coordinator verifies first)
+
+---
+
+## Problem
+
+David wanted the bot to show extra love ❤️ for Panamá 🇵🇦 and Uzbekistán 🇺🇿 whenever they appear
+in any message, and for the AI daily summary to show warmth and encouragement whenever it mentions
+those teams.
+
+---
+
+## Decision
+
+### BELOVED_TEAMS constant + team_flag chokepoint
+
+```python
+# src/worldcup_bot/bot/formatters.py
+BELOVED_TEAMS = {"PAN", "UZB"}   # Panamá, Uzbekistán — el cariño del bot
+_LOVE = "❤️"
+```
+
+`team_flag(tla)` now appends `_LOVE` to the flag when:
+1. The flag is non-empty (unknown TLAs still return `""`), AND
+2. `tla.strip().upper()` is in `BELOVED_TEAMS`.
+
+Result: `team_flag("PAN")` → `"🇵🇦❤️"`, `team_flag("UZB")` → `"🇺🇿❤️"`.
+Case-insensitive: `team_flag("pan")` also returns `"🇵🇦❤️"`.
+
+Because every message renderer (format_match, format_standings, render_endirecto,
+render_message in daily_update, format_live_match_detail, format_user_detail) calls
+`team_flag`, the love propagates to goal notifications, /hoy, /endirecto,
+standings/clasificación, finished recaps, and daily AI summaries — automatically,
+with no per-renderer changes needed.
+
+### AI daily-update love instruction
+
+Appended to `_SYSTEM` in `src/worldcup_bot/ai/daily_update.py`:
+
+> "Cariño especial: Panamá 🇵🇦 y Uzbekistán 🇺🇿 son las selecciones favoritas de esta porra.
+> Siempre que las menciones, muéstrales un poco de amor y ánimo (con naturalidad, sin pasarte
+> ni romper el formato): un emoji de corazón, una palabra de apoyo o un guiño cariñoso."
+
+Only the AI prose guidance changes; the deterministic HTML builder (`render_message`) is untouched.
+
+---
+
+## Files changed
+
+| File | Change |
+|---|---|
+| `src/worldcup_bot/bot/formatters.py` | Add `BELOVED_TEAMS`, `_LOVE`; modify `team_flag` |
+| `src/worldcup_bot/ai/daily_update.py` | Append love instruction to `_SYSTEM` |
+| `tests/test_formatters.py` | Add `TestTeamFlagBelovedTeams` (6 tests) |
+| `tests/test_ai.py` | Add 3 tests to `TestSystemPromptContract` |
+
+---
+
+## Why this is safe
+
+- `team_flag` is the single canonical flag renderer — no risk of missing a spot.
+- Unknown TLAs return `""` (no heart on empty string), so the guard is tight.
+- `team_label` inherits the heart automatically (it calls `team_flag`).
+- Appending to `_SYSTEM` doesn't shift `today_notes` before `standings_comment`, so
+  the existing `test_system_prompt_today_notes_rule_stated_unconditionally` test still passes.
+- No existing tests hard-code PAN or UZB flag strings, so zero test fixes were needed.
+
+---
+
 # Decision: /hoy rolls forward to the next jornada when today's matches are all done
 
 **Author:** Kanté (Backend Developer)
