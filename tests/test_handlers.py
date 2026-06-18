@@ -2248,6 +2248,7 @@ class TestCmdEnDirecto:
         mock_client.get_live_matches.return_value = [_LIVE_MATCH]
 
         mock_scanner = MagicMock()
+        mock_scanner.find_thread_permalink = MagicMock(return_value=None)
         mock_scanner.find_match_thread = MagicMock(return_value=None)
 
         with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
@@ -2316,6 +2317,7 @@ class TestCmdEnDirecto:
         mock_client.get_live_matches.return_value = [_LIVE_MATCH]
 
         mock_scanner = MagicMock()
+        mock_scanner.find_thread_permalink = MagicMock(side_effect=RuntimeError("boom"))
         mock_scanner.find_match_thread = MagicMock(side_effect=RuntimeError("boom"))
 
         with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
@@ -2413,6 +2415,213 @@ class TestCmdEnDirecto:
                 await cmd_en_directo(update, context)
 
         assert not (tmp_path / "endirecto.json").exists()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_en_directo — shared scanner + find_thread_permalink
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCmdEnDirectoSharedScanner:
+    """Verify that cmd_en_directo reuses the shared bot_data scanner and uses
+    find_thread_permalink (cached /new/ listing) before falling back to the
+    search endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_reuses_existing_scanner_from_bot_data(self, tmp_path):
+        """When bot_data already has 'reddit_scanner', cmd_en_directo must NOT
+        construct a new RedditMatchScanner — it uses the existing instance."""
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="key",
+            openai_base_url="http://ai",
+            openai_model="gpt-4",
+            state_dir=str(tmp_path),
+        )
+        update = _make_update()
+        context = _make_context(settings)
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_thread_permalink = MagicMock(return_value=None)
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+        context.bot_data["reddit_scanner"] = mock_scanner
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.RedditMatchScanner") as mock_cls:
+                with patch("worldcup_bot.bot.handlers.AIClient"):
+                    await cmd_en_directo(update, context)
+
+        # The class constructor must NOT have been called — we reused the existing one.
+        mock_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_lazy_init_stores_scanner_in_bot_data(self, tmp_path):
+        """When bot_data has no 'reddit_scanner', cmd_en_directo creates one and
+        stores it in bot_data so subsequent calls reuse it."""
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            state_dir=str(tmp_path),
+        )
+        update = _make_update()
+        context = _make_context(settings)
+        # Ensure no scanner is pre-populated
+        context.bot_data.pop("reddit_scanner", None)
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        mock_scanner = MagicMock()
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.RedditMatchScanner", return_value=mock_scanner):
+                await cmd_en_directo(update, context)
+
+        assert context.bot_data.get("reddit_scanner") is mock_scanner
+
+    @pytest.mark.asyncio
+    async def test_find_thread_permalink_used_first_and_produces_keyboard(self, tmp_path):
+        """When find_thread_permalink returns a permalink and AI returns events,
+        the reply is sent WITH an InlineKeyboardMarkup (not the plain fallback)."""
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="key",
+            openai_base_url="http://ai",
+            openai_model="gpt-4",
+            state_dir=str(tmp_path),
+        )
+        update = _make_update()
+        context = _make_context(settings)
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_thread_permalink = MagicMock(return_value="/r/soccer/comments/xyz/")
+        mock_scanner.get_thread_body = MagicMock(return_value="thread body text")
+        context.bot_data["reddit_scanner"] = mock_scanner
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.AIClient"):
+                with patch(
+                    "worldcup_bot.bot.handlers.extract_match_events",
+                    new=AsyncMock(return_value=_ENRICHED_EVENTS),
+                ):
+                    await cmd_en_directo(update, context)
+
+        update.message.reply_text.assert_called_once()
+        kwargs = update.message.reply_text.call_args.kwargs
+        assert kwargs["reply_markup"] is not None
+        # InlineKeyboardMarkup wraps a list of rows; each button is an InlineKeyboardButton.
+        markup = kwargs["reply_markup"]
+        button_count = sum(len(row) for row in markup.inline_keyboard)
+        assert button_count >= 1
+        # find_match_thread must NOT have been called (we found it via the cached listing)
+        mock_scanner.find_match_thread.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_find_match_thread_when_permalink_is_none(self, tmp_path):
+        """When find_thread_permalink returns None, find_match_thread is tried next."""
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="key",
+            openai_base_url="http://ai",
+            openai_model="gpt-4",
+            state_dir=str(tmp_path),
+        )
+        update = _make_update()
+        context = _make_context(settings)
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_thread_permalink = MagicMock(return_value=None)
+        mock_scanner.find_match_thread = MagicMock(return_value="/r/soccer/comments/abc/")
+        mock_scanner.get_thread_body = MagicMock(return_value="thread body")
+        context.bot_data["reddit_scanner"] = mock_scanner
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.AIClient"):
+                with patch(
+                    "worldcup_bot.bot.handlers.extract_match_events",
+                    new=AsyncMock(return_value=_ENRICHED_EVENTS),
+                ):
+                    await cmd_en_directo(update, context)
+
+        mock_scanner.find_match_thread.assert_called_once()
+        update.message.reply_text.assert_called_once()
+        kwargs = update.message.reply_text.call_args.kwargs
+        assert kwargs["reply_markup"] is not None
+
+    @pytest.mark.asyncio
+    async def test_both_lookups_none_falls_back_to_format_match(self, tmp_path):
+        """When both find_thread_permalink and find_match_thread return None,
+        format_match is used (no keyboard)."""
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="key",
+            openai_base_url="http://ai",
+            openai_model="gpt-4",
+            state_dir=str(tmp_path),
+        )
+        update = _make_update()
+        context = _make_context(settings)
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_thread_permalink = MagicMock(return_value=None)
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+        context.bot_data["reddit_scanner"] = mock_scanner
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.AIClient"):
+                await cmd_en_directo(update, context)
+
+        update.message.reply_text.assert_called_once()
+        text = update.message.reply_text.call_args[0][0]
+        # format_match output — no keyboard
+        assert "Portugal" in text
+        kwargs = update.message.reply_text.call_args.kwargs
+        assert not kwargs.get("reply_markup")
+
+    @pytest.mark.asyncio
+    async def test_never_raises(self, tmp_path):
+        """cmd_en_directo must not propagate any exception to the caller."""
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            openai_api_key="key",
+            openai_base_url="http://ai",
+            openai_model="gpt-4",
+            state_dir=str(tmp_path),
+        )
+        update = _make_update()
+        context = _make_context(settings)
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_thread_permalink = MagicMock(side_effect=RuntimeError("network"))
+        mock_scanner.find_match_thread = MagicMock(side_effect=RuntimeError("network"))
+        context.bot_data["reddit_scanner"] = mock_scanner
+
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.AIClient"):
+                # Must not raise
+                await cmd_en_directo(update, context)
+
+        update.message.reply_text.assert_called_once()
 
 
 def _make_endirecto_callback_update(token: str, code: str) -> MagicMock:

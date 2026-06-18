@@ -320,6 +320,15 @@ class TestMatchPost:
         result = _match_post(post, "Portugal", "Congo DR", 1, 1, "Yoane Wissa", 45)
         assert result is None
 
+    def test_czech_republic_clip_title_matches_czechia_fixture(self):
+        """Live bug: 'Czech Republic [1] - 0 South Africa' must match Czechia fixture."""
+        post = self._post(
+            "Czech Republic [1] - 0 South Africa - M. Sadílek 6'",
+            "https://streamin.link/v/9801698f",
+        )
+        result = _match_post(post, "Czechia", "South Africa", 1, 0, "Michal Sadílek", 6)
+        assert result == "https://streamin.link/v/9801698f"
+
 
 # ── find_goal_clip ────────────────────────────────────────────────────────────
 
@@ -423,6 +432,21 @@ class TestFindGoalClip:
         scanner = _make_scanner(json_response=response)
         result = find_goal_clip(scanner, "Portugal", "Congo DR", 1, 0, "João Neves", 6)
         assert result == "https://dropr.co/v/3ba063ff"
+
+    def test_czechia_czech_republic_clip_title_integration(self):
+        """Live bug: clip title 'Czech Republic [1] - 0 South Africa' finds streamin URL
+        when target fixture uses football-data's canonical name 'Czechia'."""
+        response = _search_json(
+            {
+                "id": "cze1",
+                "title": "Czech Republic [1] - 0 South Africa - M. Sadílek 6'",
+                "url": "https://streamin.link/v/9801698f",
+                "permalink": "/r/soccer/comments/cze1/",
+            }
+        )
+        scanner = _make_scanner(json_response=response)
+        result = find_goal_clip(scanner, "Czechia", "South Africa", 1, 0, "Michal Sadílek", 6)
+        assert result == "https://streamin.link/v/9801698f"
 
 
 # ── _parse_clip_posts_html ────────────────────────────────────────────────────

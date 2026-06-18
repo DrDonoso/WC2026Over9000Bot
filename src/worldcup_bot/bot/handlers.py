@@ -368,7 +368,13 @@ async def cmd_en_directo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text("No hay partidos en directo en este momento.")
         return
 
-    scanner = RedditMatchScanner(user_agent=settings.reddit_user_agent)
+    # Reuse the shared scanner (same instance used by goal/clip jobs so their
+    # recent TTL-cached fetches benefit /endirecto too — avoids duplicate Reddit hits).
+    scanner: RedditMatchScanner = context.bot_data.get("reddit_scanner")  # type: ignore[assignment]
+    if scanner is None:
+        scanner = RedditMatchScanner(user_agent=settings.reddit_user_agent)
+        context.bot_data["reddit_scanner"] = scanner
+
     ai = (
         AIClient(settings.openai_api_key, settings.openai_base_url, settings.openai_model)
         if ai_enabled(settings)
@@ -378,9 +384,15 @@ async def cmd_en_directo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     for m in live[:4]:
         try:
             if ai is not None:
+                # Try the cached /new/ listing first (avoids the 429-prone search endpoint).
                 permalink = await asyncio.to_thread(
-                    scanner.find_match_thread, m.home_name, m.away_name
+                    scanner.find_thread_permalink, m.home_name, m.away_name
                 )
+                if permalink is None:
+                    # Fall back to the search endpoint for matches not yet in /new/.
+                    permalink = await asyncio.to_thread(
+                        scanner.find_match_thread, m.home_name, m.away_name
+                    )
                 if permalink:
                     body = await asyncio.to_thread(scanner.get_thread_body, permalink)
                     events = await extract_match_events(ai, body, m.home_name, m.away_name)

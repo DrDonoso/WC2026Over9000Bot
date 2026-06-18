@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import unicodedata
 import urllib.parse
 from difflib import SequenceMatcher
@@ -39,6 +40,11 @@ _MAX_THREADS_PER_TICK = 5
 
 # Courtesy delay between thread-body fetches (seconds)
 _FETCH_DELAY_SECONDS = 1
+
+# ── in-memory TTL cache constants ─────────────────────────────────────────────
+
+_MATCH_THREADS_TTL = 30   # seconds — shared across all consumers (goal poller, /endirecto, …)
+_THREAD_BODY_TTL = 90     # seconds per permalink
 
 # ── browser headers (proven to work from Docker) ─────────────────────────────
 
@@ -81,6 +87,9 @@ WC_TEAM_ALIASES: dict[str, str] = {
     "democratic republic of congo": "congo dr",
     "dem. rep. congo": "congo dr",
     "dem rep congo": "congo dr",  # "Dem. Rep. Congo" after dot→space normalization
+    # Czech Republic: r/soccer and ESPN use "Czech Republic" but football-data uses "Czechia"
+    "czech republic": "czechia",
+    "czech rep": "czechia",   # covers "Czech Rep" and "Czech Rep." (dot stripped before lookup)
 }
 
 
@@ -246,6 +255,11 @@ class RedditMatchScanner:
         else:
             self._session = self._make_session()
 
+        # In-memory TTL caches — allow all consumers (goal poller, /endirecto, …)
+        # to share recent fetches on the same scanner instance.
+        self._match_threads_cache: tuple[float, list[ThreadInfo]] | None = None
+        self._thread_body_cache: dict[str, tuple[float, str]] = {}
+
     def _make_session(self) -> requests.Session:
         s = requests.Session()
         headers = {**_BROWSER_HEADERS, "User-Agent": self._ua}
@@ -297,11 +311,52 @@ class RedditMatchScanner:
         ]
 
     def get_match_threads(self) -> list[ThreadInfo]:
-        """Return all live (non-Pre/Post) Match Thread posts from r/soccer."""
-        threads = self._fetch_json_threads()
-        if threads is None:
-            threads = self._fetch_html_threads()
-        return [t for t in threads if _is_match_thread(t.title)]
+        """Return all live (non-Pre/Post) Match Thread posts from r/soccer.
+
+        Results are cached for _MATCH_THREADS_TTL seconds.  On any fetch error
+        (including HTTP 429) a stale cached value is returned if one exists;
+        otherwise [] is returned.  This method never raises.
+        """
+        now = time.monotonic()
+        if self._match_threads_cache is not None:
+            ts, cached = self._match_threads_cache
+            if now - ts < _MATCH_THREADS_TTL:
+                return cached
+
+        try:
+            threads = self._fetch_json_threads()
+            if threads is None:
+                threads = self._fetch_html_threads()
+            result = [t for t in threads if _is_match_thread(t.title)]
+            self._match_threads_cache = (now, result)
+            return result
+        except Exception as exc:
+            log.warning("get_match_threads failed: %s", exc)
+            if self._match_threads_cache is not None:
+                _, stale = self._match_threads_cache
+                log.warning("get_match_threads: returning stale cached result")
+                return stale
+            return []
+
+    def find_thread_permalink(self, home_name: str, away_name: str) -> str | None:
+        """Return a live Match Thread permalink from the cached /new/ listing.
+
+        Uses the shared, cached get_match_threads() result so it never hits
+        the 429-prone search endpoint.  Both team orderings in the thread title
+        are accepted.  Returns None if no matching thread is found.
+        """
+        threads = self.get_match_threads()
+        for thread in threads:
+            thread_home, thread_away = _parse_thread_teams(thread.title)
+            if not thread_home or not thread_away:
+                continue
+            if (
+                _teams_match(thread_home, home_name) and _teams_match(thread_away, away_name)
+            ) or (
+                _teams_match(thread_home, away_name) and _teams_match(thread_away, home_name)
+            ):
+                return thread.permalink
+        return None
 
     def find_match_thread(self, home_name: str, away_name: str) -> str | None:
         """Find the r/soccer Match Thread permalink for a given fixture.
@@ -391,11 +446,31 @@ class RedditMatchScanner:
         return _html_to_goaltext(html)
 
     def get_thread_body(self, permalink: str) -> str:
-        """Return the selftext for a thread (JSON preferred, HTML fallback)."""
-        body = self._fetch_thread_body_json(permalink)
-        if body is None:
-            body = self._fetch_thread_body_html(permalink)
-        return body
+        """Return the selftext for a thread (JSON preferred, HTML fallback).
+
+        Results are cached per permalink for _THREAD_BODY_TTL seconds.  On any
+        fetch error a stale cached value is returned if one exists; otherwise ""
+        is returned.  This method never raises.
+        """
+        now = time.monotonic()
+        if permalink in self._thread_body_cache:
+            ts, cached = self._thread_body_cache[permalink]
+            if now - ts < _THREAD_BODY_TTL:
+                return cached
+
+        try:
+            body = self._fetch_thread_body_json(permalink)
+            if body is None:
+                body = self._fetch_thread_body_html(permalink)
+            self._thread_body_cache[permalink] = (now, body)
+            return body
+        except Exception as exc:
+            log.warning("get_thread_body(%s) failed: %s", permalink, exc)
+            if permalink in self._thread_body_cache:
+                _, stale = self._thread_body_cache[permalink]
+                log.warning("get_thread_body: returning stale cached result for %s", permalink)
+                return stale
+            return ""
 
     def get_espn_game_id(self, home: str, away: str) -> str | None:
         """Find the ESPN game ID embedded in the r/soccer match thread.
@@ -467,7 +542,6 @@ class RedditMatchScanner:
 
             # Courtesy delay between body fetches
             if processed > 0:
-                import time
                 time.sleep(_FETCH_DELAY_SECONDS)
 
             try:

@@ -272,6 +272,23 @@ class TestNormalizeTeam:
         assert _teams_match("D.R.Congo", "Congo DR") is True
 
 
+class TestCzechiaAlias:
+    def test_normalize_czech_republic_equals_czechia(self):
+        assert _normalize_team("Czech Republic") == _normalize_team("Czechia")
+
+    def test_normalize_czech_rep_dot_equals_czechia(self):
+        assert _normalize_team("Czech Rep.") == _normalize_team("Czechia")
+
+    def test_teams_match_czech_republic_vs_czechia(self):
+        assert _teams_match("Czech Republic", "Czechia") is True
+
+    def test_teams_match_czechia_vs_czech_republic(self):
+        assert _teams_match("Czechia", "Czech Republic") is True
+
+    def test_teams_match_czech_rep_dot_vs_czechia(self):
+        assert _teams_match("Czech Rep.", "Czechia") is True
+
+
 
 
 class TestScannerJsonPath:
@@ -587,3 +604,285 @@ class TestFindMatchThread:
         result = scanner.find_match_thread("Germany", "Spain")
         assert result == "/r/soccer/comments/jkl012/match_thread_germany_vs_spain/"
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RedditMatchScanner.find_thread_permalink
+# ══════════════════════════════════════════════════════════════════════════════
+
+# A tiny /new/-style listing with one live Match Thread for Czechia vs South Africa.
+_CZECHIA_LISTING_JSON = {
+    "data": {
+        "children": [
+            {
+                "data": {
+                    "id": "czk001",
+                    "title": "Match Thread: Czechia vs South Africa | FIFA World Cup 2026",
+                    "permalink": "/r/soccer/comments/czk001/match_thread_czechia_vs_south_africa/",
+                    "created_utc": 1718560000.0,
+                }
+            },
+            {
+                "data": {
+                    "id": "czk002",
+                    "title": "Post Match Thread: Germany vs Spain | WC 2026",
+                    "permalink": "/r/soccer/comments/czk002/post_match/",
+                    "created_utc": 1718559000.0,
+                }
+            },
+        ]
+    }
+}
+
+
+class TestFindThreadPermalink:
+    def test_returns_permalink_for_matching_thread(self):
+        """find_thread_permalink returns the correct permalink via the /new/ listing."""
+        session = FakeSession([FakeResponse(200, _CZECHIA_LISTING_JSON)])
+        scanner = RedditMatchScanner(session=session)
+        result = scanner.find_thread_permalink("Czechia", "South Africa")
+        assert result == "/r/soccer/comments/czk001/match_thread_czechia_vs_south_africa/"
+
+    def test_reversed_team_order_still_matches(self):
+        """Thread title has 'Czechia vs South Africa'; fixture home=South Africa works too."""
+        session = FakeSession([FakeResponse(200, _CZECHIA_LISTING_JSON)])
+        scanner = RedditMatchScanner(session=session)
+        result = scanner.find_thread_permalink("South Africa", "Czechia")
+        assert result == "/r/soccer/comments/czk001/match_thread_czechia_vs_south_africa/"
+
+    def test_returns_none_when_no_matching_thread(self):
+        """Returns None when no thread title matches the given fixture."""
+        session = FakeSession([FakeResponse(200, _CZECHIA_LISTING_JSON)])
+        scanner = RedditMatchScanner(session=session)
+        result = scanner.find_thread_permalink("Brazil", "Argentina")
+        assert result is None
+
+    def test_post_match_thread_is_excluded(self):
+        """Post Match Thread is filtered by _is_match_thread before lookup."""
+        session = FakeSession([FakeResponse(200, _CZECHIA_LISTING_JSON)])
+        scanner = RedditMatchScanner(session=session)
+        result = scanner.find_thread_permalink("Germany", "Spain")
+        assert result is None  # Post Match Thread must not match
+
+    def test_returns_none_when_listing_empty(self):
+        """Returns None gracefully when the /new/ listing has no threads."""
+        session = FakeSession([FakeResponse(200, {"data": {"children": []}})])
+        scanner = RedditMatchScanner(session=session)
+        result = scanner.find_thread_permalink("France", "Brazil")
+        assert result is None
+
+    def test_uses_cached_threads_second_call_no_extra_fetch(self):
+        """Second call within the TTL window reuses the cache — no extra HTTP request."""
+        from unittest.mock import patch as _patch
+
+        session = FakeSession([FakeResponse(200, _CZECHIA_LISTING_JSON)])
+        scanner = RedditMatchScanner(session=session)
+
+        # First call fetches and caches
+        result1 = scanner.find_thread_permalink("Czechia", "South Africa")
+        assert result1 is not None
+
+        # Session is now empty; a second fetch would raise RuntimeError.
+        # Second call should use the cache → must not raise.
+        with _patch("worldcup_bot.reddit.scanner.time") as mock_time:
+            mock_time.monotonic.return_value = 1.0  # within TTL
+            result2 = scanner.find_thread_permalink("Czechia", "South Africa")
+
+        assert result2 == result1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RedditMatchScanner — get_match_threads TTL cache
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestScannerMatchThreadsCache:
+    """get_match_threads() caches results for _MATCH_THREADS_TTL seconds."""
+
+    def _make_scanner_with_json_responses(self, *responses) -> RedditMatchScanner:
+        return RedditMatchScanner(session=FakeSession(list(responses)))
+
+    def test_second_call_within_ttl_uses_cache(self):
+        """Two calls within the TTL window → underlying fetch happens only once."""
+        from unittest.mock import patch as _patch
+
+        scanner = self._make_scanner_with_json_responses(
+            FakeResponse(200, _SEARCH_JSON_ONE_MATCH_THREAD)
+        )
+
+        with _patch("worldcup_bot.reddit.scanner.time") as mock_time:
+            mock_time.monotonic.return_value = 1000.0
+            threads1 = scanner.get_match_threads()
+
+            # Same timestamp — still within TTL
+            threads2 = scanner.get_match_threads()
+
+        # Both calls return the same list and the session has no more responses
+        # (if a second fetch were attempted it would raise RuntimeError).
+        assert threads1 == threads2
+        assert len(threads1) == 1
+        assert threads1[0].post_id == "post1"
+
+    def test_call_after_ttl_refetches(self):
+        """A call after the TTL has expired triggers a new HTTP fetch."""
+        from unittest.mock import patch as _patch
+        from worldcup_bot.reddit.scanner import _MATCH_THREADS_TTL
+
+        scanner = self._make_scanner_with_json_responses(
+            FakeResponse(200, _SEARCH_JSON_ONE_MATCH_THREAD),
+            FakeResponse(200, _SEARCH_JSON_EMPTY),
+        )
+
+        with _patch("worldcup_bot.reddit.scanner.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            threads1 = scanner.get_match_threads()
+
+            # Advance clock past TTL
+            mock_time.monotonic.return_value = _MATCH_THREADS_TTL + 1.0
+            threads2 = scanner.get_match_threads()
+
+        assert len(threads1) == 1   # first fetch had one thread
+        assert len(threads2) == 0   # second fetch returned empty
+
+    def test_fetch_error_with_cache_returns_stale(self):
+        """On fetch error, if a cached value exists, return it (does not raise)."""
+        from unittest.mock import patch as _patch
+        from worldcup_bot.reddit.scanner import _MATCH_THREADS_TTL
+
+        scanner = self._make_scanner_with_json_responses(
+            FakeResponse(200, _SEARCH_JSON_ONE_MATCH_THREAD),
+            FakeResponse(429, "Too Many Requests"),  # will raise via raise_for_status
+        )
+
+        with _patch("worldcup_bot.reddit.scanner.time") as mock_time:
+            # First call — populates cache at t=0
+            mock_time.monotonic.return_value = 0.0
+            threads1 = scanner.get_match_threads()
+            assert len(threads1) == 1
+
+            # Second call past TTL — 429 on JSON, 429 on HTML fallback too
+            # FakeSession only had 2 responses; JSON 429 triggers HTML fallback which
+            # would try another request — but we've run out. Let's mock _fetch_json_threads
+            # and _fetch_html_threads directly.
+
+        scanner2 = RedditMatchScanner(session=FakeSession([FakeResponse(200, _SEARCH_JSON_ONE_MATCH_THREAD)]))
+        with _patch("worldcup_bot.reddit.scanner.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            scanner2.get_match_threads()  # populate cache
+
+            mock_time.monotonic.return_value = _MATCH_THREADS_TTL + 1.0
+            # Both internal fetchers raise now
+            with _patch.object(scanner2, "_fetch_json_threads", side_effect=requests.HTTPError("429")):
+                with _patch.object(scanner2, "_fetch_html_threads", side_effect=requests.HTTPError("429")):
+                    stale = scanner2.get_match_threads()
+
+        assert len(stale) == 1  # stale cache returned, not []
+
+    def test_fetch_error_with_no_cache_returns_empty(self):
+        """On fetch error with no cache, returns [] gracefully (does not raise)."""
+        from unittest.mock import patch as _patch
+
+        scanner = RedditMatchScanner(session=FakeSession([]))
+        with _patch.object(scanner, "_fetch_json_threads", side_effect=requests.HTTPError("429")):
+            with _patch.object(scanner, "_fetch_html_threads", side_effect=requests.HTTPError("429")):
+                result = scanner.get_match_threads()
+
+        assert result == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RedditMatchScanner — get_thread_body TTL cache
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestScannerThreadBodyCache:
+    """get_thread_body() caches results per permalink for _THREAD_BODY_TTL seconds."""
+
+    _PERMALINK = "/r/soccer/comments/test123/match_thread/"
+
+    def test_second_call_within_ttl_uses_cache(self):
+        """Two calls for the same permalink within the TTL → underlying fetch once."""
+        from unittest.mock import patch as _patch
+
+        scanner = RedditMatchScanner(session=FakeSession([FakeResponse(200, _THREAD_BODY_JSON)]))
+
+        with _patch("worldcup_bot.reddit.scanner.time") as mock_time:
+            mock_time.monotonic.return_value = 500.0
+            body1 = scanner.get_thread_body(self._PERMALINK)
+
+            # Still within TTL — session is empty, a second fetch would raise
+            body2 = scanner.get_thread_body(self._PERMALINK)
+
+        assert body1 == body2
+        assert "Goal! Sweden" in body1
+
+    def test_call_after_ttl_refetches(self):
+        """A call after the TTL triggers a new fetch for the same permalink."""
+        from unittest.mock import patch as _patch
+        from worldcup_bot.reddit.scanner import _THREAD_BODY_TTL
+
+        body_v1 = [{"data": {"children": [{"data": {"selftext": "**7'** ⚽ **Goal! A 1-0.**"}}]}}, {}]
+        body_v2 = [{"data": {"children": [{"data": {"selftext": "**7'** ⚽ **Goal! A 1-0.**\n**30'** ⚽ **Goal! A 2-0.**"}}]}}, {}]
+
+        scanner = RedditMatchScanner(session=FakeSession([
+            FakeResponse(200, body_v1),
+            FakeResponse(200, body_v2),
+        ]))
+
+        with _patch("worldcup_bot.reddit.scanner.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            body1 = scanner.get_thread_body(self._PERMALINK)
+
+            mock_time.monotonic.return_value = _THREAD_BODY_TTL + 1.0
+            body2 = scanner.get_thread_body(self._PERMALINK)
+
+        assert body1 != body2
+        assert "Goal! A 2-0." in body2
+
+    def test_fetch_error_with_cache_returns_stale(self):
+        """On fetch error, if a cached body exists, return it (does not raise)."""
+        from unittest.mock import patch as _patch
+        from worldcup_bot.reddit.scanner import _THREAD_BODY_TTL
+
+        scanner = RedditMatchScanner(session=FakeSession([FakeResponse(200, _THREAD_BODY_JSON)]))
+
+        with _patch("worldcup_bot.reddit.scanner.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            body1 = scanner.get_thread_body(self._PERMALINK)
+
+            mock_time.monotonic.return_value = _THREAD_BODY_TTL + 1.0
+            with _patch.object(scanner, "_fetch_thread_body_json", side_effect=requests.HTTPError("429")):
+                with _patch.object(scanner, "_fetch_thread_body_html", side_effect=requests.HTTPError("429")):
+                    stale = scanner.get_thread_body(self._PERMALINK)
+
+        assert stale == body1  # stale cache returned
+
+    def test_fetch_error_with_no_cache_returns_empty_string(self):
+        """On fetch error with no cache, returns '' gracefully (does not raise)."""
+        from unittest.mock import patch as _patch
+
+        scanner = RedditMatchScanner(session=FakeSession([]))
+        with _patch.object(scanner, "_fetch_thread_body_json", side_effect=requests.HTTPError("429")):
+            with _patch.object(scanner, "_fetch_thread_body_html", side_effect=requests.HTTPError("429")):
+                result = scanner.get_thread_body(self._PERMALINK)
+
+        assert result == ""
+
+    def test_different_permalinks_cached_independently(self):
+        """Cache entries are per-permalink; different permalinks get different bodies."""
+        from unittest.mock import patch as _patch
+
+        body_a = [{"data": {"children": [{"data": {"selftext": "body_A"}}]}}, {}]
+        body_b = [{"data": {"children": [{"data": {"selftext": "body_B"}}]}}, {}]
+
+        scanner = RedditMatchScanner(session=FakeSession([
+            FakeResponse(200, body_a),
+            FakeResponse(200, body_b),
+        ]))
+
+        with _patch("worldcup_bot.reddit.scanner.time") as mock_time:
+            mock_time.monotonic.return_value = 0.0
+            result_a = scanner.get_thread_body("/r/soccer/comments/aaa/")
+            result_b = scanner.get_thread_body("/r/soccer/comments/bbb/")
+
+        assert result_a == "body_A"
+        assert result_b == "body_B"
