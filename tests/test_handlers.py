@@ -24,6 +24,7 @@ from worldcup_bot.bot.handlers import (
     cmd_en_directo,
     cmd_estadisticas,
     cmd_general,
+    cmd_hoy,
     cmd_lista_aciertos,
     cmd_lista_aciertos_actual,
     cmd_mis_predicciones,
@@ -33,6 +34,7 @@ from worldcup_bot.bot.handlers import (
     cmd_tongo,
     cmd_ver_gol_callback,
 )
+from worldcup_bot.api.client import FootballAPIError
 from worldcup_bot.api.models import Match, Standing
 from worldcup_bot.bot.formatters import format_user_detail, participant_photo_url
 from worldcup_bot.config import Settings
@@ -2498,3 +2500,160 @@ class TestCmdEndirectoCallback:
         await cmd_endirecto_callback(update, context)
 
         update.callback_query.answer.assert_called_once_with("Datos inválidos.", show_alert=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_hoy — jornada rollover logic
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _hoy_match(status: str, uid: int = 1) -> Match:
+    """Minimal Match fixture for cmd_hoy tests."""
+    return Match(
+        id=uid,
+        utc_date="2026-06-18T18:00:00Z",
+        status=status,
+        stage="GROUP_STAGE",
+        group="GROUP_A",
+        home_tla="ESP",
+        away_tla="FRA",
+        home_name="Spain",
+        away_name="France",
+        home_score=None if status in ("SCHEDULED", "TIMED") else 1,
+        away_score=None if status in ("SCHEDULED", "TIMED") else 0,
+        winner=None,
+    )
+
+
+def _make_offset_client(offset_map: dict[int, list]) -> MagicMock:
+    """Return a mock client whose get_football_day_matches returns per-offset lists."""
+    mock_client = MagicMock()
+
+    def _get(tz, offset, h):
+        return offset_map.get(offset, [])
+
+    mock_client.get_football_day_matches.side_effect = _get
+    return mock_client
+
+
+class TestCmdHoy:
+    """Tests for cmd_hoy rollover-to-next-jornada logic."""
+
+    @pytest.mark.asyncio
+    async def test_normal_day_shows_hoy_header_and_time_only(self, fake_settings):
+        """offset 0 has a SCHEDULED match → 'Partidos de hoy' header, time-only format_match."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        client = _make_offset_client({0: [_hoy_match("SCHEDULED")]})
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=client):
+            with patch("worldcup_bot.bot.handlers.format_match", return_value="Spain vs France - ⌚ 20:00") as mock_fmt:
+                with patch("worldcup_bot.bot.handlers.format_match_with_date") as mock_fmt_date:
+                    await cmd_hoy(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Partidos de hoy" in text
+        assert "09:00" in text  # default anchor hour
+        mock_fmt.assert_called_once()
+        mock_fmt_date.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_all_finished_rolls_to_offset1(self, fake_settings):
+        """07:00 scenario: offset 0 all FINISHED, offset 1 has SCHEDULED → próximos header + dated format."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        finished = _hoy_match("FINISHED")
+        scheduled = _hoy_match("SCHEDULED", uid=2)
+        client = _make_offset_client({0: [finished], 1: [scheduled]})
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=client):
+            with patch("worldcup_bot.bot.handlers.format_match_with_date", return_value="19-06-2026: Spain vs France - ⌚ 09:00") as mock_fwd:
+                with patch("worldcup_bot.bot.handlers.format_match"):
+                    await cmd_hoy(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Ya han acabado los partidos de hoy" in text
+        assert "próximos" in text
+        mock_fwd.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_offset0_rolls_to_offset2(self, fake_settings):
+        """offset 0 empty, offset 1 empty, offset 2 has SCHEDULED → shows offset 2 with próximos header."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        client = _make_offset_client({2: [_hoy_match("SCHEDULED", uid=5)]})
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=client):
+            with patch("worldcup_bot.bot.handlers.format_match_with_date", return_value="21-06-2026: line") as mock_fwd:
+                with patch("worldcup_bot.bot.handlers.format_match"):
+                    await cmd_hoy(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Ya han acabado los partidos de hoy" in text
+        mock_fwd.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_upcoming_shows_offset0_finished_under_hoy_header(self, fake_settings):
+        """All 15 offsets: only offset 0 has matches (all FINISHED), rest are empty → shows today's results under 'hoy' header."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        finished = _hoy_match("FINISHED")
+        # offset 0 all FINISHED, offsets 1-14 empty
+        client = _make_offset_client({0: [finished]})
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=client):
+            with patch("worldcup_bot.bot.handlers.format_match", return_value="Spain 1 - 0 France ⚽️") as mock_fmt:
+                with patch("worldcup_bot.bot.handlers.format_match_with_date"):
+                    await cmd_hoy(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Partidos de hoy" in text
+        assert "Ya han acabado" not in text
+        mock_fmt.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_truly_nothing_replies_no_partidos(self, fake_settings):
+        """All 15 offsets return [] → replies 'No hay partidos programados.'"""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        client = _make_offset_client({})  # every offset returns []
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=client):
+            await cmd_hoy(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "No hay partidos programados" in text
+
+    @pytest.mark.asyncio
+    async def test_api_error_on_first_call_sends_error_message(self, fake_settings):
+        """FootballAPIError on the first loop iteration → replies the api-error message."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        mock_client = MagicMock()
+        mock_client.get_football_day_matches.side_effect = FootballAPIError(500, "boom")
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            await cmd_hoy(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Error" in text or "Rate limit" in text or "❌" in text
+
+    @pytest.mark.asyncio
+    async def test_loop_stops_at_first_window_with_upcoming_match(self, fake_settings):
+        """Loop stops at offset 1 and does NOT consult offset 2 if offset 1 already has SCHEDULED."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        finished = _hoy_match("FINISHED")
+        scheduled = _hoy_match("SCHEDULED", uid=10)
+        client = _make_offset_client({0: [finished], 1: [scheduled], 2: [_hoy_match("SCHEDULED", uid=11)]})
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=client):
+            with patch("worldcup_bot.bot.handlers.format_match_with_date", return_value="line"):
+                with patch("worldcup_bot.bot.handlers.format_match"):
+                    await cmd_hoy(update, context)
+
+        # get_football_day_matches should have been called for offset 0 and 1 only
+        call_offsets = [c.args[1] for c in client.get_football_day_matches.call_args_list]
+        assert 2 not in call_offsets, "Should have stopped at offset 1, not queried offset 2"
+        assert 0 in call_offsets
+        assert 1 in call_offsets

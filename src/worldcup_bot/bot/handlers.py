@@ -25,6 +25,7 @@ from worldcup_bot.bot.formatters import (
     format_general_ranking,
     format_live_match_detail,
     format_match,
+    format_match_with_date,
     render_endirecto,
     format_standings,
     format_user_detail,
@@ -421,21 +422,43 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     client = make_client(settings)
     h = settings.football_day_start_hour
 
-    try:
-        matches = client.get_football_day_matches(
-            settings.timezone, 0, h
-        )
-    except FootballAPIError as exc:
-        await update.message.reply_text(_api_error_msg(exc))
-        return
+    # Walk forward up to 15 windows (today .. +14 days) to find the first window
+    # that still has at least one non-finished match.
+    selected: list | None = None
+    selected_offset: int = 0
+    for offset in range(0, 15):
+        try:
+            ms = client.get_football_day_matches(settings.timezone, offset, h)
+        except FootballAPIError as exc:
+            await update.message.reply_text(_api_error_msg(exc))
+            return
+        if ms and any(m.status != "FINISHED" for m in ms):
+            selected = ms
+            selected_offset = offset
+            break
 
-    if not matches:
-        await update.message.reply_text("No hay partidos programados para hoy.")
-        return
+    if selected is None:
+        # All windows were empty or fully finished — fall back to today's results.
+        try:
+            today = client.get_football_day_matches(settings.timezone, 0, h)
+        except FootballAPIError as exc:
+            await update.message.reply_text(_api_error_msg(exc))
+            return
+        if today:
+            selected = today
+            selected_offset = 0
+        else:
+            await update.message.reply_text("No hay partidos programados.")
+            return
 
-    header = f"⚽️ Partidos de hoy ({h:02d}:00–{h:02d}:00):"
-    lines = [header, ""] + [format_match(m, settings.timezone) for m in matches]
-    await update.message.reply_text("\n".join(lines))
+    if selected_offset == 0:
+        header = f"⚽️ Partidos de hoy ({h:02d}:00–{h:02d}:00):"
+        lines = [format_match(m, settings.timezone) for m in selected]
+    else:
+        header = "⚽️ Ya han acabado los partidos de hoy. Estos son los próximos:"
+        lines = [format_match_with_date(m, settings.timezone) for m in selected]
+
+    await update.message.reply_text("\n".join([header, ""] + lines))
 
 
 async def cmd_ayer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
