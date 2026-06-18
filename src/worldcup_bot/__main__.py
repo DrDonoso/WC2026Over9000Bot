@@ -10,7 +10,7 @@ import html
 import logging
 import shutil
 import sys
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 
 import pytz
@@ -61,6 +61,7 @@ from worldcup_bot.reddit.notifier import (
 from worldcup_bot.reddit.parser import parse_goal_events
 from worldcup_bot.reddit.scanner import RedditMatchScanner, _teams_match
 from worldcup_bot.reddit.score_state import GoalDelta, diff_scores, load_scores, reconcile, save_scores
+from worldcup_bot.reddit.finished_state import load_finished, save_finished
 from worldcup_bot.reddit.clip_finder import find_goal_clip
 from worldcup_bot.reddit.clip_store import (
     add_entry as _cs_add_entry,
@@ -80,6 +81,10 @@ log = logging.getLogger(__name__)
 
 # Max search attempts before giving up on a clip (~18 min at 45s interval)
 _MAX_CLIP_ATTEMPTS = 25
+
+# A football match (including ET + penalties) never exceeds ~3 h; 4 h is a safe
+# ceiling for "this match is definitely over regardless of football-data status".
+MATCH_OVER_AGE = timedelta(hours=4)
 
 
 # ── daily AI update job ───────────────────────────────────────────────────────
@@ -829,11 +834,18 @@ async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Repeating job: detect newly-finished matches, post stats card + porra commentary.
 
-    Dedup strategy: on the FIRST run, all currently-finished match ids are seeded
-    into finished_seen WITHOUT sending — prevents re-firing for pre-existing finished
-    matches on startup.  On subsequent runs, each newly-finished id triggers:
-      Part A — ESPN stats card (HTML)
-      Part B — porra ranking diff + AI commentary (if AI enabled)
+    Dedup strategy (persistent + age-aware):
+    - `finished_announced` (bot_data + disk): set of match ids already recapped or
+      seeded as already-handled.  Loaded from `{state_dir}/finished_announced.json` at
+      startup; persisted after every change so restarts are safe.
+    - FIRST RUN (gate: `finished_seeded` flag): seed every match that is "definitely
+      over already" — FINISHED status OR kickoff older than MATCH_OVER_AGE (4 h).
+      This catches stale IN_PLAY/PAUSED matches whose football-data status lags.
+      Persist immediately and return (no sends).
+    - SUBSEQUENT RUNS: for each match newly showing FINISHED whose id is NOT in
+      `finished_announced`, send the recap (Part A ESPN stats + Part B porra
+      commentary), then add the id and persist (one save per match so a crash
+      mid-batch doesn't replay).
     """
     try:
         settings: Settings = context.bot_data["settings"]
@@ -859,19 +871,34 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.warning("poll_finished_matches_job: could not get matches: %s", exc)
             return
 
-        finished_ids = {m.id for m in all_matches if m.status == "FINISHED"}
+        announced: set = context.bot_data["finished_announced"]
+        finished_path = f"{settings.state_dir}/finished_announced.json"
 
         # ── seed on first run ─────────────────────────────────────────────────
-        if "finished_seen" not in context.bot_data:
-            context.bot_data["finished_seen"] = set(finished_ids)
+        if not context.bot_data.get("finished_seeded", False):
+            now_utc = datetime.utcnow()
+            seeded: set[int] = set()
+            for m in all_matches:
+                if m.status == "FINISHED":
+                    seeded.add(m.id)
+                else:
+                    try:
+                        kickoff = datetime.strptime(m.utc_date, "%Y-%m-%dT%H:%M:%SZ")
+                        if now_utc - kickoff > MATCH_OVER_AGE:
+                            seeded.add(m.id)
+                    except Exception:
+                        pass
+            announced.update(seeded)
+            save_finished(finished_path, announced)
+            context.bot_data["finished_seeded"] = True
             log.info(
-                "poll_finished_matches_job: seeded %d already-finished matches (no sends)",
-                len(finished_ids),
+                "poll_finished_matches_job: seeded %d already-handled matches (no sends)",
+                len(seeded),
             )
             return
 
-        finished_seen: set = context.bot_data["finished_seen"]
-        new_ids = finished_ids - finished_seen
+        finished_ids = {m.id for m in all_matches if m.status == "FINISHED"}
+        new_ids = finished_ids - announced
 
         if not new_ids:
             return
@@ -883,7 +910,8 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 match = matches_by_id.get(match_id)
                 if match is None:
-                    finished_seen.add(match_id)
+                    announced.add(match_id)
+                    save_finished(finished_path, announced)
                     continue
 
                 stats_text: str | None = None
@@ -985,9 +1013,8 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as exc:
                 log.error("poll_finished_matches_job: error processing match %d: %s", match_id, exc)
             finally:
-                finished_seen.add(match_id)
-
-        context.bot_data["finished_seen"] = finished_seen
+                announced.add(match_id)
+                save_finished(finished_path, announced)
 
     except Exception as exc:
         log.exception("poll_finished_matches_job: unexpected error: %s", exc)
@@ -1015,7 +1042,12 @@ def build_app(settings: Settings) -> Application:
     app.bot_data["clip_store"] = load_clips(clips_path)
     # In-flight lock set — tokens currently being processed by cmd_ver_gol_callback
     app.bot_data["vergol_inflight"] = set()
-    # finished-match tracker: seeded on first poll_finished_matches_job run
+    # finished-match tracker: persisted set of match ids already recapped or seeded
+    # as already-handled.  Loaded from disk so restarts never re-fire old recaps.
+    finished_path = f"{settings.state_dir}/finished_announced.json"
+    app.bot_data["finished_announced"] = load_finished(finished_path)
+    # False until first poll_finished_matches_job run completes its seed pass.
+    app.bot_data["finished_seeded"] = False
     app.bot_data["espn_client"] = None
 
     handlers = [
