@@ -5,6 +5,14 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260618.05] - 2026-06-18
+
+- feat: add Curaçao 🇨🇼 (TLA CUW) to the teams that get a ❤️ next to their flag, alongside Panama and Uzbekistan
+- feat: make the favourites configurable via a new BELOVED_TEAMS env var (comma-separated football-data TLAs, default PAN,UZB,CUW), parsed in config and applied to the flag renderer at startup
+- feat: the AI daily summary now shows warmth for all three (Panamá, Uzbekistán y Curaçao)
+- chore: expose BELOVED_TEAMS in both docker-compose files and document it in .env.example
+
+
 ## [20260618.04] - 2026-06-18
 
 - feat: append a ❤️ to the flag of Panama 🇵🇦 and Uzbekistan 🇺🇿 in team_flag, so the love appears anywhere teams are rendered — goal notifications, /hoy, /endirecto, standings and match recaps
