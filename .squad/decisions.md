@@ -1,3 +1,89 @@
+# Decision: per-source `seen` + single `announced` + pure `reconcile()` fixes goal-detector flip-flop
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-18  
+**Status:** IMPLEMENTED — 1283 tests green, not yet committed (coordinator verifies first)
+
+---
+
+## Problem
+
+England 4-2 Croatia (Rashford 85'): the Reddit match thread reported 4-2 while
+football-data.org still showed 3-2.  Both detectors shared a single
+`bot_data["live_scores"]` dict.
+
+Flip-flop loop:
+1. Thread sees 4-2 → updates shared dict to 4-2 → announces GOOOL.
+2. API reports 3-2 → sees shared dict at 4-2 → 4→3 is a DECREASE → announces "Gol anulado (VAR)".
+3. Thread sees shared dict at 3-2 → 3→4 is an INCREASE → re-announces GOOOL.
+4. Loop forever.
+
+---
+
+## Decision
+
+Introduce **per-source `seen`** alongside the existing **single `announced`** score:
+
+| Key | Location | Persisted? | Purpose |
+|---|---|---|---|
+| `bot_data["live_scores"][match_id]` | existing | ✅ JSON | Single official announced score |
+| `bot_data["seen_scores"]["api"][match_id]` | new | ❌ in-memory | API source's own last-known score |
+| `bot_data["seen_scores"]["thread"][match_id]` | new | ❌ in-memory | Thread source's own last-known score |
+
+A **pure `reconcile(seen, announced, new_home, new_away)` function** in
+`src/worldcup_bot/reddit/score_state.py` decides what to announce:
+
+```python
+def reconcile(seen, announced, new_home, new_away) -> (deltas, new_seen, new_announced)
+```
+
+Rules (in order):
+1. **First-seen** (`seen is None`): seed source's baseline to `new`, announce nothing.
+2. **No change** (`new == seen`): nothing.
+3. **`new` ahead of `announced`**: emit goal delta(s), set `new_announced = new`.
+4. **`announced` ahead of `new`** (potential disallowed):
+   - If `ahead(seen, new)` — the SOURCE'S OWN prior value dropped → real VAR → emit disallowed, `new_announced = new`.
+   - Else (source was behind announced — pure lag) → announce nothing, `new_announced = announced` (unchanged).
+5. **Equal or mixed**: announce nothing.
+
+The `_ahead(a, b)` helper: `a["home"] >= b["home"] and a["away"] >= b["away"] and (a["home"] > b["home"] or a["away"] > b["away"])`.
+
+---
+
+## Why this fixes the bug
+
+**API lag scenario** (the screenshot):
+- announced = 4-2 (thread already told users), api_seen = 3-2 (api was lagging)
+- API reports 3-2: `reconcile(seen={3,2}, ann={4,2}, 3, 2)`
+  - `ahead(new={3,2}, ann={4,2})`? No.
+  - `ahead(ann={4,2}, new={3,2})`? Yes (potential disallowed).
+  - `ahead(seen={3,2}, new={3,2})`? No — source was NOT ahead, just lagging. **Lag branch → no disallowed.**
+- Result: `([], {3,2}, {4,2})` — announced stays 4-2, no false "anulado". ✅
+
+**Real VAR scenario**:
+- thread_seen = 4-2, announced = 4-2, thread now reports 3-2:
+  - `ahead(seen={4,2}, new={3,2})`? Yes — source's own value dropped → real disallowed. ✅
+
+**Restart safety**:
+- `seen_scores` is in-memory only. On restart it's empty.
+- First tick: `reconcile(None, announced_from_disk, curr, curr)` → seed, no replay. ✅
+
+---
+
+## Files changed
+
+| File | Change |
+|---|---|
+| `src/worldcup_bot/reddit/score_state.py` | Added `_ahead()` helper + `reconcile()` pure function |
+| `src/worldcup_bot/__main__.py` | `build_app`: init `seen_scores`; `poll_goals_job`: use `reconcile(source="api")`; `poll_thread_goals_job`: use `reconcile(source="thread")`, handle disallowed deltas |
+| `tests/test_score_state.py` | Added `TestReconcile` (13 tests) |
+| `tests/test_poll_goals_job.py` | Updated `_make_context` + 10 tests to supply `seen_api` |
+| `tests/test_poll_thread_goals_job.py` | Updated `_make_context` + 7 tests; added `TestFlipFlopFix` (3 tests) |
+
+**Test count: 1283 (up from 1267)**
+
+---
+
 ## 36. Decision: Auto-Changelog via GitHub Release Workflow
 
 **Author:** Maldini
