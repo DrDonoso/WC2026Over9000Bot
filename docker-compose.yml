@@ -34,6 +34,9 @@ services:
       OPENAI_IMAGE_BASE_URL: "${OPENAI_IMAGE_BASE_URL:-}"
       RICH_IMAGE_HOUR: "${RICH_IMAGE_HOUR:-0}"
 
+      # --- Selecciones 'favoritas' (❤️ junto a la bandera) — TLAs separadas por comas ---
+      BELOVED_TEAMS: "${BELOVED_TEAMS:-PAN,UZB,CUW}"
+
       # --- Persistent state directory for porra snapshot ---
       STATE_DIR: /app/state
 

@@ -1137,3 +1137,14 @@ class TestSystemPromptContract:
             "Uzbekistán" in _SYSTEM or "Uzbekistan" in _SYSTEM.lower()
         )
 
+    def test_system_prompt_mentions_curacao_love(self):
+        """_SYSTEM must instruct the AI to show warmth for Curaçao."""
+        assert "Curaçao" in _SYSTEM or "Curacao" in _SYSTEM.lower()
+
+    def test_system_prompt_all_three_beloved_teams_mentioned(self):
+        """_SYSTEM must reference all three beloved teams: Panama, Uzbekistan, and Curaçao."""
+        has_pan = "Panamá" in _SYSTEM or "Panama" in _SYSTEM.lower()
+        has_uzb = "Uzbekistán" in _SYSTEM or "Uzbekistan" in _SYSTEM.lower()
+        has_cuw = "Curaçao" in _SYSTEM or "Curacao" in _SYSTEM.lower()
+        assert has_pan and has_uzb and has_cuw
+

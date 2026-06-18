@@ -1024,6 +1024,9 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def build_app(settings: Settings) -> Application:
+    from worldcup_bot.bot import formatters
+    formatters.set_beloved_teams(settings.beloved_teams)
+
     app = Application.builder().token(settings.telegram_bot_token).build()
 
     # Store settings in bot_data for handler access

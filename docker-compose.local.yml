@@ -41,6 +41,9 @@ services:
       SSL_CERT_FILE: /certs/combined-ca-bundle.pem
       REQUESTS_CA_BUNDLE: /certs/combined-ca-bundle.pem
 
+      # --- Selecciones 'favoritas' (❤️ junto a la bandera) — TLAs separadas por comas ---
+      BELOVED_TEAMS: "${BELOVED_TEAMS:-PAN,UZB,CUW}"
+
       # --- Persistent state directory for porra snapshot ---
       STATE_DIR: /app/state
 

@@ -79,7 +79,7 @@ _SYSTEM = (
     "Devuelve ÚNICAMENTE el objeto JSON, sin marcas de código ni nada más. "
     'Formato exacto: {"today_notes": {"TLA1-TLA2": "nota o cadena vacía"}, '
     '"standings_comment": "narrativa corta"}\n\n'
-    "Cariño especial: Panamá 🇵🇦 y Uzbekistán 🇺🇿 son las selecciones favoritas de esta porra. "
+    "Cariño especial: Panamá 🇵🇦, Uzbekistán 🇺🇿 y Curaçao 🇨🇼 son las selecciones favoritas de esta porra. "
     "Siempre que las menciones, muéstrales un poco de amor y ánimo (con naturalidad, sin pasarte "
     "ni romper el formato): un emoji de corazón, una palabra de apoyo o un guiño cariñoso."
 )

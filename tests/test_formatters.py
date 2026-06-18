@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from worldcup_bot.bot.formatters import bold_person_names, render_endirecto, team_flag
+from worldcup_bot.bot.formatters import bold_person_names, render_endirecto, set_beloved_teams, team_flag
 
 
 class TestTeamFlagBelovedTeams:
-    """team_flag must append ❤️ for BELOVED_TEAMS (PAN, UZB) and only them."""
+    """team_flag must append ❤️ for BELOVED_TEAMS (PAN, UZB, CUW) and only them."""
 
     def test_pan_uppercase_gets_heart(self):
         result = team_flag("PAN")
@@ -18,6 +18,11 @@ class TestTeamFlagBelovedTeams:
     def test_uzb_uppercase_gets_heart(self):
         result = team_flag("UZB")
         assert "🇺🇿" in result
+        assert result.endswith("❤️")
+
+    def test_cuw_uppercase_gets_heart(self):
+        result = team_flag("CUW")
+        assert "🇨🇼" in result
         assert result.endswith("❤️")
 
     def test_pan_lowercase_gets_heart(self):
@@ -30,6 +35,11 @@ class TestTeamFlagBelovedTeams:
         assert "🇺🇿" in result
         assert result.endswith("❤️")
 
+    def test_cuw_lowercase_gets_heart(self):
+        result = team_flag("cuw")
+        assert "🇨🇼" in result
+        assert result.endswith("❤️")
+
     def test_esp_has_no_heart(self):
         result = team_flag("ESP")
         assert "❤️" not in result
@@ -39,6 +49,45 @@ class TestTeamFlagBelovedTeams:
         result = team_flag("ZZZ")
         assert result == ""
         assert "❤️" not in result
+
+
+class TestSetBelovedTeams:
+    """set_beloved_teams must override the module global and team_flag reflects it."""
+
+    def setup_method(self):
+        self._original = {"PAN", "UZB", "CUW"}
+
+    def teardown_method(self):
+        set_beloved_teams(self._original)
+
+    def test_set_single_team_overrides_list(self):
+        set_beloved_teams(["CUW"])
+        assert team_flag("CUW").endswith("❤️")
+        assert "❤️" not in team_flag("PAN")
+        assert "❤️" not in team_flag("UZB")
+
+    def test_set_beloved_teams_uppercases_input(self):
+        set_beloved_teams(["pan", "cuw"])
+        assert team_flag("PAN").endswith("❤️")
+        assert team_flag("CUW").endswith("❤️")
+        assert "❤️" not in team_flag("UZB")
+
+    def test_set_beloved_teams_strips_whitespace(self):
+        set_beloved_teams([" PAN ", " UZB "])
+        assert team_flag("PAN").endswith("❤️")
+        assert team_flag("UZB").endswith("❤️")
+
+    def test_set_beloved_teams_drops_empty_strings(self):
+        set_beloved_teams(["CUW", "", "  "])
+        assert team_flag("CUW").endswith("❤️")
+        assert "❤️" not in team_flag("PAN")
+
+    def test_restore_default_works(self):
+        set_beloved_teams(["ESP"])
+        set_beloved_teams({"PAN", "UZB", "CUW"})
+        assert team_flag("PAN").endswith("❤️")
+        assert team_flag("UZB").endswith("❤️")
+        assert team_flag("CUW").endswith("❤️")
 
 
 

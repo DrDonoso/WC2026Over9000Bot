@@ -13,6 +13,11 @@ _DEFAULT_REDDIT_UA = (
 )
 
 
+def _parse_tla_list(raw: str) -> tuple[str, ...]:
+    """Parse a comma-separated TLA list into an upper-cased tuple, dropping empties."""
+    return tuple(t.strip().upper() for t in raw.split(",") if t.strip())
+
+
 @dataclass
 class Settings:
     telegram_bot_token: str
@@ -38,6 +43,7 @@ class Settings:
     openai_image_api_key: str = ""
     openai_image_base_url: str = ""
     rich_image_hour: int = 0
+    beloved_teams: tuple[str, ...] = ("PAN", "UZB", "CUW")
 
 
 def ai_enabled(settings: "Settings") -> bool:
@@ -116,4 +122,5 @@ def load_settings() -> Settings:
         openai_image_api_key=os.getenv("OPENAI_IMAGE_API_KEY", ""),
         openai_image_base_url=os.getenv("OPENAI_IMAGE_BASE_URL", ""),
         rich_image_hour=int(os.getenv("RICH_IMAGE_HOUR", "0")),
+        beloved_teams=_parse_tla_list(os.getenv("BELOVED_TEAMS", "PAN,UZB,CUW")),
     )

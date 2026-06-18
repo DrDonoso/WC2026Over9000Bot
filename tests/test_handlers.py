@@ -433,6 +433,24 @@ class TestBuildAppRegistrations:
         pattern_strs = [str(p.pattern) if hasattr(p, "pattern") else str(p) for p in patterns]
         assert any("ed" in s and "|" in s for s in pattern_strs)
 
+    def test_build_app_applies_beloved_teams_from_settings(self, monkeypatch):
+        """build_app must call formatters.set_beloved_teams with settings.beloved_teams."""
+        from worldcup_bot.__main__ import build_app
+        from worldcup_bot.bot import formatters
+
+        calls = []
+        monkeypatch.setattr(formatters, "set_beloved_teams", lambda tlas: calls.append(tuple(tlas)))
+
+        custom = Settings(
+            telegram_bot_token="fake-token",
+            football_data_api_key="fake-api-key",
+            beloved_teams=("CUW", "PAN"),
+        )
+        build_app(custom)
+
+        assert len(calls) == 1
+        assert set(calls[0]) == {"CUW", "PAN"}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # cmd_clasificacion — group standings with optional letter filter

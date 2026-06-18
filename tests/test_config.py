@@ -32,6 +32,14 @@ class TestSettings:
         s = Settings(telegram_bot_token="t", football_data_api_key="k", photo_base_url="http://example.com")
         assert s.photo_base_url == "http://example.com"
 
+    def test_beloved_teams_default_is_pan_uzb_cuw(self):
+        s = Settings(telegram_bot_token="t", football_data_api_key="k")
+        assert set(s.beloved_teams) == {"PAN", "UZB", "CUW"}
+
+    def test_beloved_teams_can_be_overridden(self):
+        s = Settings(telegram_bot_token="t", football_data_api_key="k", beloved_teams=("ESP", "FRA"))
+        assert set(s.beloved_teams) == {"ESP", "FRA"}
+
 
 class TestLoadSettings:
     def test_football_cache_ttl_default_when_env_not_set(self, monkeypatch):
@@ -95,3 +103,35 @@ class TestLoadSettings:
         monkeypatch.setenv("TELEGRAM_GROUP_ID", "-100987654")
         s = load_settings()
         assert s.telegram_group_id == "-100987654"
+
+    def test_beloved_teams_default_when_env_not_set(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+        monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "apikey")
+        monkeypatch.setenv("TELEGRAM_GROUP_ID", "-100123")
+        monkeypatch.delenv("BELOVED_TEAMS", raising=False)
+        s = load_settings()
+        assert set(s.beloved_teams) == {"PAN", "UZB", "CUW"}
+
+    def test_beloved_teams_reads_from_env(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+        monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "apikey")
+        monkeypatch.setenv("TELEGRAM_GROUP_ID", "-100123")
+        monkeypatch.setenv("BELOVED_TEAMS", "pan, cuw")
+        s = load_settings()
+        assert set(s.beloved_teams) == {"PAN", "CUW"}
+
+    def test_beloved_teams_env_uppercased_and_trimmed(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+        monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "apikey")
+        monkeypatch.setenv("TELEGRAM_GROUP_ID", "-100123")
+        monkeypatch.setenv("BELOVED_TEAMS", " esp , fra , ger ")
+        s = load_settings()
+        assert set(s.beloved_teams) == {"ESP", "FRA", "GER"}
+
+    def test_beloved_teams_env_empty_entries_dropped(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+        monkeypatch.setenv("FOOTBALL_DATA_API_KEY", "apikey")
+        monkeypatch.setenv("TELEGRAM_GROUP_ID", "-100123")
+        monkeypatch.setenv("BELOVED_TEAMS", "PAN,,, ,CUW")
+        s = load_settings()
+        assert set(s.beloved_teams) == {"PAN", "CUW"}

@@ -45,8 +45,18 @@ def bold_person_names(text: str, names: Iterable[str]) -> str:
 
 # ── flag rendering ────────────────────────────────────────────────────────────
 
-BELOVED_TEAMS = {"PAN", "UZB"}  # Panamá, Uzbekistán — el cariño del bot
+BELOVED_TEAMS: set[str] = {"PAN", "UZB", "CUW"}  # Panamá, Uzbekistán, Curaçao — el cariño del bot
 _LOVE = "❤️"
+
+
+def set_beloved_teams(tlas) -> None:
+    """Set the global BELOVED_TEAMS from an iterable of TLA strings.
+
+    Called once at startup (from build_app) so the env-configured list takes
+    effect across all renderers.  Safe to call multiple times (e.g. in tests).
+    """
+    global BELOVED_TEAMS
+    BELOVED_TEAMS = {t.strip().upper() for t in tlas if t and t.strip()}
 
 
 def team_flag(tla: str) -> str:
