@@ -5,6 +5,17 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260618.04] - 2026-06-18
+
+- feat: append a ❤️ to the flag of Panama 🇵🇦 and Uzbekistan 🇺🇿 in team_flag, so the love appears anywhere teams are rendered — goal notifications, /hoy, /endirecto, standings and match recaps
+- feat: tell the AI daily-summary prompt to show warmth and encouragement for Panama and Uzbekistan when they come up in its prose
+- chore: BELOVED_TEAMS is a small constant ({PAN, UZB}) so the favourites are easy to adjust later
+- Merge kante-hoy-rollover-next-jornada.md from inbox into decisions.md (1 entry, 2026-06-18)
+- Delete inbox file
+- Write orchestration-log (kante-39 feature summary)
+- Write session log (brief feature + test count)
+
+
 ## [20260618.03] - 2026-06-18
 
 - feat: /hoy now shows the first 9am→9am football-day window (from today forward) that still has a non-finished match, so calling it at e.g. 07:00 after the night's games have ended shows the upcoming day's fixtures instead of an empty/finished list
