@@ -1123,3 +1123,17 @@ class TestSystemPromptContract:
         """_SYSTEM must explicitly forbid generic filler notes."""
         assert "relleno" in _SYSTEM.lower() or "nunca inventes" in _SYSTEM.lower() or "NUNCA" in _SYSTEM
 
+    def test_system_prompt_mentions_panama_love(self):
+        """_SYSTEM must instruct the AI to show warmth for Panamá."""
+        assert "Panamá" in _SYSTEM or "Panama" in _SYSTEM.lower()
+
+    def test_system_prompt_mentions_uzbekistan_love(self):
+        """_SYSTEM must instruct the AI to show warmth for Uzbekistán."""
+        assert "Uzbekistán" in _SYSTEM or "Uzbekistan" in _SYSTEM.lower()
+
+    def test_system_prompt_both_beloved_teams_mentioned(self):
+        """_SYSTEM must reference both Panama and Uzbekistan in the same love instruction."""
+        assert ("Panamá" in _SYSTEM or "Panama" in _SYSTEM.lower()) and (
+            "Uzbekistán" in _SYSTEM or "Uzbekistan" in _SYSTEM.lower()
+        )
+

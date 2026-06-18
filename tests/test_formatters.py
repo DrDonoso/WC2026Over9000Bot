@@ -4,7 +4,42 @@ from __future__ import annotations
 
 import pytest
 
-from worldcup_bot.bot.formatters import bold_person_names, render_endirecto
+from worldcup_bot.bot.formatters import bold_person_names, render_endirecto, team_flag
+
+
+class TestTeamFlagBelovedTeams:
+    """team_flag must append ❤️ for BELOVED_TEAMS (PAN, UZB) and only them."""
+
+    def test_pan_uppercase_gets_heart(self):
+        result = team_flag("PAN")
+        assert "🇵🇦" in result
+        assert result.endswith("❤️")
+
+    def test_uzb_uppercase_gets_heart(self):
+        result = team_flag("UZB")
+        assert "🇺🇿" in result
+        assert result.endswith("❤️")
+
+    def test_pan_lowercase_gets_heart(self):
+        result = team_flag("pan")
+        assert "🇵🇦" in result
+        assert result.endswith("❤️")
+
+    def test_uzb_lowercase_gets_heart(self):
+        result = team_flag("uzb")
+        assert "🇺🇿" in result
+        assert result.endswith("❤️")
+
+    def test_esp_has_no_heart(self):
+        result = team_flag("ESP")
+        assert "❤️" not in result
+        assert result != ""
+
+    def test_unknown_tla_returns_empty_no_heart(self):
+        result = team_flag("ZZZ")
+        assert result == ""
+        assert "❤️" not in result
+
 
 
 class TestBoldPersonNames:

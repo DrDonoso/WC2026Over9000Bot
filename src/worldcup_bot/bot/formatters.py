@@ -45,16 +45,25 @@ def bold_person_names(text: str, names: Iterable[str]) -> str:
 
 # ── flag rendering ────────────────────────────────────────────────────────────
 
+BELOVED_TEAMS = {"PAN", "UZB"}  # Panamá, Uzbekistán — el cariño del bot
+_LOVE = "❤️"
+
 
 def team_flag(tla: str) -> str:
-    """Return flag emoji for a TLA, empty string if unknown."""
+    """Return flag emoji for a TLA, empty string if unknown.
+
+    For beloved teams (BELOVED_TEAMS) the heart emoji is appended to the flag.
+    """
     iso = tla_to_iso(tla)
     if not iso:
         return ""
     try:
-        return flag_lib.flag(iso)
+        f = flag_lib.flag(iso)
     except Exception:
         return ""
+    if f and tla.strip().upper() in BELOVED_TEAMS:
+        return f + _LOVE
+    return f
 
 
 def team_label(tla: str, name: str | None = None) -> str:
