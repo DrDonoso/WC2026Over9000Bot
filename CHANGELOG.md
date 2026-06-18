@@ -5,6 +5,13 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260618.03] - 2026-06-18
+
+- feat: /hoy now shows the first 9am→9am football-day window (from today forward) that still has a non-finished match, so calling it at e.g. 07:00 after the night's games have ended shows the upcoming day's fixtures instead of an empty/finished list
+- feat: when it rolls forward, the header reads "Ya han acabado los partidos de hoy. Estos son los próximos:" and each match shows its date; the normal same-day case is unchanged
+- feat: if there are no upcoming matches in the next two weeks, fall back to today's results, or "No hay partidos programados." when there are none at all
+
+
 ## [20260618.02] - 2026-06-18
 
 - fix: persist the set of matches already recapped to finished_announced.json so the "🏁 Final" dedup survives container restarts (was in-memory only)
