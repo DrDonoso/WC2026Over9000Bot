@@ -1,3 +1,59 @@
+# Decision: /hoy rolls forward to the next jornada when today's matches are all done
+
+**Author:** Kanté (Backend Developer)
+**Date:** 2026-06-18
+**Status:** IMPLEMENTED — 1304 tests green, not yet committed (coordinator verifies first)
+
+---
+
+## Problem
+
+`/hoy` always showed the current 9am→9am football-day window (`offset 0`).  At 07:00 that window is `[yesterday 9am → today 9am]` — last night's matches, all FINISHED.  The user wanted to see the next jornada's upcoming matches, not old results.
+
+---
+
+## Decision
+
+`/hoy` now shows the **first 9am→9am window from today forward that still has a non-finished match**.
+
+### Algorithm
+
+1. Walk `offset in range(0, 15)` (today .. +14 days).
+2. For each offset call `client.get_football_day_matches(tz, offset, h)`.
+3. First window where `any(m.status != "FINISHED")` is `selected`; break immediately.
+4. If no such window found → fall back to `offset 0` as today's finished results.
+5. If `offset 0` is also empty → reply `"No hay partidos programados."`.
+
+### Headers
+
+| Case | Header | Formatter |
+|---|---|---|
+| `selected_offset == 0` | `"⚽️ Partidos de hoy (09:00–09:00):"` | `format_match` (time only) |
+| `selected_offset > 0` | `"⚽️ Ya han acabado los partidos de hoy. Estos son los próximos:"` | `format_match_with_date` (date + time) |
+
+### Error handling
+
+`FootballAPIError` at any loop iteration → reply api-error message and return immediately (same as before).
+
+---
+
+## Why this is safe
+
+- `get_football_day_matches` filters an in-memory cached response from a single `get_all_matches()` call — the loop adds no extra HTTP calls.
+- `format_match_with_date` already existed in `formatters.py`; only the import in `handlers.py` was missing.
+- `cmd_ayer` is unchanged.
+
+---
+
+## Files changed
+
+| File | Change |
+|---|---|
+| `src/worldcup_bot/bot/handlers.py` | Add `format_match_with_date` import; rewrite `cmd_hoy` with rollover loop |
+| `tests/test_handlers.py` | Add `TestCmdHoy` (7 tests) covering normal day, 07:00 rollover, empty offset 0, no-upcoming fallback, truly empty, API error, loop-stops-early |
+
+---
+
 # Decision: per-source `seen` + single `announced` + pure `reconcile()` fixes goal-detector flip-flop
 
 **Author:** Kanté (Backend Developer)  
