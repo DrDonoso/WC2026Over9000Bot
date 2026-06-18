@@ -5,6 +5,17 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260618.06] - 2026-06-18
+
+- fix: add a Czech Republic ↔ Czechia team alias so goal clips posted as "Czech Republic ..." match the football-data "Czechia" fixture and get the "Ver gol" button
+- fix: /endirecto now reuses the shared Reddit scanner (the one the goal poller uses) instead of creating a throwaway one, and finds the match thread via the reliable /new/ listing instead of the rate-limited search endpoint
+- fix: cache the r/soccer thread listing (30s) and thread bodies (90s) on the scanner and degrade gracefully on HTTP 429, so /endirecto reuses the goal poller's recent fetches and shows the inline keyboard instead of falling back to a bare score line
+- BELOVED_TEAMS env-configurable (default: PAN,UZB,CUW)
+- Curaçao (CUW) added to beloved teams
+- Pure module pattern in formatters.py
+- All 1329 tests green, verified end-to-end
+
+
 ## [20260618.05] - 2026-06-18
 
 - feat: add Curaçao 🇨🇼 (TLA CUW) to the teams that get a ❤️ next to their flag, alongside Panama and Uzbekistan
