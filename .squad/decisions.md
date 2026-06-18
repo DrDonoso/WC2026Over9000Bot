@@ -2002,3 +2002,162 @@ This seeds both currently-FINISHED matches AND stale IN_PLAY/PAUSED matches whos
 
 **Test count: 1297 (up from 1283)**
 
+---
+
+# Decision: BELOVED_TEAMS env-configurable + Curaçao (CUW)
+
+**Author:** Kanté (Backend Developer)
+**Date:** 2026-06-18
+**Status:** IMPLEMENTED — 1329 tests green, not yet committed (coordinator verifies first)
+
+---
+
+## Problem
+
+David wanted to add Curaçao 🇨🇼 to the bot's beloved teams AND make the full list
+configurable at runtime via an environment variable, without importing `config` into
+the pure `formatters.py` module.
+
+---
+
+## Decision
+
+### BELOVED_TEAMS now env-configurable
+
+```
+BELOVED_TEAMS=PAN,UZB,CUW   # default; override via env at startup
+```
+
+`config.py` gains:
+- `_parse_tla_list(raw)` helper: split on comma, strip, uppercase, drop empties → `tuple[str, ...]`
+- `Settings.beloved_teams: tuple[str, ...] = ("PAN", "UZB", "CUW")`
+- `load_settings()` reads `os.getenv("BELOVED_TEAMS", "PAN,UZB,CUW")` through the parser
+
+### formatters.py: configurable default + setter
+
+```python
+# src/worldcup_bot/bot/formatters.py
+BELOVED_TEAMS: set[str] = {"PAN", "UZB", "CUW"}   # works even before setter runs
+_LOVE = "❤️"
+
+def set_beloved_teams(tlas) -> None:
+    global BELOVED_TEAMS
+    BELOVED_TEAMS = {t.strip().upper() for t in tlas if t and t.strip()}
+```
+
+`team_flag` is unchanged (still checks module global). The module stays **pure**
+(no `config` import) — the coupling is one-way: `__main__` pushes the list into
+`formatters` at startup.
+
+### __main__.py: apply at startup
+
+```python
+def build_app(settings: Settings) -> Application:
+    from worldcup_bot.bot import formatters
+    formatters.set_beloved_teams(settings.beloved_teams)
+    ...
+```
+
+Called once before any handler or job runs, so all renderers see the configured list.
+
+### daily_update.py: Curaçao added
+
+Updated "cariño especial" instruction in `_SYSTEM`:
+
+> "Cariño especial: Panamá 🇵🇦, Uzbekistán 🇺🇿 y Curaçao 🇨🇼 son las selecciones
+> favoritas de esta porra. Siempre que las menciones, muéstrales un poco de amor y
+> ánimo (con naturalidad, sin pasarte ni romper el formato): un emoji de corazón,
+> una palabra de apoyo o un guiño cariñoso."
+
+---
+
+## Files changed
+
+| File | Change |
+|---|---|
+| `src/worldcup_bot/config.py` | `_parse_tla_list` helper + `beloved_teams` field + `load_settings` parse |
+| `src/worldcup_bot/bot/formatters.py` | Default includes CUW; `set_beloved_teams` setter added |
+| `src/worldcup_bot/__main__.py` | `build_app` calls `formatters.set_beloved_teams(settings.beloved_teams)` |
+| `src/worldcup_bot/ai/daily_update.py` | "cariño especial" line extended to name Curaçao |
+| `tests/test_config.py` | 6 new tests (default + env parse + trim + empties) |
+| `tests/test_formatters.py` | CUW tests + `TestSetBelovedTeams` (5 tests) |
+| `tests/test_ai.py` | 2 new tests (Curaçao mention + all-three check) |
+| `tests/test_handlers.py` | 1 new test (spy on `set_beloved_teams` called from `build_app`) |
+
+---
+
+## Key facts
+
+- Curaçao football-data TLA: **CUW** (ISO CW → 🇨🇼). "CUR" maps to nothing.
+- Default beloved set: `{"PAN", "UZB", "CUW"}`.
+- `formatters.py` remains pure — never imports `api/` or `porra/` or `config/`.
+- `set_beloved_teams` is test-isolation-safe: tests teardown by restoring the default.
+- Test count: 1313 → **1329** (+16 tests).
+
+---
+
+# Decision: BELOVED_TEAMS Env Var — Configurable Favourite Teams
+
+**Requested by:** David (@DrDonoso)  
+**Assigned to:** Maldini (DevOps)  
+**Date:** 2026-06-18T13:04:17Z  
+**Status:** ✅ Resolved
+
+---
+
+## Context
+
+The bot displays a ❤️ next to favourite teams' flags in all outputs (standings, match previews, daily updates). The list was hardcoded in code; it is now configurable via the `BELOVED_TEAMS` environment variable (comma-separated football-data TLAs).
+
+---
+
+## Changes
+
+### 1. `docker-compose.yml` (Production)
+Added to `worldcup-bot` service `environment:` block (right after `RICH_IMAGE_HOUR`):
+```yaml
+# --- Selecciones 'favoritas' (❤️ junto a la bandera) — TLAs separadas por comas ---
+BELOVED_TEAMS: "${BELOVED_TEAMS:-PAN,UZB,CUW}"
+```
+
+### 2. `docker-compose.local.yml` (Local Development)
+Added to `worldcup-bot` service `environment:` block (same position for consistency):
+```yaml
+# --- Selecciones 'favoritas' (❤️ junto a la bandera) — TLAs separadas por comas ---
+BELOVED_TEAMS: "${BELOVED_TEAMS:-PAN,UZB,CUW}"
+```
+
+### 3. `.env.example`
+Added:
+```bash
+# Optional — Beloved teams (comma-separated football-data TLAs).
+# The bot displays a ❤️ next to these teams' flags in all outputs (standings, match previews, etc).
+# Default: Panamá (PAN), Uzbekistán (UZB), Curaçao (CUW).
+# BELOVED_TEAMS=PAN,UZB,CUW
+```
+
+---
+
+## Validation
+
+Both compose files validated successfully:
+- `docker compose -f docker-compose.yml config -q` → **exit 0** ✓
+- `docker compose -f docker-compose.local.yml config -q` → **exit 0** ✓
+
+---
+
+## Next Steps
+
+**Kanté** (Code owner) to:
+1. Update `config.py` to read `BELOVED_TEAMS` from environment with safe CSV parsing.
+2. Default to `"PAN,UZB,CUW"` (Panamá, Uzbekistán, Curaçao).
+3. Consume the parsed list in `formatters.py::team_flag()` to render ❤️ suffix.
+
+---
+
+## Notes
+
+- **Style consistency:** Variable naming, env-var wiring, and `.env.example` comment format mirror existing patterns (e.g., `OPENAI_IMAGE_MODEL`, `RICH_IMAGE_HOUR`).
+- **No code changes:** This decision is **DevOps-only**; no `src/**` or `config.py` modifications.
+- **Defaults:** The three default favourite teams (Panamá, Uzbekistán, Curaçao) reflect the bot's origin and heart. Users can override via `BELOVED_TEAMS=ARG,BRA,URU` (or any comma-separated TLA list) when deploying.
+
