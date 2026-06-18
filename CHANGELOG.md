@@ -5,6 +5,13 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260618.02] - 2026-06-18
+
+- fix: persist the set of matches already recapped to finished_announced.json so the "🏁 Final" dedup survives container restarts (was in-memory only)
+- fix: on startup, seed as already-handled any match that is FINISHED OR whose kickoff was more than 4h ago, so a match that ended hours ago but still shows IN_PLAY in football-data (status lag) never fires a late recap when it finally flips to FINISHED
+- fix: persist immediately after each recap send so a crash mid-batch can't replay it
+
+
 ## [20260618] - 2026-06-18
 
 - fix: give each goal detector (Reddit match thread and football-data) its own private last-seen score while sharing a single announced score, via a new pure reconcile() function
