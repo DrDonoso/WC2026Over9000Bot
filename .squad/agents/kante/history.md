@@ -86,6 +86,30 @@ Archived to history-archive.md. 5 iterations: model-driven escalation, hybrid mu
 5. **Two-level file_id cache:** Per-goal + per-url cache layer
 6. **asyncio.to_thread:** Correct pattern for sync calls from async context
 
+## Session 2026-06-18: Czechia Team Alias Fix (live bug, clip-finder)
+
+**Problem:** "Ver gol" never appeared for Czechia 1-0 South Africa (Sadílek 6').
+Clip existed on r/soccer: `"Czech Republic [1] - 0 South Africa - M. Sadílek 6'"` → `https://streamin.link/v/9801698f`.
+`find_goal_clip` returned `None` because `_teams_match("Czech Republic", "Czechia")` was `False`.
+
+**Root cause:** `WC_TEAM_ALIASES` in `scanner.py` had no Czech Republic↔Czechia entry.
+football-data.org canonical name = `"Czechia"`; r/soccer / ESPN clip titles use `"Czech Republic"`.
+
+**Fix:** Added to `WC_TEAM_ALIASES`:
+```python
+"czech republic": "czechia",
+"czech rep": "czechia",   # covers "Czech Rep" and "Czech Rep." (dot stripped before lookup)
+```
+
+**Tests added (7):**
+- `TestCzechiaAlias` × 5 in `test_reddit_scanner.py` (normalize equality, both-order teams_match)
+- `TestMatchPost.test_czech_republic_clip_title_matches_czechia_fixture`
+- `TestFindGoalClip.test_czechia_czech_republic_clip_title_integration` (exact live clip + streamin URL)
+
+**Key learning:** r/soccer and ESPN clip titles use the old name "Czech Republic" while football-data's REST API normalizes to "Czechia". Same class of bug as D.R. Congo↔Congo DR — requires explicit alias in WC_TEAM_ALIASES rather than relying on fuzzy matching (SequenceMatcher ratio "czech republic" vs "czechia" ≈ 0.67 < 0.80 threshold).
+
+---
+
 ## Test Count History
 
 - 1135 (rich-image, kante-29)
@@ -94,4 +118,54 @@ Archived to history-archive.md. 5 iterations: model-driven escalation, hybrid mu
 - 1163 (+ clip-finder merge, kante-34)
 - 1205 (+ /endirecto enrichment, kante-33)
 - 1248 (+ /endirecto buttons, kante-32)
-- **1267** (+ streamff + thread goals, kante-36)
+- 1267 (+ streamff + thread goals, kante-36)
+- 1313 (+ beloved teams ❤️, 2026-06-18)
+- 1336 (+ Czechia alias fix, 2026-06-18)
+- **1357** (+ shared scanner + TTL cache + /endirecto 429 fix, 2026-06-18)
+
+---
+
+## Session 2026-06-18: /endirecto 429 Fix — Shared Scanner + TTL Cache (kante-endirecto-429)
+
+**Problem diagnosed live:** `/endirecto` showed NO inline keyboard in prod.
+- `cmd_en_directo` created a FRESH `RedditMatchScanner` per call → hit Reddit cold (no cache).
+- `find_match_thread` uses `old.reddit.com/r/soccer/search` → Reddit returned HTTP 429 (Too Many Requests) → returned `None` → fell back to plain `format_match` (score only, no keyboard).
+- Concurrent goal-poller (25s), clip-finder, AND on-demand `/endirecto` all hitting Reddit independently → exceeded rate limit.
+
+**Fix — three changes:**
+
+### 1. `src/worldcup_bot/reddit/scanner.py` — TTL cache (30s/90s)
+
+Added module-level TTL constants:
+```python
+_MATCH_THREADS_TTL = 30   # seconds
+_THREAD_BODY_TTL   = 90   # seconds per permalink
+```
+Added per-instance cache fields: `_match_threads_cache` (tuple of timestamp + list) and `_thread_body_cache` (dict permalink → timestamp + body).
+
+**`get_match_threads()`:** Returns cached result if age < 30s; on any exception (including 429) returns stale cache if available, else `[]`. Never raises.
+
+**`get_thread_body(permalink)`:** Returns cached result if age < 90s; on any exception returns stale cache if available, else `""`. Never raises.
+
+**New method `find_thread_permalink(home_name, away_name)`:** Scans the *cached* `get_match_threads()` result using `_parse_thread_teams` + `_teams_match` (both orderings). Uses the reliable `/new/` listing instead of the 429-prone `/search` endpoint.
+
+### 2. `src/worldcup_bot/bot/handlers.py` — shared scanner + new lookup order
+
+`cmd_en_directo` now:
+1. Lazy-inits from `context.bot_data.get("reddit_scanner")` (same instance as goal/clip jobs).
+2. Tries `scanner.find_thread_permalink(...)` **first** (cached, no new Reddit hit).
+3. Falls back to `scanner.find_match_thread(...)` only if `None`.
+4. Goal poller's 25s ticks keep the cache warm → `/endirecto` reuses those fetches → no 429.
+
+### 3. Tests (+21)
+
+- **`TestFindThreadPermalink` (6):** Czechia↔South Africa, reversed order, Post Match excluded, empty list, cache reuse.
+- **`TestScannerMatchThreadsCache` (4):** Second call within TTL → one fetch; past TTL → refetch; 429 with cache → stale returned; 429 no cache → `[]`.
+- **`TestScannerThreadBodyCache` (5):** Same pattern per-permalink; multiple permalinks independent.
+- **`TestCmdEnDirectoSharedScanner` (6):** Reuses existing scanner, lazy-init stores in bot_data, `find_thread_permalink` produces keyboard (3+ buttons), falls back to `find_match_thread`, both-None → `format_match`, never raises.
+
+**Key learnings:**
+- Reddit rate-limits datacenter IPs aggressively; two callers (goal poller + /endirecto) each creating fresh sessions is enough to 429.
+- The `/new/` listing endpoint is less 429-prone than the `/search` endpoint and is already cached by the goal poller — ideal primary source for `/endirecto`.
+- The fix requires only a shared scanner instance (bot_data) + per-instance TTL caches; no external cache store needed.
+
