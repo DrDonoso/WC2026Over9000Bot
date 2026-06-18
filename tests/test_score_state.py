@@ -1,4 +1,4 @@
-"""Tests for reddit.score_state — GoalDelta, diff_scores, load_scores, save_scores."""
+"""Tests for reddit.score_state — GoalDelta, diff_scores, load_scores, save_scores, reconcile."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import pytest
 
 from worldcup_bot.api.models import Match
-from worldcup_bot.reddit.score_state import GoalDelta, diff_scores, load_scores, save_scores
+from worldcup_bot.reddit.score_state import GoalDelta, diff_scores, load_scores, reconcile, save_scores
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -153,3 +153,131 @@ class TestLoadSaveScores:
         }
         save_scores(path, data)
         assert load_scores(path) == data
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# reconcile — per-source deduplication (the flip-flop fix)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _s(home: int, away: int) -> dict:
+    return {"home": home, "away": away}
+
+
+class TestReconcile:
+    # ── first-seen (seed) ──────────────────────────────────────────────────────
+
+    def test_first_seen_no_announced_seeds_both(self):
+        """reconcile(None, None, 2, 2) → no deltas, both seen and announced seeded to 2-2."""
+        deltas, new_seen, new_ann = reconcile(None, None, 2, 2)
+        assert deltas == []
+        assert new_seen == _s(2, 2)
+        assert new_ann == _s(2, 2)
+
+    def test_first_seen_with_announced_seeds_seen_keeps_announced(self):
+        """First-seen for this source while announced already exists → no deltas, announced unchanged."""
+        deltas, new_seen, new_ann = reconcile(None, _s(3, 2), 3, 2)
+        assert deltas == []
+        assert new_seen == _s(3, 2)
+        assert new_ann == _s(3, 2)
+
+    def test_first_seen_api_lagging_seeds_without_disallowed(self):
+        """reconcile(None, {4,2}, 3, 2) — api first tick is below announced → seed, no disallowed."""
+        deltas, new_seen, new_ann = reconcile(None, _s(4, 2), 3, 2)
+        assert deltas == []
+        assert new_seen == _s(3, 2)
+        assert new_ann == _s(4, 2)  # announced unchanged
+
+    # ── no change ─────────────────────────────────────────────────────────────
+
+    def test_no_change_returns_empty(self):
+        """Same score as seen → nothing to announce."""
+        deltas, new_seen, new_ann = reconcile(_s(4, 2), _s(4, 2), 4, 2)
+        assert deltas == []
+        assert new_seen == _s(4, 2)
+        assert new_ann == _s(4, 2)
+
+    # ── thread path: step-by-step goals ───────────────────────────────────────
+
+    def test_thread_home_goal_from_seeded_state(self):
+        """seen=2-2, ann=2-2, new=3-2 → 1 home goal, announced→3-2."""
+        deltas, new_seen, new_ann = reconcile(_s(2, 2), _s(2, 2), 3, 2)
+        assert len(deltas) == 1
+        assert deltas[0].kind == "goal"
+        assert deltas[0].side == "home"
+        assert deltas[0].new_home == 3
+        assert deltas[0].new_away == 2
+        assert new_seen == _s(3, 2)
+        assert new_ann == _s(3, 2)
+
+    def test_thread_second_goal(self):
+        """seen=3-2, ann=3-2, new=4-2 → 1 home goal, announced→4-2."""
+        deltas, new_seen, new_ann = reconcile(_s(3, 2), _s(3, 2), 4, 2)
+        assert len(deltas) == 1
+        assert deltas[0].kind == "goal"
+        assert deltas[0].side == "home"
+        assert new_ann == _s(4, 2)
+
+    # ── multi-goal jump ────────────────────────────────────────────────────────
+
+    def test_multi_goal_jump(self):
+        """seen=2-2, ann=2-2, new=4-2 → 2 home goals, announced→4-2."""
+        deltas, new_seen, new_ann = reconcile(_s(2, 2), _s(2, 2), 4, 2)
+        goal_deltas = [d for d in deltas if d.kind == "goal" and d.side == "home"]
+        assert len(goal_deltas) == 2
+        assert new_ann == _s(4, 2)
+
+    # ── API lag — THE BUG FIX ─────────────────────────────────────────────────
+
+    def test_api_lag_does_not_produce_disallowed(self):
+        """THE BUG: api seen=2-2, announced=4-2 (thread already told users 4-2), api reports 3-2.
+        Must return [] — pure lag, NOT a disallowed. announced stays 4-2."""
+        deltas, new_seen, new_ann = reconcile(_s(2, 2), _s(4, 2), 3, 2)
+        assert deltas == []
+        assert new_seen == _s(3, 2)
+        assert new_ann == _s(4, 2)  # announced UNCHANGED — no false disallowed
+
+    def test_api_lag_catchup_no_duplicate(self):
+        """After lag-seed (seen=3-2, ann=4-2), api catches up to 4-2 → still no announcement."""
+        deltas, new_seen, new_ann = reconcile(_s(3, 2), _s(4, 2), 4, 2)
+        assert deltas == []
+        assert new_seen == _s(4, 2)
+        assert new_ann == _s(4, 2)  # already announced, no duplicate
+
+    # ── real VAR on the same source ───────────────────────────────────────────
+
+    def test_real_var_same_source(self):
+        """seen=4-2, ann=4-2, new=3-2 → 1 home disallowed, announced→3-2."""
+        deltas, new_seen, new_ann = reconcile(_s(4, 2), _s(4, 2), 3, 2)
+        assert len(deltas) == 1
+        assert deltas[0].kind == "disallowed"
+        assert deltas[0].side == "home"
+        assert deltas[0].new_home == 3
+        assert deltas[0].new_away == 2
+        assert new_seen == _s(3, 2)
+        assert new_ann == _s(3, 2)
+
+    def test_other_source_catching_up_after_var_no_double(self):
+        """After VAR (ann=3-2), other source was at seen=4-2 and now reports 3-2 → no double disallowed."""
+        # ann=3-2 (already corrected by first source), other source's seen still 4-2
+        deltas, new_seen, new_ann = reconcile(_s(4, 2), _s(3, 2), 3, 2)
+        assert deltas == []
+        assert new_seen == _s(3, 2)
+        assert new_ann == _s(3, 2)
+
+    # ── away goal ─────────────────────────────────────────────────────────────
+
+    def test_away_goal(self):
+        """seen=1-0, ann=1-0, new=1-1 → 1 away goal."""
+        deltas, _, new_ann = reconcile(_s(1, 0), _s(1, 0), 1, 1)
+        assert len(deltas) == 1
+        assert deltas[0].kind == "goal"
+        assert deltas[0].side == "away"
+        assert new_ann == _s(1, 1)
+
+    # ── scoring_team placeholder ───────────────────────────────────────────────
+
+    def test_goal_delta_scoring_team_empty_for_caller_to_fill(self):
+        """GoalDelta.scoring_team from reconcile is '' — callers are responsible for filling it."""
+        deltas, _, _ = reconcile(_s(0, 0), _s(0, 0), 1, 0)
+        assert deltas[0].scoring_team == ""

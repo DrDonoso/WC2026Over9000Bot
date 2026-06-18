@@ -60,7 +60,7 @@ from worldcup_bot.reddit.notifier import (
 )
 from worldcup_bot.reddit.parser import parse_goal_events
 from worldcup_bot.reddit.scanner import RedditMatchScanner, _teams_match
-from worldcup_bot.reddit.score_state import GoalDelta, diff_scores, load_scores, save_scores
+from worldcup_bot.reddit.score_state import GoalDelta, diff_scores, load_scores, reconcile, save_scores
 from worldcup_bot.reddit.clip_finder import find_goal_clip
 from worldcup_bot.reddit.clip_store import (
     add_entry as _cs_add_entry,
@@ -331,27 +331,20 @@ async def _process_goal_delta(
 async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Repeating job: detect new goals via football-data score changes.
 
-    Detection strategy (score-based, block 1):
-    1. Use shared in-memory score state from bot_data["live_scores"] (loaded at startup
-       by build_app; setdefault falls back to disk for robustness / test isolation).
-    2. Get all matches from football-data.org (cached).
-    3. Relevant matches: IN_PLAY / PAUSED, OR FINISHED that we were tracking.
-    4. First-seen match → SEED (store current score, notify nothing).
-    5. Subsequent tick: diff against stored score.
-       Score increase → goal notification (enrich via Reddit + OpenAI/parse fallback).
-       Score decrease → disallowed-goal notification.
-    6. Persist updated state.
-
-    Night-silent: 00:00–08:59 local → disable_notification=True (still sends).
+    Uses reconcile() with per-source "seen" so that a lagging source's catch-up
+    never produces a false disallowed, and only the first source to detect a score
+    change announces it.
     """
     try:
         settings: Settings = context.bot_data["settings"]
         state_path = f"{settings.state_dir}/live_scores.json"
 
-        # Use the shared in-memory dict; setdefault is a safety net so tests that
-        # pre-populate bot_data["live_scores"] work, while also falling back to disk
-        # if the key is somehow absent after build_app startup.
+        # Shared announced state — persisted across restarts.
         scores: dict = context.bot_data.setdefault("live_scores", load_scores(state_path))
+
+        # Per-source seen — in-memory only (rebuilt by re-seeding on restart).
+        seen_scores = context.bot_data.setdefault("seen_scores", {"api": {}, "thread": {}})
+        seen_api: dict = seen_scores["api"]
 
         if context.bot_data.get("reddit_scanner") is None:
             context.bot_data["reddit_scanner"] = RedditMatchScanner(
@@ -384,31 +377,54 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         for match in relevant:
             match_key = str(match.id)
-            stored = scores.get(match_key)
+            curr_home = int(match.home_score) if match.home_score is not None else 0
+            curr_away = int(match.away_score) if match.away_score is not None else 0
 
-            deltas = diff_scores(stored, match)
+            stored = scores.get(match_key)
+            ann_homeaway = (
+                {"home": int(stored["home"]), "away": int(stored["away"])}
+                if stored is not None else None
+            )
+
+            source_seen = seen_api.get(match_key)
+            deltas, new_seen, new_ann = reconcile(source_seen, ann_homeaway, curr_home, curr_away)
+
+            # Always advance this source's seen baseline.
+            seen_api[match_key] = new_seen
 
             if stored is None:
+                # First-seen by any source: seed live_scores entry.
                 log.info(
                     "poll_goals_job: seeding match %d (%s vs %s) at %d-%d",
                     match.id, match.home_name, match.away_name,
-                    match.home_score or 0, match.away_score or 0,
+                    new_ann["home"], new_ann["away"],
                 )
                 scores[match_key] = {
-                    "home": match.home_score or 0,
-                    "away": match.away_score or 0,
+                    "home": new_ann["home"],
+                    "away": new_ann["away"],
                     "status": match.status,
                 }
                 changed = True
                 continue
 
             if not deltas:
-                if scores[match_key].get("status") != match.status:
+                # No goals/disallowed to announce, but status or lag-resolved score may change.
+                announced_changed = (
+                    new_ann["home"] != stored["home"] or new_ann["away"] != stored["away"]
+                )
+                status_changed = stored.get("status") != match.status
+                if announced_changed or status_changed:
+                    scores[match_key]["home"] = new_ann["home"]
+                    scores[match_key]["away"] = new_ann["away"]
                     scores[match_key]["status"] = match.status
                     changed = True
                 continue
 
+            # Process deltas — fill in scoring_team before passing to handler.
             for delta in deltas:
+                delta.scoring_team = (
+                    match.home_name if delta.side == "home" else match.away_name
+                )
                 try:
                     await _process_goal_delta(
                         delta, match, scanner, settings, context, silent
@@ -420,8 +436,8 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     )
 
             scores[match_key] = {
-                "home": match.home_score or 0,
-                "away": match.away_score or 0,
+                "home": new_ann["home"],
+                "away": new_ann["away"],
                 "status": match.status,
             }
             changed = True
@@ -439,23 +455,26 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Repeating job: detect goals from Reddit match thread BEFORE football-data reports them.
 
-    Runs every 25 seconds.  Shares bot_data["live_scores"] with poll_goals_job so
-    that when football-data later reports the same score, diff_scores returns []
-    and no duplicate notification is sent.
+    Runs every 25 seconds.  Uses reconcile() with a per-source "thread" seen so that:
+    - The thread's early detection works correctly when it's ahead of football-data.
+    - A lagging football-data report never causes a false "disallowed" because the thread
+      was already ahead.
+    - A REAL VAR (thread's own score drops) triggers a disallowed message.
+    - Thread scorer is taken directly from the GoalEvent — no OpenAI call needed.
 
-    Strategy:
-    - Only notifies for matches already seeded by poll_goals_job (key present in
-      shared scores) — avoids notifying a backlog of old goals on startup.
-    - Only notifies INCREASES strictly above the stored score.
-    - Does NOT handle disallowed goals (leave those to the authoritative football-data poll).
-    - Passes the thread event's own scorer directly (no OpenAI call → speed win).
+    Only processes matches already seeded in live_scores by poll_goals_job (avoids
+    replaying historical goals on startup).
     """
     try:
         settings: Settings = context.bot_data["settings"]
         state_path = f"{settings.state_dir}/live_scores.json"
 
-        # Shared dict — must already be populated by build_app / poll_goals_job setdefault
+        # Shared announced state.
         scores: dict = context.bot_data["live_scores"]
+
+        # Per-source thread seen — in-memory only.
+        seen_scores = context.bot_data.setdefault("seen_scores", {"api": {}, "thread": {}})
+        seen_thread: dict = seen_scores["thread"]
 
         if context.bot_data.get("reddit_scanner") is None:
             context.bot_data["reddit_scanner"] = RedditMatchScanner(
@@ -483,10 +502,9 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.exception("poll_thread_goals_job: scan_live_matches failed: %s", exc)
             return
 
-        # Build a lookup from (home_tla, away_tla) → Match for quick matching
-        match_by_tla: dict[tuple[str, str], object] = {}
-        for m in live_matches:
-            match_by_tla[(m.home_tla, m.away_tla)] = m
+        match_by_tla: dict[tuple[str, str], object] = {
+            (m.home_tla, m.away_tla): m for m in live_matches
+        }
 
         changed = False
 
@@ -502,8 +520,9 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
                 key = str(match.id)
 
-                # Skip unseeded matches — let poll_goals_job seed first to avoid startup backlog
-                if key not in scores:
+                # Only process matches already seeded by poll_goals_job.
+                stored = scores.get(key)
+                if stored is None:
                     log.debug(
                         "poll_thread_goals_job: match %d not yet seeded, skipping", match.id
                     )
@@ -513,59 +532,71 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if not events:
                     continue
 
-                # Thread's current score: max scores seen across all events
                 thread_home = max((e.home_score for e in events), default=0)
                 thread_away = max((e.away_score for e in events), default=0)
 
-                stored_home = int(scores[key].get("home", 0))
-                stored_away = int(scores[key].get("away", 0))
+                ann_homeaway = {
+                    "home": int(stored["home"]),
+                    "away": int(stored["away"]),
+                }
+                source_seen = seen_thread.get(key)
 
-                # Nothing new to notify
-                if thread_home <= stored_home and thread_away <= stored_away:
+                deltas, new_seen, new_ann = reconcile(
+                    source_seen, ann_homeaway, thread_home, thread_away
+                )
+
+                # Always advance this source's seen baseline.
+                seen_thread[key] = new_seen
+
+                if not deltas:
+                    # Lag catch-up may update new_ann (stays equal to ann in lag branch),
+                    # so no live_scores change needed.
                     continue
 
                 sorted_events = sorted(events, key=lambda e: e.minute_sort)
 
-                # Collect all goals to notify (home + away sides), then sort by minute
                 goals_to_notify: list[dict] = []
 
-                for target in range(stored_home + 1, thread_home + 1):
-                    event = next(
-                        (
-                            e for e in sorted_events
-                            if e.home_score == target
-                            and _teams_match(e.scoring_team, match.home_name)
-                        ),
-                        None,
-                    )
-                    goals_to_notify.append({
-                        "scoring_team": match.home_name,
-                        "new_home": target,
-                        "new_away": event.away_score if event else stored_away,
-                        "scorer": event.scorer if event else None,
-                        "minute": event.minute_text if event else None,
-                        "minute_sort": event.minute_sort if event else float("inf"),
-                    })
+                # Build per-goal notifications using intermediate target scores so each
+                # notification shows the correct running score (e.g. 3-2, then 4-2).
+                if new_ann["home"] > ann_homeaway["home"]:
+                    for target in range(ann_homeaway["home"] + 1, new_ann["home"] + 1):
+                        event = next(
+                            (
+                                e for e in sorted_events
+                                if e.home_score == target
+                                and _teams_match(e.scoring_team, match.home_name)
+                            ),
+                            None,
+                        )
+                        goals_to_notify.append({
+                            "scoring_team": match.home_name,
+                            "new_home": target,
+                            "new_away": event.away_score if event else ann_homeaway["away"],
+                            "scorer": event.scorer if event else None,
+                            "minute": event.minute_text if event else None,
+                            "minute_sort": event.minute_sort if event else float("inf"),
+                        })
 
-                for target in range(stored_away + 1, thread_away + 1):
-                    event = next(
-                        (
-                            e for e in sorted_events
-                            if e.away_score == target
-                            and _teams_match(e.scoring_team, match.away_name)
-                        ),
-                        None,
-                    )
-                    goals_to_notify.append({
-                        "scoring_team": match.away_name,
-                        "new_home": event.home_score if event else stored_home,
-                        "new_away": target,
-                        "scorer": event.scorer if event else None,
-                        "minute": event.minute_text if event else None,
-                        "minute_sort": event.minute_sort if event else float("inf"),
-                    })
+                if new_ann["away"] > ann_homeaway["away"]:
+                    for target in range(ann_homeaway["away"] + 1, new_ann["away"] + 1):
+                        event = next(
+                            (
+                                e for e in sorted_events
+                                if e.away_score == target
+                                and _teams_match(e.scoring_team, match.away_name)
+                            ),
+                            None,
+                        )
+                        goals_to_notify.append({
+                            "scoring_team": match.away_name,
+                            "new_home": event.home_score if event else ann_homeaway["home"],
+                            "new_away": target,
+                            "scorer": event.scorer if event else None,
+                            "minute": event.minute_text if event else None,
+                            "minute_sort": event.minute_sort if event else float("inf"),
+                        })
 
-                # Notify in ascending minute order
                 goals_to_notify.sort(key=lambda g: g["minute_sort"])
 
                 for g in goals_to_notify:
@@ -587,17 +618,46 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                             match.id, exc,
                         )
 
-                # Update shared score state to prevent double-notification from football-data
-                scores[key]["home"] = thread_home
-                scores[key]["away"] = thread_away
+                # Handle disallowed deltas (thread's own score dropped = real VAR).
+                for delta in (d for d in deltas if d.kind == "disallowed"):
+                    try:
+                        text = format_disallowed_message(
+                            home_name=match.home_name,
+                            away_name=match.away_name,
+                            home_score=delta.new_home,
+                            away_score=delta.new_away,
+                            home_tla=match.home_tla,
+                            away_tla=match.away_tla,
+                        )
+                        await context.bot.send_message(
+                            chat_id=settings.telegram_group_id,
+                            text=text,
+                            parse_mode="HTML",
+                            disable_notification=silent,
+                        )
+                        log.info(
+                            "poll_thread_goals_job: thread-VAR disallowed for match %d (%s vs %s)",
+                            match.id, match.home_name, match.away_name,
+                        )
+                    except Exception as exc:
+                        log.error(
+                            "poll_thread_goals_job: disallowed notification failed for match %d: %s",
+                            match.id, exc,
+                        )
+
+                # Update shared announced score.
+                scores[key]["home"] = new_ann["home"]
+                scores[key]["away"] = new_ann["away"]
                 changed = True
 
                 log.info(
                     "poll_thread_goals_job: match %d (%s vs %s) thread score %d-%d "
-                    "(was %d-%d), %d goal(s) notified",
+                    "(was %d-%d), %d goal(s) + %d disallowed notified",
                     match.id, match.home_name, match.away_name,
-                    thread_home, thread_away, stored_home, stored_away,
+                    thread_home, thread_away,
+                    ann_homeaway["home"], ann_homeaway["away"],
                     len(goals_to_notify),
+                    sum(1 for d in deltas if d.kind == "disallowed"),
                 )
 
             except Exception as exc:
@@ -946,6 +1006,9 @@ def build_app(settings: Settings) -> Application:
     # share the same in-memory dict for race-free deduplication.
     state_path = f"{settings.state_dir}/live_scores.json"
     app.bot_data["live_scores"] = load_scores(state_path)
+    # Per-source "seen" baselines — in-memory only, rebuilt by re-seeding on restart.
+    # {"api": {match_id: {home, away}}, "thread": {match_id: {home, away}}}
+    app.bot_data["seen_scores"] = {"api": {}, "thread": {}}
     # Load persistent clip-store from disk (restart resilience: 'ready' entries
     # keep working, 'searching' entries resume in poll_goal_clips_job)
     clips_path = f"{settings.state_dir}/goal_clips.json"

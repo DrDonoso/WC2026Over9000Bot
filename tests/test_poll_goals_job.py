@@ -50,11 +50,12 @@ def _make_settings(tmp_path) -> Settings:
     )
 
 
-def _make_context(settings: Settings, scanner=None) -> MagicMock:
+def _make_context(settings: Settings, scanner=None, seen_api: dict | None = None) -> MagicMock:
     ctx = MagicMock()
     ctx.bot_data = {
         "settings": settings,
         "reddit_scanner": scanner,
+        "seen_scores": {"api": seen_api or {}, "thread": {}},
     }
     ctx.bot.send_message = AsyncMock()
     return ctx
@@ -132,7 +133,7 @@ class TestGoalDetection:
     async def test_score_increase_sends_goal_message(self, tmp_path):
         """Stored 0-0, current 1-0 → one goal notification sent."""
         settings = _make_settings(tmp_path)
-        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 0, "away": 0}})
 
         stored_state = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}
         match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
@@ -156,7 +157,7 @@ class TestGoalDetection:
     async def test_goal_message_has_no_keyboard(self, tmp_path):
         """Block 1: goal messages must NOT include a reply_markup."""
         settings = _make_settings(tmp_path)
-        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 0, "away": 0}})
 
         stored_state = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}
         match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
@@ -176,7 +177,7 @@ class TestGoalDetection:
     async def test_state_updated_after_goal(self, tmp_path):
         """After a goal, stored state updated to new score."""
         settings = _make_settings(tmp_path)
-        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 0, "away": 0}})
 
         stored_state = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}
         match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
@@ -197,7 +198,7 @@ class TestGoalDetection:
     async def test_finished_match_in_state_catches_final_goal(self, tmp_path):
         """FINISHED match already in state should trigger goal detection."""
         settings = _make_settings(tmp_path)
-        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 1, "away": 0}})
 
         stored_state = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
         match = _make_match(1, "FINISHED", home_score=2, away_score=0)
@@ -241,7 +242,7 @@ class TestDisallowedGoal:
     async def test_score_decrease_sends_disallowed_message(self, tmp_path):
         """Stored 2-0, current 1-0 → disallowed (VAR) message sent."""
         settings = _make_settings(tmp_path)
-        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 2, "away": 0}})
 
         stored_state = {"1": {"home": 2, "away": 0, "status": "IN_PLAY"}}
         match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
@@ -286,7 +287,7 @@ class TestPersistence:
     @pytest.mark.asyncio
     async def test_save_scores_called_on_goal(self, tmp_path):
         settings = _make_settings(tmp_path)
-        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 0, "away": 0}})
         stored_state = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}
         match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
 
@@ -306,7 +307,7 @@ class TestPersistence:
     async def test_no_changes_save_not_called(self, tmp_path):
         """No state changes → save_scores should NOT be called."""
         settings = _make_settings(tmp_path)
-        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 1, "away": 0}})
 
         stored_state = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
         match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
@@ -351,7 +352,7 @@ class TestClipStoreIntegration:
     async def test_goal_detection_creates_searching_entry(self, tmp_path):
         """After detecting a goal, a clip-store entry with status='searching' is written."""
         settings = _make_settings(tmp_path)
-        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 0, "away": 0}})
         ctx.bot_data["clip_store"] = {}
 
         fake_sent = MagicMock()
@@ -382,7 +383,7 @@ class TestClipStoreIntegration:
     async def test_disallowed_goal_does_not_create_clip_entry(self, tmp_path):
         """A VAR disallowed goal (score decrease) must NOT write a clip-store entry."""
         settings = _make_settings(tmp_path)
-        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 2, "away": 0}})
         ctx.bot_data["clip_store"] = {}
 
         stored_state = {"1": {"home": 2, "away": 0, "status": "IN_PLAY"}}
@@ -410,7 +411,7 @@ class TestSharedState:
     async def test_poll_goals_uses_pre_populated_live_scores(self, tmp_path):
         """When bot_data['live_scores'] is pre-populated (build_app path), poll_goals uses it."""
         settings = _make_settings(tmp_path)
-        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 0, "away": 0}})
 
         # Pre-populate as build_app would
         shared_scores = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}

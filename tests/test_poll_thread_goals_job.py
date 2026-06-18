@@ -93,13 +93,14 @@ def _make_thread_result(
     )
 
 
-def _make_context(settings: Settings, live_scores: dict | None = None) -> MagicMock:
+def _make_context(settings: Settings, live_scores: dict | None = None, seen_thread: dict | None = None) -> MagicMock:
     ctx = MagicMock()
     ctx.bot_data = {
         "settings": settings,
         "reddit_scanner": None,
         "live_scores": live_scores if live_scores is not None else {},
         "clip_store": {},
+        "seen_scores": {"api": {}, "thread": seen_thread or {}},
     }
     ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
     return ctx
@@ -121,7 +122,8 @@ class TestPollThreadGoalsJob:
         match = _make_match(1, "IN_PLAY", home_score=2, away_score=0)
 
         live_scores = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
-        ctx = _make_context(settings, live_scores=live_scores)
+        # Thread was last tracking at 1-0; now sees 2-0 → should notify
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 1, "away": 0}})
 
         event = _make_goal_event(
             scorer="Harry Kane", scoring_team="England",
@@ -162,7 +164,7 @@ class TestPollThreadGoalsJob:
         match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
 
         live_scores = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}
-        ctx = _make_context(settings, live_scores=live_scores)
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 0, "away": 0}})
 
         event = _make_goal_event(
             scorer="Bellingham", scoring_team="England",
@@ -218,7 +220,7 @@ class TestPollThreadGoalsJob:
         match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
 
         live_scores = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
-        ctx = _make_context(settings, live_scores=live_scores)
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 1, "away": 0}})
 
         event = _make_goal_event(scorer="Kane", scoring_team="England", home_score=1, away_score=0)
         result = _make_thread_result("ENG", "SEN", [event])
@@ -266,7 +268,7 @@ class TestDeduplication:
         match = _make_match(1, "IN_PLAY", home_score=2, away_score=0)
 
         live_scores = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
-        ctx = _make_context(settings, live_scores=live_scores)
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 1, "away": 0}})
 
         event = _make_goal_event(scorer="Kane", scoring_team="England", home_score=2, away_score=0)
         result = _make_thread_result("ENG", "SEN", [event])
@@ -300,7 +302,7 @@ class TestDeduplication:
 
         # Shared scores starts at 1-0
         shared_scores = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
-        ctx = _make_context(settings, live_scores=shared_scores)
+        ctx = _make_context(settings, live_scores=shared_scores, seen_thread={"1": {"home": 1, "away": 0}})
 
         event = _make_goal_event(scorer="Kane", scoring_team="England", home_score=2, away_score=0)
         result = _make_thread_result("ENG", "SEN", [event])
@@ -405,3 +407,203 @@ class TestJobRegistration:
         source = inspect.getsource(main_mod.main)
         assert "poll_thread_goals" in source
         assert "poll_thread_goals_job" in source
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Screenshot scenario & reconcile integration (the flip-flop bug)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFlipFlopFix:
+    """Regression tests for the England 4-2 Croatia flip-flop screenshot bug.
+
+    Setup mirrors production reality:
+      - Both sources seeded earlier. api_seen=thread_seen=2-2, announced=2-2.
+      - api detected England's 3rd goal → announced updated to 3-2, api_seen=3-2.
+      - thread_seen still at 2-2 (thread was behind when api moved).
+      - thread now sees 4-2 (Rashford 85') → ONE goal notification.
+      - api keeps reporting 3-2 (lagging) → ZERO disallowed.
+      - api eventually catches up to 4-2 → ZERO duplicate goal.
+    """
+
+    @pytest.mark.asyncio
+    async def test_screenshot_scenario_one_goal_zero_disallowed(self, tmp_path):
+        """THE BUG: thread 4-2 while api lags at 3-2 must NOT produce flip-flop."""
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            1, "IN_PLAY",
+            home_name="England", away_name="Croatia",
+            home_tla="ENG", away_tla="CRO",
+            home_score=4, away_score=2,
+        )
+
+        # announced=3-2 (api already moved here); thread_seen still at 2-2
+        live_scores = {"1": {"home": 3, "away": 2, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 2, "away": 2}})
+        # Also put api_seen at 3-2 so that the api job leg works in isolation
+        ctx.bot_data["seen_scores"]["api"]["1"] = {"home": 3, "away": 2}
+
+        rashford = _make_goal_event(
+            scorer="Rashford", scoring_team="England",
+            home_score=4, away_score=2, minute_text="85", minute_sort=85.0,
+        )
+        thread_result = _make_thread_result("ENG", "CRO", [rashford])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[thread_result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            # Step 1: thread reports 4-2 (Rashford)
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1, "Exactly ONE goal notification"
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "⚽" in text
+        assert "Rashford" in text
+        assert live_scores["1"]["home"] == 4, "Announced updated to 4-2"
+
+        # Step 2: api repeatedly reports 3-2 — must produce ZERO disallowed
+        from worldcup_bot.__main__ import poll_goals_job
+
+        api_match_32 = _make_match(
+            1, "IN_PLAY",
+            home_name="England", away_name="Croatia",
+            home_tla="ENG", away_tla="CRO",
+            home_score=3, away_score=2,
+        )
+
+        ctx.bot.send_message.reset_mock()
+
+        for _ in range(3):
+            with (
+                patch("worldcup_bot.__main__.make_client") as mock_client,
+                patch("worldcup_bot.__main__.save_scores"),
+                patch("worldcup_bot.__main__.save_clips"),
+            ):
+                mock_client.return_value.get_all_matches.return_value = [api_match_32]
+                await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 0, "ZERO disallowed — api lag must not flip-flop"
+
+        # Step 3: api catches up to 4-2 — must produce ZERO duplicate goal
+        api_match_42 = _make_match(
+            1, "IN_PLAY",
+            home_name="England", away_name="Croatia",
+            home_tla="ENG", away_tla="CRO",
+            home_score=4, away_score=2,
+        )
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [api_match_42]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 0, "ZERO duplicate goal on api catch-up"
+
+    @pytest.mark.asyncio
+    async def test_real_var_thread_goal_then_disallowed(self, tmp_path):
+        """Thread sees 4-2 then 3-2 (VAR) → one goal + one disallowed. Api catch-up adds nothing."""
+        settings = _make_settings(tmp_path)
+
+        # Initial state: all at 3-2
+        live_scores = {"1": {"home": 3, "away": 2, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 3, "away": 2}})
+        ctx.bot_data["seen_scores"]["api"]["1"] = {"home": 3, "away": 2}
+
+        # Tick 1: thread sees 4-2 (Rashford goal)
+        goal_event = _make_goal_event(
+            scorer="Rashford", scoring_team="England",
+            home_score=4, away_score=2, minute_text="85",
+        )
+        match_42 = _make_match(1, "IN_PLAY", home_name="England", away_name="Croatia",
+                               home_tla="ENG", away_tla="CRO", home_score=4, away_score=2)
+        result_42 = _make_thread_result("ENG", "CRO", [goal_event])
+
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result_42])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match_42]
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1
+        goal_text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "⚽" in goal_text
+        assert live_scores["1"]["home"] == 4
+
+        ctx.bot.send_message.reset_mock()
+
+        # Tick 2: thread sees 3-2 (VAR disallowed — thread's own score dropped)
+        match_32 = _make_match(1, "IN_PLAY", home_name="England", away_name="Croatia",
+                               home_tla="ENG", away_tla="CRO", home_score=3, away_score=2)
+        result_32 = _make_thread_result("ENG", "CRO", [
+            _make_goal_event(scorer="Kane", scoring_team="England",
+                             home_score=3, away_score=2, minute_text="60"),
+        ])
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result_32])
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match_32]
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1, "One disallowed notification"
+        disallowed_text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "VAR" in disallowed_text or "❌" in disallowed_text
+        assert live_scores["1"]["home"] == 3, "Announced corrected to 3-2"
+
+        ctx.bot.send_message.reset_mock()
+
+        # Tick 3: api catches up to 3-2 — must add nothing
+        from worldcup_bot.__main__ import poll_goals_job
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match_32]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 0, "Api catch-up to 3-2 adds nothing"
+
+    @pytest.mark.asyncio
+    async def test_restart_safety_no_replay(self, tmp_path):
+        """After restart (seen=None), first tick at current score announces nothing."""
+        settings = _make_settings(tmp_path)
+        match = _make_match(1, "IN_PLAY", home_score=4, away_score=2)
+
+        # On restart: announced loaded from disk at 4-2, thread_seen is None (in-memory cleared)
+        live_scores = {"1": {"home": 4, "away": 2, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread=None)
+        # No seen_thread entry at all → simulates restart
+
+        event = _make_goal_event(scorer="Rashford", scoring_team="England",
+                                 home_score=4, away_score=2, minute_text="85")
+        result = _make_thread_result("ENG", "SEN", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+        mock_save.assert_not_called()
