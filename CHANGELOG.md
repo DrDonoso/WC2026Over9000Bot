@@ -5,6 +5,14 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260618] - 2026-06-18
+
+- fix: give each goal detector (Reddit match thread and football-data) its own private last-seen score while sharing a single announced score, via a new pure reconcile() function
+- fix: a source that is merely lagging behind the other (e.g. football-data still 3-2 while the thread already announced 4-2) is treated as catching up, never as a disallowed goal — so no more false "Gol anulado (VAR)" spam
+- fix: a disallowed goal is only announced when the SAME source that was ahead actually drops (a real VAR review), counted once even when the other source later catches up
+- test: reproduce the exact production screenshot (thread 4-2 / api 3-2 loop) and assert one goal and zero disallowed; plus real-VAR, multi-goal and interleaved-lag cases
+
+
 ## [20260617.14] - 2026-06-17
 
 - feat: detect goals directly from the r/soccer match thread every 25s, so notifications arrive earlier than football-data's lagging score update; the scorer comes straight from the thread (no extra AI call)
