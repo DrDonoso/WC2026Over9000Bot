@@ -1789,3 +1789,87 @@ the message still sends (score-only format).
 - Added: 19
 - **Total: 1267 passing**
 
+---
+
+## 42. Decision: Persistent finished-match dedup + kickoff-age seed prevents restart re-fires
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-18  
+**Status:** IMPLEMENTED — 1297 tests green, not yet committed (coordinator verifies first)
+
+---
+
+## Problem
+
+After a container restart, the "🏁 Final" recap was re-sent for a match that ended hours earlier.
+
+**Root cause — two compounding bugs:**
+
+1. `bot_data["finished_seen"]` was in-memory only → wiped on every restart.
+2. The startup seed only included matches whose `status == "FINISHED"` at that moment. football-data.org's status lags: a match that ended hours ago can still show `IN_PLAY` or `PAUSED`. Such a match is not seeded. When football-data eventually flips it to `FINISHED`, the job treats it as newly-finished and sends the recap — for a match that ended long ago.
+
+---
+
+## Decision
+
+### 1. New module: `src/worldcup_bot/reddit/finished_state.py`
+
+Two best-effort helpers that never raise:
+
+```python
+load_finished(path: str) -> set[int]   # returns empty set if missing/corrupt
+save_finished(path: str, ids: set[int]) -> None  # sorted JSON list
+```
+
+### 2. Persistent state in `build_app`
+
+```python
+finished_path = f"{settings.state_dir}/finished_announced.json"
+app.bot_data["finished_announced"] = load_finished(finished_path)
+app.bot_data["finished_seeded"] = False
+```
+
+State is loaded from `{state_dir}/finished_announced.json` at startup so announced ids survive restarts.
+
+### 3. Reworked `poll_finished_matches_job`
+
+| Key | Location | Persisted? | Purpose |
+|---|---|---|---|
+| `bot_data["finished_announced"]` | set | ✅ JSON | Match ids already recapped or seeded as over |
+| `bot_data["finished_seeded"]` | bool | ❌ in-memory | First-run gate flag |
+
+**Module-level constant:**
+```python
+MATCH_OVER_AGE = timedelta(hours=4)
+```
+
+**First run** (gate: `not finished_seeded`): seed every match where:
+- `m.status == "FINISHED"`, OR
+- `now_utc - kickoff > MATCH_OVER_AGE` (4 h)
+
+This seeds both currently-FINISHED matches AND stale IN_PLAY/PAUSED matches whose football-data status hasn't caught up yet. Persist immediately, set flag, return (no sends).
+
+**Subsequent runs:** for each match with `status == "FINISHED"` not in `finished_announced`: send recap (Part A ESPN + Part B porra commentary — unchanged), then `announced.add(id)` + `save_finished(...)` immediately (per-match persist so a crash mid-batch doesn't replay the match).
+
+---
+
+## Why this fixes both bugs
+
+**Bug 1 (restart):** `finished_announced.json` is loaded at startup → ids survive restarts → no re-fire.
+
+**Bug 2 (status lag):** A match that ended 5 h ago but still shows IN_PLAY at startup: its kickoff is >4 h ago → seeded as over → when football-data eventually flips to FINISHED, the id is already in `announced` → no recap.
+
+**Genuinely live match:** Kickoff was 30 min ago → not seeded (kickoff < 4 h) → when it finishes while the bot is running → id not in announced → recap fires exactly once.
+
+---
+
+## Files changed
+
+| File | Change |
+|---|---|
+| `src/worldcup_bot/reddit/finished_state.py` | **NEW** — `load_finished`, `save_finished` |
+| `src/worldcup_bot/__main__.py` | Import `timedelta`, `load_finished`, `save_finished`; add `MATCH_OVER_AGE`; update `build_app`; rework `poll_finished_matches_job` |
+| `tests/test_poll_finished_job.py` | Update all `finished_seen` refs to `finished_announced`/`finished_seeded`; add 14 new tests |
+
+**Test count: 1297 (up from 1283)**
+
