@@ -977,3 +977,78 @@ The fix is entirely on the prompt side: force the AI to copy names verbatim from
 
 - Added `test_system_prompt_requires_full_participant_names` to `TestSystemPromptContract` in `tests/test_ai.py`.
 - All 1358 tests green (1357 baseline + 1 new).
+
+
+# Decision: /tongo Templated Phrases from TongoPhrases.txt
+
+**Author:** Kanté (Backend Developer)
+**Date:** 2026-06-19
+**Status:** IMPLEMENTED — 1408 tests green
+
+---
+
+## Problem
+
+`/tongo` had all phrases hardcoded in `src/worldcup_bot/data/tongo.py`. There was no way to add
+or edit phrases without rebuilding the Docker image. The user also wanted phrases that could
+target a specific person when `/tongo` is sent as a reply to their message.
+
+---
+
+## Decision
+
+### File format
+
+- File: `data/TongoPhrases.txt` (committed; mounted read-only at `/app/data`)
+- Plain UTF-8, one phrase per line
+- Lines starting with `#` are comments (ignored); blank lines are ignored
+- Hot-reloaded on mtime change — no restart needed
+- Missing file / empty result / OSError → fall back to built-in `FRASES` silently
+- Optional env var `TONGO_PHRASES_PATH` overrides the default path
+
+### Template variables (10 total)
+
+Sender (always available):
+- `{{first_name}}`, `{{last_name}}`, `{{full_name}}`, `{{username}}`, `{{id}}`
+
+Reply target (only when user replied to a message):
+- `{{reply_to_first_name}}`, `{{reply_to_last_name}}`, `{{reply_to_full_name}}`, `{{reply_to_username}}`, `{{reply_to_id}}`
+
+Whitespace-tolerant: `{{ first_name }}` works the same as `{{first_name}}`.
+Unknown placeholders → `""`. Missing/None values → `""`.
+
+### Explicit exclusions (per user request)
+
+- NO `{{display_name}}` or `{{mention}}` variables
+- NO cross-reference with `predictions.yml`
+
+### Reply-targeting behavior
+
+If the phrase uses any `{{reply_to_*}}` variable AND the user sent `/tongo` as a reply to
+another message → **reply path**: pool = rendered reply phrases + gifs. No SANCHEZ check.
+
+If the user did NOT reply, or the phrase file has no reply phrases → **default path**:
+`random.random() < 1/3` → "Sanchez ens roba" (invariant preserved), otherwise
+pool = rendered sender phrases + `frase_argentino(gender)` + gifs.
+
+`is_bot` check skipped: reply vars are populated even when the replied-to user is a bot
+(user explicitly tested `/tongo` replying to the bot as a wanted use case).
+
+### Files changed
+
+| File | Change |
+|---|---|
+| `data/TongoPhrases.txt` | NEW — 16 seeded phrases + header comment listing all 10 variables |
+| `src/worldcup_bot/data/tongo.py` | Added `load_tongo_phrases`, `TongoContext`, `build_tongo_context`, `render_tongo`, `phrase_uses_reply`, `phrase_eligible` |
+| `src/worldcup_bot/config.py` | Added `tongo_phrases_path: str = ""` + `TONGO_PHRASES_PATH` env var |
+| `src/worldcup_bot/bot/handlers.py` | Rewrote `cmd_tongo` with reply-targeted and default paths |
+| `tests/test_tongo_phrases.py` | NEW — 50 tests (loader, render, context, eligibility, handler paths) |
+| `README.md` | Added TongoPhrases.txt section with variable table and reply-targeting explanation |
+
+### Why this is safe
+
+- Built-in `FRASES` fallback means out-of-the-box behavior is unchanged if file is absent.
+- SANCHEZ 1/3 invariant is strictly preserved on the default (no-reply) path.
+- All 16 seed phrases in `TongoPhrases.txt` are plain strings with no template vars — identical to the previous hardcoded behavior.
+- `isinstance(val, str)` guard in `_extract_user_fields` makes context extraction safe against both real PTB User objects and MagicMock attributes in tests.
+- 1408 tests green (1357 before).
