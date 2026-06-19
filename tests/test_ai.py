@@ -1148,3 +1148,11 @@ class TestSystemPromptContract:
         has_cuw = "Curaçao" in _SYSTEM or "Curacao" in _SYSTEM.lower()
         assert has_pan and has_uzb and has_cuw
 
+    def test_system_prompt_requires_full_participant_names(self):
+        """_SYSTEM must instruct the AI to always write participants' full names."""
+        assert (
+            "nombre COMPLETO" in _SYSTEM
+            or "nombre completo" in _SYSTEM.lower()
+            or "nunca solo" in _SYSTEM.lower()
+        )
+

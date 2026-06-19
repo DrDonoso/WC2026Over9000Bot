@@ -75,7 +75,12 @@ _SYSTEM = (
     "y cómo PODRÍA moverse la porra hoy — menciona rivales que están cerca en la tabla y que "
     "los resultados de los grupos de hoy pueden cambiar posiciones "
     "(NO inventes las predicciones concretas de cada usuario; háblalo en términos de cercanía en puntos).\n"
-    "Emojis moderados, conciso. Máximo 4-5 frases cortas. Nunca inventes resultados.\n\n"
+    "Emojis moderados, conciso. Máximo 4-5 frases cortas. Nunca inventes resultados.\n"
+    "IMPORTANTE — nombres de participantes: cuando menciones a un participante de la porra, "
+    "escribe SIEMPRE su nombre COMPLETO (nombre y apellidos) EXACTAMENTE como aparece en la "
+    "clasificación que te paso (por ejemplo 'Miquel Apellido', nunca solo 'Miquel'). "
+    "No uses solo el nombre de pila, no abrevies y no inventes apellidos: "
+    "copia el nombre tal cual aparece.\n\n"
     "Devuelve ÚNICAMENTE el objeto JSON, sin marcas de código ni nada más. "
     'Formato exacto: {"today_notes": {"TLA1-TLA2": "nota o cadena vacía"}, '
     '"standings_comment": "narrativa corta"}\n\n'
@@ -153,7 +158,7 @@ def build_ai_user_message(
             f"{i + 1}. {r.display_name} — {r.total_score:.1f} pts"
             for i, r in enumerate(ranking)
         ]
-        ranking_block = "\n".join(ranking_lines)
+        ranking_block = "\n".join(ranking_lines) + "\n(usa el nombre completo tal cual al mencionarlos)"
     else:
         ranking_block = "Sin datos de porra."
 
