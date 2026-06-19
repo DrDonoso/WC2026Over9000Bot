@@ -31,6 +31,27 @@ docker compose -f docker-compose.local.yml up --build
 
 **Hot-reload `/tongo` GIFs** — drop `.gif`, `.mp4`, or `.webp` files into `./data/tongo_gifs/` on the server. They are picked up immediately on the next `/tongo` with the same individual weight as each phrase (more GIFs → higher chance of a GIF in the 2/3 pool; "Sanchez ens roba" is unaffected at 1/3). Optionally override the scan folder with `TONGO_GIFS_DIR` in `.env`.
 
+**Hot-reload `/tongo` phrases** — edit `./data/TongoPhrases.txt` on the server. One phrase per line; lines starting with `#` are comments (ignored). The bot re-reads the file on every `/tongo` call (mtime-based cache). If the file is missing or empty, the built-in default phrases are used automatically.
+
+Phrases support 10 template variables substituted at render time:
+
+| Variable | Description |
+|---|---|
+| `{{first_name}}` | Sender's first name |
+| `{{last_name}}` | Sender's last name (empty if absent) |
+| `{{full_name}}` | Sender's full name |
+| `{{username}}` | Sender's @username (empty if no username) |
+| `{{id}}` | Sender's Telegram user ID |
+| `{{reply_to_first_name}}` | Replied-to user's first name |
+| `{{reply_to_last_name}}` | Replied-to user's last name |
+| `{{reply_to_full_name}}` | Replied-to user's full name |
+| `{{reply_to_username}}` | Replied-to user's @username |
+| `{{reply_to_id}}` | Replied-to user's Telegram user ID |
+
+**Reply-targeting** — if a phrase uses any `{{reply_to_*}}` variable AND the `/tongo` command is sent as a reply to another message, the bot enters *reply-targeted mode*: only reply phrases are picked, and the "Sanchez ens roba" 1/3 check is skipped. On plain `/tongo` (no reply), or when no reply phrases exist in the file, the normal 1/3 Sanchez / 2/3 phrase pool logic applies. Reply targeting works even when the replied-to message is from a bot.
+
+Optionally override the phrases file path with `TONGO_PHRASES_PATH` in `.env`.
+
 **Update the image** — the GitHub Action builds and pushes on every push to `main` (needs repo secrets `DOCKER_USERNAME` / `DOCKER_PASSWORD`). To pull the latest on the server:
 ```bash
 docker compose pull && docker compose up -d
@@ -55,7 +76,7 @@ docker compose pull && docker compose up -d
 | `/listaaciertosactual` | Provisional picks breakdown (live standings; only groups with ≥1 finished match score) |
 | `/mispredicciones` | Your full prediction sheet |
 | `/participantes` | List of participants |
-| `/tongo` | Easter egg 🤫 — drop `.gif` / `.mp4` files into `data/tongo_gifs/` (hot-reload, no rebuild) to mix animations into the phrase pool |
+| `/tongo` | Easter egg 🤫 — edit `data/TongoPhrases.txt` (one phrase per line, hot-reload, 10 template variables, reply-targeting) or drop `.gif` / `.mp4` files into `data/tongo_gifs/` to mix animations into the pool |
 
 ---
 

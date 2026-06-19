@@ -32,6 +32,7 @@ class Settings:
     goal_poll_interval_seconds: int = 60
     reddit_user_agent: str = field(default=_DEFAULT_REDDIT_UA)
     tongo_gifs_dir: str = ""
+    tongo_phrases_path: str = ""
     openai_api_key: str = ""
     openai_base_url: str = ""
     openai_model: str = ""
@@ -111,6 +112,7 @@ def load_settings() -> Settings:
         goal_poll_interval_seconds=int(os.getenv("GOAL_POLL_INTERVAL_SECONDS", "60")),
         reddit_user_agent=os.getenv("REDDIT_USER_AGENT", _DEFAULT_REDDIT_UA),
         tongo_gifs_dir=os.getenv("TONGO_GIFS_DIR", ""),
+        tongo_phrases_path=os.getenv("TONGO_PHRASES_PATH", ""),
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_base_url=os.getenv("OPENAI_BASE_URL", ""),
         openai_model=os.getenv("OPENAI_MODEL", ""),
