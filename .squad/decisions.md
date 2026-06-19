@@ -919,3 +919,61 @@ reuses the cache → no new Reddit hit → no 429 → inline keyboard shown.
   `get_match_threads` + `_parse_thread_teams` + `_teams_match`.
 - The `find_match_thread` (search) fallback is preserved for matches not yet in the /new/ listing.
 - Stale-cache-on-error ensures the bot degrades gracefully even under sustained 429 pressure.
+
+---
+
+# Decision: daily-update _SYSTEM now requires full participant names
+
+**Author:** Kanté (Backend Developer)
+**Date:** 2026-06-19
+**Status:** IMPLEMENTED — 1358 tests green, not yet committed (coordinator verifies first)
+
+---
+
+## Problem
+
+In the AI daily update, participants were only bolded when their **full** `display_name` appeared in the AI-generated `standings_comment`. The AI was shortening names to first-name only ("Miquel", "Cristina", "Patri"), which never matched the full names in `participant_names`, so `bold_person_names()` silently left those mentions unbolded.
+
+Root cause: the _SYSTEM prompt had no explicit instruction to use full names. The AI naturally defaults to first names in conversational prose.
+
+---
+
+## Decision
+
+### 1. Strengthen `_SYSTEM` in `src/worldcup_bot/ai/daily_update.py`
+
+Added within the `standings_comment` rule block (after scenario descriptions, before the JSON format line):
+
+```
+IMPORTANTE — nombres de participantes: cuando menciones a un participante de la porra,
+escribe SIEMPRE su nombre COMPLETO (nombre y apellidos) EXACTAMENTE como aparece en la
+clasificación que te paso (por ejemplo 'Miquel Apellido', nunca solo 'Miquel').
+No uses solo el nombre de pila, no abrevies y no inventes apellidos: copia el nombre tal cual aparece.
+```
+
+### 2. Optional inline reminder in `build_ai_user_message`
+
+The ranking block now ends with:
+```
+(usa el nombre completo tal cual al mencionarlos)
+```
+This secondary reinforcement appears in the user message itself, immediately after the ranking list where full names are already visible.
+
+### 3. No changes to rendering pipeline
+
+`render_message`, `bold_person_names`, and the data plumbing in `generate_daily_update` are untouched — they already pass correct full `display_name` values.
+
+---
+
+## Why bolding was broken
+
+`bold_person_names(text, names)` does exact-substring matching against `participant_names = [r.display_name for r in ranking]`. If the AI writes "Miquel" instead of "Miquel Apellido", the regex `\bMiquel Apellido\b` never matches, so no `<b>` tag is injected.
+
+The fix is entirely on the prompt side: force the AI to copy names verbatim from the classification it receives.
+
+---
+
+## Tests
+
+- Added `test_system_prompt_requires_full_participant_names` to `TestSystemPromptContract` in `tests/test_ai.py`.
+- All 1358 tests green (1357 baseline + 1 new).
