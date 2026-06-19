@@ -39,12 +39,12 @@ from worldcup_bot.config import Settings, ai_enabled
 from worldcup_bot.data.stages import GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
 from worldcup_bot.data.tongo import (
     FRASES,
-    SANCHEZ_ENS_ROBA,
     build_tongo_context,
-    frase_argentino,
+    choose_tongo_response,
     load_tongo_phrases,
-    phrase_eligible,
+    load_tongo_users,
     phrase_uses_reply,
+    read_tongo_phrase_file,
     render_tongo,
 )
 from worldcup_bot.data.gender import infer_gender
@@ -541,58 +541,54 @@ async def cmd_siguiente(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
+    predictions_parent = Path(settings.predictions_path).parent
 
     if settings.tongo_phrases_path:
-        phrases_path = Path(settings.tongo_phrases_path)
+        global_phrases_path = Path(settings.tongo_phrases_path)
     else:
-        phrases_path = Path(settings.predictions_path).parent / "TongoPhrases.txt"
+        global_phrases_path = predictions_parent / "TongoPhrases.txt"
+
+    if settings.tongo_users_path:
+        users_path = Path(settings.tongo_users_path)
+    else:
+        users_path = predictions_parent / "TongoUsers.yml"
 
     if settings.tongo_gifs_dir:
         gifs_dir = Path(settings.tongo_gifs_dir)
     else:
-        gifs_dir = Path(settings.predictions_path).parent / "tongo_gifs"
+        gifs_dir = predictions_parent / "tongo_gifs"
 
     gifs = list_tongo_gifs(gifs_dir)
     user = update.effective_user
     gender = infer_gender(user.first_name if user else None)
-
     ctx = build_tongo_context(update)
-    phrases = load_tongo_phrases(str(phrases_path))
-    eligible = [p for p in phrases if phrase_eligible(p, ctx)]
 
-    # ── Reply-targeted path ────────────────────────────────────────────────────
-    # Used only when the user replied to a message AND the phrase file contains
-    # at least one eligible reply phrase.  No SANCHEZ check on this path.
-    if ctx.has_reply and any(phrase_uses_reply(p) for p in eligible):
-        reply_phrases = [render_tongo(p, ctx) for p in eligible if phrase_uses_reply(p)]
-        pool = reply_phrases + gifs
-        choice = random.choice(pool)
-        if isinstance(choice, Path):
-            try:
-                with open(choice, "rb") as f:
-                    await context.bot.send_animation(
-                        chat_id=update.effective_chat.id, animation=f
-                    )
-            except Exception as exc:
-                log.warning("Could not send tongo GIF %s: %s", choice, exc)
-                await update.message.reply_text(random.choice(reply_phrases))
-        else:
-            await update.message.reply_text(choice)
-        return
+    global_phrases = load_tongo_phrases(str(global_phrases_path))
+    users = load_tongo_users(str(users_path))
 
-    # ── Default path (no reply, or no reply phrases in file) ──────────────────
-    if random.random() < 1 / 3:
-        await update.message.reply_text(SANCHEZ_ENS_ROBA)
-        return
+    username = _caller_username(update)
+    user_cfg = users.get(username) if username else None
 
-    sender_phrases = [render_tongo(p, ctx) for p in eligible if not phrase_uses_reply(p)]
-    if not sender_phrases:
-        sender_phrases = [render_tongo(p, ctx) for p in eligible]
-    if not sender_phrases:
-        sender_phrases = [render_tongo(p, ctx) for p in FRASES]
+    sanchez_ratio = (
+        user_cfg.sanchez_ratio if (user_cfg and user_cfg.sanchez_ratio is not None) else 1 / 3
+    )
 
-    pool = sender_phrases + [frase_argentino(gender)] + gifs
-    choice = random.choice(pool)
+    if user_cfg and user_cfg.phrases_file:
+        phrases_file_abs = str(users_path.parent / user_cfg.phrases_file)
+        file_phrases = read_tongo_phrase_file(phrases_file_abs)
+    else:
+        file_phrases = []
+
+    per_user_phrases = list(user_cfg.phrases) + file_phrases if user_cfg else []
+    mode = user_cfg.phrases_mode if user_cfg else "append"
+
+    if mode == "replace" and per_user_phrases:
+        effective_phrases = per_user_phrases
+    else:
+        # "append" OR "replace" with empty per-user pool — guard: never serve an empty pool
+        effective_phrases = global_phrases + per_user_phrases
+
+    choice = choose_tongo_response(ctx, effective_phrases, sanchez_ratio, gender, gifs, rng=random)
 
     if isinstance(choice, Path):
         try:
@@ -602,7 +598,10 @@ async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
         except Exception as exc:
             log.warning("Could not send tongo GIF %s: %s", choice, exc)
-            await update.message.reply_text(random.choice(sender_phrases))
+            fb_pool = [render_tongo(p, ctx) for p in global_phrases if not phrase_uses_reply(p)]
+            if not fb_pool:
+                fb_pool = [render_tongo(p, ctx) for p in FRASES]
+            await update.message.reply_text(random.choice(fb_pool))
     else:
         await update.message.reply_text(choice)
 

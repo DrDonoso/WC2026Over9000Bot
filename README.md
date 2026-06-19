@@ -52,6 +52,25 @@ Phrases support 10 template variables substituted at render time:
 
 Optionally override the phrases file path with `TONGO_PHRASES_PATH` in `.env`.
 
+**Per-user `/tongo` config** — create/edit `data/TongoUsers.yml` on the server to customise each participant's `/tongo` experience. The file is committed (empty by default) and hot-reloaded on every `/tongo` call. All entries are optional; an absent entry preserves the original behaviour (1/3 Sanchez, global phrase pool).
+
+Schema (all keys optional):
+
+```yaml
+username:                      # Telegram @username, lowercase, without @
+  sanchez_ratio: 0.66          # float 0–1; default 1/3 global.  0 = never, 1 = always
+  phrases_mode: append         # "append" (default): add phrases to global pool
+                               # "replace": replace global pool entirely
+                               #   (if replace + empty pool → falls back to global)
+  phrases:                     # inline list — same {{...}} variables as TongoPhrases.txt
+    - "Frase exclusiva, {{first_name}}"
+  phrases_file: tongo/nom.txt  # extra phrases from a file (path relative to TongoUsers.yml)
+```
+
+All 10 template variables (`{{first_name}}`, `{{reply_to_first_name}}`, …) work the same way in per-user phrases as in `TongoPhrases.txt`. Inline `phrases` and `phrases_file` are merged; `phrases_mode` controls whether the result is appended to or replaces the global pool.
+
+Invalid fields are silently ignored (logged at WARNING); other entries in the file are unaffected. Optionally override the file path with `TONGO_USERS_PATH` in `.env`.
+
 **Update the image** — the GitHub Action builds and pushes on every push to `main` (needs repo secrets `DOCKER_USERNAME` / `DOCKER_PASSWORD`). To pull the latest on the server:
 ```bash
 docker compose pull && docker compose up -d

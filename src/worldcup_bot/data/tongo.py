@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
 
 log = logging.getLogger(__name__)
 
@@ -223,3 +227,202 @@ def phrase_eligible(phrase: str, ctx: TongoContext) -> bool:
     if phrase_uses_reply(phrase) and not ctx.has_reply:
         return False
     return True
+
+
+# ── per-user config dataclass ─────────────────────────────────────────────────
+
+@dataclass
+class TongoUserConfig:
+    """Per-user /tongo configuration loaded from TongoUsers.yml."""
+    sanchez_ratio: float | None = None
+    phrases_mode: str = "append"
+    phrases: list[str] = field(default_factory=list)
+    phrases_file: str | None = None
+
+
+# ── users YAML hot-reload state ───────────────────────────────────────────────
+
+_cached_users_path: str | None = None
+_cached_users_mtime: float = 0.0
+_cached_users_data: dict[str, TongoUserConfig] = {}
+
+
+def load_tongo_users(path: str) -> dict[str, TongoUserConfig]:
+    """Load per-user tongo config from *path* (YAML) with mtime-based hot-reload.
+
+    Returns a dict keyed by lowercased Telegram username.
+    Invalid entries/fields are skipped with a warning (never raise).
+    Returns {} on missing file, empty file, YAML parse error, or OSError.
+    """
+    global _cached_users_path, _cached_users_mtime, _cached_users_data
+
+    if not os.path.exists(path):
+        log.debug("TongoUsers.yml not found at %s — no per-user overrides", path)
+        return {}
+
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError as exc:
+        log.warning("Cannot stat tongo users file %s: %s", path, exc)
+        return {}
+
+    if path == _cached_users_path and mtime == _cached_users_mtime:
+        return _cached_users_data
+
+    log.info("(Re)loading tongo users from %s", path)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh) or {}
+    except yaml.YAMLError as exc:
+        log.warning("YAML parse error in tongo users file %s: %s", path, exc)
+        return {}
+    except OSError as exc:
+        log.warning("Cannot read tongo users file %s: %s", path, exc)
+        return {}
+
+    if not isinstance(raw, dict):
+        log.warning("TongoUsers.yml at %s is not a mapping — ignored", path)
+        return {}
+
+    result: dict[str, TongoUserConfig] = {}
+    for username, entry in raw.items():
+        uname = str(username).lower()
+        if not isinstance(entry, dict):
+            log.warning("TongoUsers.yml: entry %r is not a mapping — skipped", username)
+            continue
+
+        cfg = TongoUserConfig()
+
+        if "sanchez_ratio" in entry:
+            val = entry["sanchez_ratio"]
+            if isinstance(val, (int, float)) and 0.0 <= float(val) <= 1.0:
+                cfg.sanchez_ratio = float(val)
+            else:
+                log.warning(
+                    "TongoUsers.yml: %s.sanchez_ratio=%r is not a number in [0,1] — ignored",
+                    uname, val,
+                )
+
+        if "phrases_mode" in entry:
+            val = entry["phrases_mode"]
+            if val in ("append", "replace"):
+                cfg.phrases_mode = val
+            else:
+                log.warning(
+                    "TongoUsers.yml: %s.phrases_mode=%r invalid (must be 'append' or 'replace') — using 'append'",
+                    uname, val,
+                )
+
+        if "phrases" in entry:
+            val = entry["phrases"]
+            if isinstance(val, list) and all(isinstance(p, str) for p in val):
+                cfg.phrases = list(val)
+            else:
+                log.warning(
+                    "TongoUsers.yml: %s.phrases is not a list of strings — ignored",
+                    uname,
+                )
+
+        if "phrases_file" in entry:
+            val = entry["phrases_file"]
+            if isinstance(val, str) and val:
+                cfg.phrases_file = val
+            else:
+                log.warning(
+                    "TongoUsers.yml: %s.phrases_file=%r is not a non-empty string — ignored",
+                    uname, val,
+                )
+
+        result[uname] = cfg
+
+    _cached_users_path = path
+    _cached_users_mtime = mtime
+    _cached_users_data = result
+    return result
+
+
+# ── per-user phrase file cache (path-keyed; avoids single-path cache thrash) ──
+
+_phrase_file_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def read_tongo_phrase_file(path: str) -> list[str]:
+    """Read non-empty, non-comment lines from a per-user phrase file.
+
+    Uses a path-keyed mtime cache so alternating across multiple users' files
+    does not thrash the single-entry cache used by load_tongo_phrases.
+    Returns [] on missing file, empty result, or OSError.  Never raises.
+    """
+    global _phrase_file_cache
+
+    if not os.path.exists(path):
+        return []
+
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return []
+
+    cached = _phrase_file_cache.get(path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw_lines = fh.readlines()
+    except OSError:
+        return []
+
+    phrases = [line.strip() for line in raw_lines]
+    phrases = [p for p in phrases if p and not p.startswith("#")]
+    _phrase_file_cache[path] = (mtime, phrases)
+    return phrases
+
+
+# ── pure selection function ───────────────────────────────────────────────────
+
+def choose_tongo_response(
+    ctx: TongoContext,
+    effective_phrases: list[str],
+    sanchez_ratio: float,
+    gender: str,
+    gifs: list[Path],
+    *,
+    rng: object = random,
+) -> str | Path:
+    """Choose a /tongo response deterministically given an *rng*.
+
+    Args:
+        ctx: TongoContext with sender and reply-target data.
+        effective_phrases: Merged phrase pool (global + per-user, or per-user only).
+        sanchez_ratio: Probability [0,1] for SANCHEZ_ENS_ROBA on the default path.
+        gender: "f" or anything else for frase_argentino.
+        gifs: List of GIF/video Paths mixed into the pool.
+        rng: Object with .random() and .choice() — defaults to the random module.
+             Pass a fake rng in tests for deterministic results.
+
+    Returns a rendered str or a Path (GIF/video file).
+    """
+    eligible = [p for p in effective_phrases if phrase_eligible(p, ctx)]
+
+    # Reply-targeted path: fires when replying AND at least one eligible phrase
+    # uses {{reply_to_*}} vars.  SANCHEZ check is skipped on this path.
+    if ctx.has_reply and any(phrase_uses_reply(p) for p in eligible):
+        pool: list[str | Path] = [
+            render_tongo(p, ctx) for p in eligible if phrase_uses_reply(p)
+        ] + gifs
+        return rng.choice(pool)
+
+    # SANCHEZ gate
+    if rng.random() < sanchez_ratio:
+        return SANCHEZ_ENS_ROBA
+
+    # Default phrase path
+    sender = [render_tongo(p, ctx) for p in eligible if not phrase_uses_reply(p)]
+    if not sender:
+        sender = [render_tongo(p, ctx) for p in eligible]
+    if not sender:
+        sender = [render_tongo(p, ctx) for p in FRASES]
+
+    pool = sender + [frase_argentino(gender)] + gifs
+    return rng.choice(pool)
