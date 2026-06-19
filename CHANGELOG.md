@@ -5,6 +5,15 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260619.02] - 2026-06-19
+
+- feat(tongo): customizable templated phrases from data/TongoPhrases.txt
+- Merged inbox decision into decisions.md (kante-44: daily-update fix)
+- Deleted inbox file
+- Added orchestration log (2026-06-19T07-35-47Z-kante.md)
+- Added session log (2026-06-19T07-35-47Z-daily-update-full-names.md)
+
+
 ## [20260619] - 2026-06-19
 
 - fix: the daily-summary AI prompt now requires writing each participant's full name (nombre y apellidos) exactly as it appears in the ranking, never just the first name — so bold_person_names always matches and everyone is bolded (first-name-only mentions like "Miquel"/"Cristina"/"Patri" were going unbolded)
