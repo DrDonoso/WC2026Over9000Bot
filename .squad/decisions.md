@@ -1393,3 +1393,119 @@ Kanté is adding a new per-user `/tongo` configuration file (`data/TongoUsers.ym
 
 - Kanté adds logic to `config.py` to read `TONGO_USERS_PATH` and load the file (defaulting to `/app/data/TongoUsers.yml` if unset).
 - File `data/TongoUsers.yml` can be committed to the repository.
+
+---
+
+# Decision: Merge /tongo into a single YAML file
+
+**Date:** 2026-06-19  
+**Agent:** Kanté (Backend Developer)  
+**Requested by:** DrDonoso  
+**Status:** Implemented
+
+---
+
+## Summary
+
+Merged the two-file `/tongo` configuration (`data/TongoPhrases.txt` + `data/TongoUsers.yml`) into a single YAML file (`data/TongoUsers.yml`) with a `phrases:` global pool and a `users:` per-user overrides map.
+
+## Problem
+
+Two separate files created unnecessary friction:
+- `TongoPhrases.txt` was a plain-text format that couldn't be edited alongside `TongoUsers.yml`.
+- `phrases_file` per-user feature added a third type of file reference.
+- The config/settings had two separate path env vars (`TONGO_PHRASES_PATH`, `TONGO_USERS_PATH`).
+
+## Decision
+
+One file, one schema:
+
+```yaml
+phrases:            # Global phrase pool (replaces TongoPhrases.txt)
+  - "..."
+
+users:              # Per-user overrides (keyed by @username lowercase)
+  nombredeusuario:
+    sanchez_ratio: 0.66
+    phrases_mode: append   # or "replace"
+    phrases:
+      - "{{first_name}}, ..."
+```
+
+## Changes
+
+**`src/worldcup_bot/data/tongo.py`**
+- Removed: `load_tongo_phrases`, `read_tongo_phrase_file`, their module-level caches, and the `phrases_file` field on `TongoUserConfig`.
+- Added: `TongoConfig` dataclass (`phrases: list[str]`, `users: dict[str, TongoUserConfig]`).
+- Added: `load_tongo_config(path)` — single-file YAML loader with mtime hot-reload, mirrors `porra/predictions.py` cache pattern.
+
+**`src/worldcup_bot/config.py`**
+- Removed `tongo_phrases_path` field and `TONGO_PHRASES_PATH` env var.
+- `tongo_users_path` / `TONGO_USERS_PATH` now points to the merged file.
+
+**`src/worldcup_bot/bot/handlers.py`**
+- `cmd_tongo` resolves a single path, calls `load_tongo_config`, derives `global_phrases` and `users` from the result. No `phrases_file` resolution.
+
+**Data files**
+- `data/TongoUsers.template.yml` — committed template (Spanish comments, 16 default phrases, 2 commented fake user examples).
+- `data/predictions.template.yml` — committed template for `predictions.yml` (2 fake users, fake TLAs).
+- `data/TongoUsers.yml` — git-ignored runtime file, pre-populated with 22 phrases migrated from `TongoPhrases.txt` and 12 participant keys as commented blocks.
+
+**Tests**
+- Removed: `TestLoadTongoPhrases` (9), `TestReadTongoPhraseFile` (6), `test_phrases_file_resolved_relative_to_yaml_dir` (1).
+- Added: `TestLoadTongoConfig` (26 tests) covering merged schema validation, hot-reload, graceful degradation.
+- All integration tests updated to use merged YAML.
+- Final count: **1452 tests, all passing**.
+
+## Notes for Maldini
+
+- `data/TongoUsers.yml` must be added to `.gitignore` (already ignored by `data/*.yml` pattern if present, otherwise add it explicitly).
+- `data/TongoPhrases.txt` can be removed from git tracking (data is now in `TongoUsers.yml`).
+- `data/TongoUsers.template.yml` and `data/predictions.template.yml` must be tracked.
+- No changes required to `docker-compose.yml`, `.env.example`, or any CI config (the `TONGO_USERS_PATH` env var is unchanged).
+
+---
+
+# Decision: /tongo YAML Merge — Infrastructure Consolidation
+
+**Date:** 2026-06-19  
+**Owner:** Maldini (DevOps)  
+**Context:** Kanté consolidated `/tongo` customizable phrases from two files (`data/TongoPhrases.txt` + `data/TongoUsers.yml`) into one merged runtime file (`data/TongoUsers.yml` with `phrases:` + `users:` sections). Two committed templates now guide users on setup.
+
+## Changes Made
+
+### 1. `.gitignore`
+- **Added:** `data/TongoUsers.yml` runtime-file ignore rule with comment "Runtime /tongo config (merged phrases + per-user settings) — git-ignored; generated from template".
+- **Placement:** Right after the existing `data/predictions.yml` ignore rule (both are runtime outputs, not committed).
+- **Templates safe:** Pattern `data/TongoUsers.yml` does not match committed templates `data/TongoUsers.template.yml` or `data/predictions.template.yml`. No negation exceptions needed.
+
+### 2. `docker-compose.yml` (prod)
+- **Removed:** `TONGO_PHRASES_PATH` env-var block (2-line comment + variable line). Rationale: single merged file eliminates the need for a separate phrases path.
+- **Updated:** `TONGO_USERS_PATH` Spanish comment changed from "Config por persona de /tongo..." to "Config de /tongo: frases globales + overrides por persona (data/TongoUsers.yml, hot-reload)---" to reflect the merged structure.
+- **Kept:** The `TONGO_USERS_PATH` variable itself (no change to the binding).
+
+### 3. `docker-compose.local.yml` (dev)
+- **Removed:** `TONGO_PHRASES_PATH` env-var block (identical to prod).
+- **Updated:** `TONGO_USERS_PATH` comment (identical to prod).
+- **Kept:** The `TONGO_USERS_PATH` variable itself.
+
+### 4. `.env.example`
+- **Removed:** The commented example `# TONGO_PHRASES_PATH=/app/data/TongoPhrases.txt...` line.
+- **Updated:** The commented example `# TONGO_USERS_PATH=...` now documents the merged structure: "config de /tongo: frases globales (phrases:) + por persona (users:); default: data/TongoUsers.yml".
+
+## Validation
+
+✅ **Prod compose file (`docker-compose.yml`):** `docker compose config -q` → exit 0  
+✅ **Local compose file (`docker-compose.local.yml`):** `docker compose config -q` → exit 0
+
+## Rationale
+
+- **Single image everywhere:** No changes to Dockerfile, volume mounts, or image naming. Same `drdonoso/worldcup2026` image used in both prod and local; only env var bindings differ per environment.
+- **Runtime file protection:** Runtime `data/TongoUsers.yml` is gitignored (contains real usernames + phrases). Users copy the committed template and edit locally.
+- **Environment variable consolidation:** Eliminates `TONGO_PHRASES_PATH` (merged into the single `data/TongoUsers.yml`), simplifying the env contract.
+- **Backward compatibility:** If users have `.env` files with the old `TONGO_PHRASES_PATH` variable, Docker Compose will silently ignore it (no error). Kanté's `config.py` will read from the new consolidated `TONGO_USERS_PATH` only.
+
+## References
+
+- App code changes: Kanté (consolidation in `config.py`)
+- History entry: `.squad/agents/maldini/history.md` → "## Learnings" → "/tongo YAML Merge"
