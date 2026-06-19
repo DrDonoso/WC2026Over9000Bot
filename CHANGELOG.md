@@ -5,6 +5,14 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260619.04] - 2026-06-19
+
+- New load_tongo_config(path) -> TongoConfig (phrases + users), mtime hot-reload, per-field graceful validation, never raises. Removed load_tongo_phrases / read_tongo_phrase_file and their caches.
+- cmd_tongo loads one file; unconfigured users keep the 1/3 Sanchez + global pool behavior; FRASES remain the built-in fallback.
+- data/TongoUsers.yml is now git-ignored (runtime). Added committed Spanish templates data/TongoUsers.template.yml and data/predictions.template.yml (example data only, no real participants).
+- TONGO_USERS_PATH points to the merged file; compose + .env.example updated. README rewritten. Tests reworked (1452 passing).
+
+
 ## [20260619.03] - 2026-06-19
 
 - sanchez_ratio (0..1): override the global 1/3 'Sanchez ens roba' probability (e.g. 0.66 for 2/3, 0.0 to disable, 1.0 to always). - phrases (inline) + phrases_file (relative path): per-user phrases, full {{...}} templating supported. - phrases_mode: append (default, merge with the global pool) or replace (use only the user's phrases; empty -> safe fallback to global pool).
