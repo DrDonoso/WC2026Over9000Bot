@@ -1,12 +1,11 @@
 """Tests for the templated tongo phrase system.
 
-Covers: hot-reload loader, render_tongo, build_tongo_context,
+Covers: render_tongo, build_tongo_context,
 phrase_eligible / phrase_uses_reply, and the templated cmd_tongo handler paths.
 """
 
 from __future__ import annotations
 
-import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +18,6 @@ from worldcup_bot.data.tongo import (
     FRASES,
     TongoContext,
     build_tongo_context,
-    load_tongo_phrases,
     phrase_eligible,
     phrase_uses_reply,
     render_tongo,
@@ -101,94 +99,19 @@ def _make_context(settings: Settings) -> MagicMock:
     return context
 
 
-def _phrase_settings(phrases_path: str = "") -> Settings:
+def _yaml_settings(users_path: str = "") -> Settings:
     return Settings(
         telegram_bot_token="fake",
         football_data_api_key="fake",
         predictions_path="fake_predictions.yml",
-        tongo_phrases_path=phrases_path,
+        tongo_users_path=users_path,
     )
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# load_tongo_phrases — hot-reload loader
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestLoadTongoPhrases:
-    @pytest.fixture(autouse=True)
-    def _reset_cache(self):
-        """Isolate module-level cache between tests."""
-        _tongo_mod._cached_path = None
-        _tongo_mod._cached_mtime = 0.0
-        _tongo_mod._cached_data = []
-        yield
-        _tongo_mod._cached_path = None
-        _tongo_mod._cached_mtime = 0.0
-        _tongo_mod._cached_data = []
-
-    def test_comments_and_blanks_skipped(self, tmp_path):
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("# comentario\n\nfrase real\n  \n# otro\n", encoding="utf-8")
-        result = load_tongo_phrases(str(f))
-        assert result == ["frase real"]
-
-    def test_missing_file_returns_frases(self):
-        result = load_tongo_phrases("/nonexistent/path/TongoPhrases.txt")
-        assert result is FRASES
-
-    def test_empty_file_returns_frases(self, tmp_path):
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("# solo comentarios\n\n", encoding="utf-8")
-        result = load_tongo_phrases(str(f))
-        assert result is FRASES
-
-    def test_only_comments_returns_frases(self, tmp_path):
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("# línea 1\n# línea 2\n", encoding="utf-8")
-        result = load_tongo_phrases(str(f))
-        assert result is FRASES
-
-    def test_valid_file_returns_phrases(self, tmp_path):
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("frase uno\nfrase dos\n", encoding="utf-8")
-        result = load_tongo_phrases(str(f))
-        assert result == ["frase uno", "frase dos"]
-
-    def test_strips_whitespace(self, tmp_path):
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("  espacios  \n   otro   \n", encoding="utf-8")
-        result = load_tongo_phrases(str(f))
-        assert result == ["espacios", "otro"]
-
-    def test_hot_reload_picks_up_new_content(self, tmp_path):
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("primera\n", encoding="utf-8")
-        result1 = load_tongo_phrases(str(f))
-        assert result1 == ["primera"]
-
-        # Overwrite and bump mtime so the cache is invalidated
-        f.write_text("segunda\n", encoding="utf-8")
-        os.utime(str(f), (time.time() + 2, time.time() + 2))
-
-        result2 = load_tongo_phrases(str(f))
-        assert result2 == ["segunda"]
-
-    def test_cache_used_on_second_call_same_mtime(self, tmp_path):
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("cached\n", encoding="utf-8")
-        result1 = load_tongo_phrases(str(f))
-        # Corrupt the module cache directly — second call should return cached
-        _tongo_mod._cached_data = ["cached"]
-        result2 = load_tongo_phrases(str(f))
-        assert result1 == result2
-
-    def test_never_raises_on_oserror(self, tmp_path, monkeypatch):
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("frase\n", encoding="utf-8")
-        monkeypatch.setattr(os.path, "getmtime", lambda _: (_ for _ in ()).throw(OSError("boom")))
-        result = load_tongo_phrases(str(f))
-        assert result is FRASES
+def _write_yaml_phrases(path: Path, phrases: list[str]) -> None:
+    """Write a minimal TongoUsers.yml with just a phrases: list."""
+    lines = ["phrases:\n"] + [f'  - "{p}"\n' for p in phrases]
+    path.write_text("".join(lines), encoding="utf-8")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -400,21 +323,21 @@ class TestCmdTongoTemplating:
 
     @pytest.fixture(autouse=True)
     def _reset_cache(self):
-        _tongo_mod._cached_path = None
-        _tongo_mod._cached_mtime = 0.0
-        _tongo_mod._cached_data = []
+        _tongo_mod._cached_config_path = None
+        _tongo_mod._cached_config_mtime = 0.0
+        _tongo_mod._cached_config_data = None
         yield
-        _tongo_mod._cached_path = None
-        _tongo_mod._cached_mtime = 0.0
-        _tongo_mod._cached_data = []
+        _tongo_mod._cached_config_path = None
+        _tongo_mod._cached_config_mtime = 0.0
+        _tongo_mod._cached_config_data = None
 
     async def test_sender_first_name_rendered_on_default_path(self, tmp_path):
         """Sender's {{first_name}} is substituted in the output phrase."""
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("Tongo de {{first_name}}!\n", encoding="utf-8")
+        f = tmp_path / "TongoUsers.yml"
+        _write_yaml_phrases(f, ["Tongo de {{first_name}}!"])
 
         update = _make_update_mock("Alice", has_reply=False)
-        context = _make_context(_phrase_settings(str(f)))
+        context = _make_context(_yaml_settings(str(f)))
 
         with patch("worldcup_bot.bot.handlers.random") as mock_random:
             mock_random.random.return_value = 0.9
@@ -426,11 +349,11 @@ class TestCmdTongoTemplating:
 
     async def test_reply_path_renders_replied_persons_name(self, tmp_path):
         """{{reply_to_first_name}} resolves to the replied-to user's first name."""
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("Qué tongo {{reply_to_first_name}}!\n", encoding="utf-8")
+        f = tmp_path / "TongoUsers.yml"
+        _write_yaml_phrases(f, ["Qué tongo {{reply_to_first_name}}!"])
 
         update = _make_update_mock("Alice", has_reply=True, reply_first="Bob")
-        context = _make_context(_phrase_settings(str(f)))
+        context = _make_context(_yaml_settings(str(f)))
 
         with patch("worldcup_bot.bot.handlers.random") as mock_random:
             mock_random.choice.return_value = "Qué tongo Bob!"
@@ -441,11 +364,11 @@ class TestCmdTongoTemplating:
 
     async def test_reply_path_pool_contains_rendered_phrase(self, tmp_path):
         """The pool passed to random.choice on the reply path contains rendered phrases."""
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("Ojo con {{reply_to_full_name}}!\n", encoding="utf-8")
+        f = tmp_path / "TongoUsers.yml"
+        _write_yaml_phrases(f, ["Ojo con {{reply_to_full_name}}!"])
 
         update = _make_update_mock("Alice", has_reply=True, reply_first="Bob")
-        context = _make_context(_phrase_settings(str(f)))
+        context = _make_context(_yaml_settings(str(f)))
 
         captured_pool = []
 
@@ -461,11 +384,11 @@ class TestCmdTongoTemplating:
 
     async def test_no_reply_phrase_falls_through_to_default_path(self, tmp_path):
         """Even with a reply, if no phrase uses reply vars → default path (SANCHEZ possible)."""
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("Frase sin reply vars.\n", encoding="utf-8")
+        f = tmp_path / "TongoUsers.yml"
+        _write_yaml_phrases(f, ["Frase sin reply vars."])
 
         update = _make_update_mock("Alice", has_reply=True, reply_first="Bob")
-        context = _make_context(_phrase_settings(str(f)))
+        context = _make_context(_yaml_settings(str(f)))
 
         with patch("worldcup_bot.bot.handlers.random") as mock_random:
             mock_random.random.return_value = 0.1  # < 1/3 → SANCHEZ
@@ -476,11 +399,11 @@ class TestCmdTongoTemplating:
 
     async def test_sanchez_invariant_preserved_on_default_path(self, tmp_path):
         """random.random() < 1/3 always yields SANCHEZ on the default path."""
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("Una frase.\n", encoding="utf-8")
+        f = tmp_path / "TongoUsers.yml"
+        _write_yaml_phrases(f, ["Una frase."])
 
         update = _make_update_mock("Alice", has_reply=False)
-        context = _make_context(_phrase_settings(str(f)))
+        context = _make_context(_yaml_settings(str(f)))
 
         with patch("worldcup_bot.bot.handlers.random") as mock_random:
             mock_random.random.return_value = 0.0
@@ -491,11 +414,11 @@ class TestCmdTongoTemplating:
 
     async def test_rendered_phrase_never_contains_raw_braces(self, tmp_path):
         """No {{...}} template syntax should survive to the reply_text call."""
-        f = tmp_path / "TongoPhrases.txt"
-        f.write_text("Hola {{first_name}} y {{last_name}}.\n", encoding="utf-8")
+        f = tmp_path / "TongoUsers.yml"
+        _write_yaml_phrases(f, ["Hola {{first_name}} y {{last_name}}."])
 
         update = _make_update_mock("Alice", has_reply=False)
-        context = _make_context(_phrase_settings(str(f)))
+        context = _make_context(_yaml_settings(str(f)))
 
         captured_pool = []
 
@@ -512,9 +435,9 @@ class TestCmdTongoTemplating:
             assert "{{" not in phrase, f"Raw template found in pool: {phrase!r}"
 
     async def test_missing_file_falls_back_to_builtin_frases(self):
-        """When TongoPhrases.txt doesn't exist, built-in FRASES are used."""
+        """When TongoUsers.yml doesn't exist, built-in FRASES are used."""
         update = _make_update_mock("Alice", has_reply=False)
-        context = _make_context(_phrase_settings("/nonexistent/TongoPhrases.txt"))
+        context = _make_context(_yaml_settings("/nonexistent/TongoUsers.yml"))
 
         captured_pool = []
 
@@ -533,8 +456,8 @@ class TestCmdTongoTemplating:
 
     async def test_gif_fallback_on_reply_path_uses_rendered_phrase(self, tmp_path):
         """GIF send error on reply path falls back to a rendered reply phrase."""
-        phrases_file = tmp_path / "TongoPhrases.txt"
-        phrases_file.write_text("Trampa de {{reply_to_first_name}}!\n", encoding="utf-8")
+        yaml_file = tmp_path / "TongoUsers.yml"
+        _write_yaml_phrases(yaml_file, ["Trampa de {{reply_to_first_name}}!"])
 
         gif_file = tmp_path / "funny.gif"
         gif_file.write_bytes(b"GIF89a")
@@ -544,7 +467,7 @@ class TestCmdTongoTemplating:
             telegram_bot_token="fake",
             football_data_api_key="fake",
             predictions_path="fake_predictions.yml",
-            tongo_phrases_path=str(phrases_file),
+            tongo_users_path=str(yaml_file),
             tongo_gifs_dir=str(tmp_path),
         )
         context = _make_context(settings)

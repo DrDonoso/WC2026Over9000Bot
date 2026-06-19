@@ -1,0 +1,104 @@
+# =============================================================================
+# TongoUsers.template.yml — PLANTILLA para la configuración /tongo del bot
+# =============================================================================
+#
+# Este archivo es la plantilla comprometida (git-tracked). El archivo de
+# ejecución REAL es data/TongoUsers.yml (ignorado por git). Cópialo con:
+#
+#   cp data/TongoUsers.template.yml data/TongoUsers.yml
+#
+# y edita TongoUsers.yml en el servidor.  El bot lo recarga automáticamente
+# en cada /tongo sin necesidad de reiniciarlo (caché por mtime).
+#
+# =============================================================================
+# ESQUEMA (todas las claves son opcionales):
+#
+#   phrases:               # Pool global de frases (sustituye a TongoPhrases.txt)
+#     - "Frase de ejemplo."
+#
+#   users:                 # Overrides por persona (clave = @username en minúsculas)
+#     nombredeusuario:
+#       sanchez_ratio: 0.33    # Probabilidad de "Sanchez ens roba" (0 = nunca,
+#                              # 1 = siempre, defecto global 1/3).
+#       phrases_mode: append   # "append" (defecto): añade las frases del usuario
+#                              # al pool global.
+#                              # "replace": sustituye el pool global. Si replace y
+#                              # no hay frases propias, cae al pool global (nunca
+#                              # pool vacío).
+#       phrases:               # Frases inline propias (soportan variables {{...}})
+#         - "Frase personalizada, {{first_name}}"
+#
+# =============================================================================
+# VARIABLES DE PLANTILLA DISPONIBLES:
+#
+#   Del emisor (quien ejecuta /tongo):
+#     {{first_name}}   — Nombre de pila
+#     {{last_name}}    — Apellido (vacío si no tiene)
+#     {{full_name}}    — Nombre completo
+#     {{username}}     — @username sin arroba (vacío si no tiene)
+#     {{id}}           — ID numérico de Telegram
+#
+#   Del mensaje respondido (si /tongo se usa como respuesta a otro mensaje):
+#     {{reply_to_first_name}}
+#     {{reply_to_last_name}}
+#     {{reply_to_full_name}}
+#     {{reply_to_username}}
+#     {{reply_to_id}}
+#
+#   → Si una frase usa {{reply_to_*}} Y /tongo es una respuesta, el bot entra
+#     en modo "reply-targeting": solo se eligen frases con esa variable y se
+#     omite el check de Sanchez.  Si no hay respuesta, las frases {{reply_to_*}}
+#     se ignoran (no se eligen nunca).
+#
+# =============================================================================
+# FALLBACK: si phrases: está vacío o ausente, el bot usa las frases
+# integradas en el código (FRASES en data/tongo.py).
+#
+# HOT-RELOAD: el bot recarga este archivo en cada /tongo (caché por mtime).
+#   Edita y guarda — el cambio se aplica en la siguiente invocación.
+#
+# ENV OVERRIDE: TONGO_USERS_PATH para cambiar la ruta del archivo en tiempo
+#   de ejecución (p.ej. en docker-compose o .env).
+#
+# Un usuario SIN entrada en users: conserva el comportamiento por defecto:
+#   1/3 "Sanchez ens roba", pool global — sin cambios hasta activar una entrada.
+# =============================================================================
+
+phrases:
+  - "Per robos el de Javi a Raona"
+  - "Que si quiere la bolsa"
+  - "La culpa es de Suñé"
+  - "Ara envio a la buuuhhhambulancia"
+  - "si, si, però vas palmant"
+  - "Si, y Amalia y Suñé son mejores amigos ahora también"
+  - "Y Rosamar para cuando?"
+  - "Y Santvi para cuando?"
+  - "Y Sant Celoni para cuando?"
+  - "Aguacate?"
+  - "Si, y Arbeloa es el jugador favorito de Laura. CAP17ÁN."
+  - "Tongo es que Joan García no fue convocado con el Espanyol y vaya con el Barça, asi que a callar."
+  - "Como va a ser tongo, si no te interesa ni el futbol."
+  - "Un conoooooo!! un cono!!!"
+  - "Por lo menos no somos italia."
+  - "Ah, pero ChatGPT decia que si."
+
+users:
+  # === Descomenta y ajusta cada bloque para activar overrides por usuario ===
+
+  # usuario_ejemplo:
+  #   sanchez_ratio: 0.66          # 2/3 de probabilidad de "Sanchez ens roba"
+  #   phrases_mode: append         # añade las frases propias al pool global
+  #   phrases:
+  #     - "{{first_name}}, menos tongo y más puntuar."
+  #     - "{{first_name}} (@{{username}}), reclamación nº 7.000 desestimada."
+
+  # otro_usuario:
+  #   sanchez_ratio: 0.0           # nunca "Sanchez ens roba" para este usuario
+  #   phrases_mode: replace        # sustituye el pool global con sus frases propias
+  #   phrases:
+  #     - "Nada de tongo, {{first_name}}, aquí todos sabemos que es trampa."
+  #     - "{{reply_to_first_name}} hace trampa, {{first_name}}, no se lo digas."
+
+  # tercer_usuario:
+  #   phrases:                     # solo frases propias en modo append (defecto)
+  #     - "{{first_name}}, el VAR te ha dado la vida más veces que tus predicciones."

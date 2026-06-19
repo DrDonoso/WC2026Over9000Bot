@@ -31,7 +31,29 @@ docker compose -f docker-compose.local.yml up --build
 
 **Hot-reload `/tongo` GIFs** — drop `.gif`, `.mp4`, or `.webp` files into `./data/tongo_gifs/` on the server. They are picked up immediately on the next `/tongo` with the same individual weight as each phrase (more GIFs → higher chance of a GIF in the 2/3 pool; "Sanchez ens roba" is unaffected at 1/3). Optionally override the scan folder with `TONGO_GIFS_DIR` in `.env`.
 
-**Hot-reload `/tongo` phrases** — edit `./data/TongoPhrases.txt` on the server. One phrase per line; lines starting with `#` are comments (ignored). The bot re-reads the file on every `/tongo` call (mtime-based cache). If the file is missing or empty, the built-in default phrases are used automatically.
+**Hot-reload `/tongo` phrases and per-user config** — the bot reads a **single YAML file** `./data/TongoUsers.yml` on every `/tongo` call (mtime-based cache). It has two top-level keys:
+
+```yaml
+phrases:                      # Pool global de frases
+  - "{{first_name}} calla anda"
+  # …
+
+users:                        # Overrides por persona (clave = @username en minúsculas)
+  algun_usuario:
+    sanchez_ratio: 0.66       # float 0–1; default 1/3 global.  0 = nunca, 1 = siempre
+    phrases_mode: append      # "append" (default): añade frases al pool global
+                              # "replace": sustituye el pool global
+                              #   (if replace + pool vacío → cae al global)
+    phrases:                  # frases propias inline (mismas variables {{...}})
+      - "{{first_name}}, ..."
+```
+
+- `data/TongoUsers.yml` is git-ignored (runtime file — edit it on the server).
+- `data/TongoUsers.template.yml` is committed — copy it to `data/TongoUsers.yml` as starting point.
+- `data/predictions.template.yml` is the committed template for `data/predictions.yml`.
+- If `phrases:` is absent or empty, the bot uses the built-in `FRASES` fallback automatically.
+- Invalid fields are silently ignored (logged at WARNING). An absent `users:` entry preserves the original behaviour (1/3 Sanchez, global phrase pool).
+- Override the file path with `TONGO_USERS_PATH` in `.env`.
 
 Phrases support 10 template variables substituted at render time:
 
@@ -48,28 +70,7 @@ Phrases support 10 template variables substituted at render time:
 | `{{reply_to_username}}` | Replied-to user's @username |
 | `{{reply_to_id}}` | Replied-to user's Telegram user ID |
 
-**Reply-targeting** — if a phrase uses any `{{reply_to_*}}` variable AND the `/tongo` command is sent as a reply to another message, the bot enters *reply-targeted mode*: only reply phrases are picked, and the "Sanchez ens roba" 1/3 check is skipped. On plain `/tongo` (no reply), or when no reply phrases exist in the file, the normal 1/3 Sanchez / 2/3 phrase pool logic applies. Reply targeting works even when the replied-to message is from a bot.
-
-Optionally override the phrases file path with `TONGO_PHRASES_PATH` in `.env`.
-
-**Per-user `/tongo` config** — create/edit `data/TongoUsers.yml` on the server to customise each participant's `/tongo` experience. The file is committed (empty by default) and hot-reloaded on every `/tongo` call. All entries are optional; an absent entry preserves the original behaviour (1/3 Sanchez, global phrase pool).
-
-Schema (all keys optional):
-
-```yaml
-username:                      # Telegram @username, lowercase, without @
-  sanchez_ratio: 0.66          # float 0–1; default 1/3 global.  0 = never, 1 = always
-  phrases_mode: append         # "append" (default): add phrases to global pool
-                               # "replace": replace global pool entirely
-                               #   (if replace + empty pool → falls back to global)
-  phrases:                     # inline list — same {{...}} variables as TongoPhrases.txt
-    - "Frase exclusiva, {{first_name}}"
-  phrases_file: tongo/nom.txt  # extra phrases from a file (path relative to TongoUsers.yml)
-```
-
-All 10 template variables (`{{first_name}}`, `{{reply_to_first_name}}`, …) work the same way in per-user phrases as in `TongoPhrases.txt`. Inline `phrases` and `phrases_file` are merged; `phrases_mode` controls whether the result is appended to or replaces the global pool.
-
-Invalid fields are silently ignored (logged at WARNING); other entries in the file are unaffected. Optionally override the file path with `TONGO_USERS_PATH` in `.env`.
+**Reply-targeting** — if a phrase uses any `{{reply_to_*}}` variable AND the `/tongo` command is sent as a reply to another message, the bot enters *reply-targeted mode*: only reply phrases are picked, and the "Sanchez ens roba" 1/3 check is skipped. On plain `/tongo` (no reply), or when no reply phrases exist in the pool, the normal 1/3 Sanchez / 2/3 phrase pool logic applies. Reply targeting works even when the replied-to message is from a bot.
 
 **Update the image** — the GitHub Action builds and pushes on every push to `main` (needs repo secrets `DOCKER_USERNAME` / `DOCKER_PASSWORD`). To pull the latest on the server:
 ```bash
@@ -95,7 +96,7 @@ docker compose pull && docker compose up -d
 | `/listaaciertosactual` | Provisional picks breakdown (live standings; only groups with ≥1 finished match score) |
 | `/mispredicciones` | Your full prediction sheet |
 | `/participantes` | List of participants |
-| `/tongo` | Easter egg 🤫 — edit `data/TongoPhrases.txt` (one phrase per line, hot-reload, 10 template variables, reply-targeting) or drop `.gif` / `.mp4` files into `data/tongo_gifs/` to mix animations into the pool |
+| `/tongo` | Easter egg 🤫 — edit `data/TongoUsers.yml` (YAML with `phrases:` global pool + `users:` per-user config, hot-reload, 10 template variables, reply-targeting) or drop `.gif` / `.mp4` files into `data/tongo_gifs/` to mix animations into the pool |
 
 ---
 

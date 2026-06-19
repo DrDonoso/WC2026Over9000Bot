@@ -13,10 +13,7 @@ services:
       # --- Predictions YAML path inside container ---
       PREDICTIONS_PATH: "${PREDICTIONS_PATH:-/app/data/predictions.yml}"
 
-      # --- Frases personalizables de /tongo (fichero montado en data/, hot-reload) ---
-      TONGO_PHRASES_PATH: "${TONGO_PHRASES_PATH:-/app/data/TongoPhrases.txt}"
-
-      # --- Config por persona de /tongo (fichero montado en data/, hot-reload) ---
+      # --- Config de /tongo: frases globales + overrides por persona (data/TongoUsers.yml, hot-reload) ---
       TONGO_USERS_PATH: "${TONGO_USERS_PATH:-/app/data/TongoUsers.yml}"
 
       # --- Competition code (football-data.org) ---

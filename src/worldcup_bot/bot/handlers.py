@@ -41,10 +41,8 @@ from worldcup_bot.data.tongo import (
     FRASES,
     build_tongo_context,
     choose_tongo_response,
-    load_tongo_phrases,
-    load_tongo_users,
+    load_tongo_config,
     phrase_uses_reply,
-    read_tongo_phrase_file,
     render_tongo,
 )
 from worldcup_bot.data.gender import infer_gender
@@ -543,15 +541,10 @@ async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
     predictions_parent = Path(settings.predictions_path).parent
 
-    if settings.tongo_phrases_path:
-        global_phrases_path = Path(settings.tongo_phrases_path)
-    else:
-        global_phrases_path = predictions_parent / "TongoPhrases.txt"
-
     if settings.tongo_users_path:
-        users_path = Path(settings.tongo_users_path)
+        path = Path(settings.tongo_users_path)
     else:
-        users_path = predictions_parent / "TongoUsers.yml"
+        path = predictions_parent / "TongoUsers.yml"
 
     if settings.tongo_gifs_dir:
         gifs_dir = Path(settings.tongo_gifs_dir)
@@ -563,8 +556,9 @@ async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     gender = infer_gender(user.first_name if user else None)
     ctx = build_tongo_context(update)
 
-    global_phrases = load_tongo_phrases(str(global_phrases_path))
-    users = load_tongo_users(str(users_path))
+    cfg = load_tongo_config(str(path))
+    global_phrases = cfg.phrases if cfg.phrases else FRASES
+    users = cfg.users
 
     username = _caller_username(update)
     user_cfg = users.get(username) if username else None
@@ -573,13 +567,7 @@ async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_cfg.sanchez_ratio if (user_cfg and user_cfg.sanchez_ratio is not None) else 1 / 3
     )
 
-    if user_cfg and user_cfg.phrases_file:
-        phrases_file_abs = str(users_path.parent / user_cfg.phrases_file)
-        file_phrases = read_tongo_phrase_file(phrases_file_abs)
-    else:
-        file_phrases = []
-
-    per_user_phrases = list(user_cfg.phrases) + file_phrases if user_cfg else []
+    per_user_phrases = list(user_cfg.phrases) if user_cfg else []
     mode = user_cfg.phrases_mode if user_cfg else "append"
 
     if mode == "replace" and per_user_phrases:

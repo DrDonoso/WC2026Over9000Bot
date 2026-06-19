@@ -24,6 +24,9 @@ venv/
 # Runtime data — git-ignored; populated at runtime from predictions.example.yml
 data/predictions.yml
 
+# Runtime /tongo config (merged phrases + per-user settings) — git-ignored; generated from template
+data/TongoUsers.yml
+
 # Tongo GIFs — runtime media, NEVER commit (folder kept via .gitkeep).
 # Drop .gif/.mp4 into data/tongo_gifs/ on the server (mounted, hot-reload, no rebuild).
 data/tongo_gifs/*

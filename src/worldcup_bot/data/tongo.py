@@ -6,8 +6,10 @@ Probability model:
 - Otherwise a random phrase is chosen from the loaded phrase pool (2/3 probability).
 SANCHEZ_ENS_ROBA must NOT appear in FRASES or the 1/3 guarantee would be violated.
 
-Phrases are loaded from a plain-text file (data/TongoPhrases.txt) with mtime-based
-hot-reload.  FRASES is the built-in fallback when the file is absent or empty.
+Phrases and per-user config are loaded from a single YAML file (data/TongoUsers.yml)
+with top-level keys ``phrases:`` (global pool) and ``users:`` (per-user overrides),
+using mtime-based hot-reload.  FRASES is the built-in fallback when the file is
+absent, empty, or has no ``phrases:`` list.
 """
 
 from __future__ import annotations
@@ -50,55 +52,6 @@ def frase_argentino(gender: str) -> str:
     if gender == "f":
         return "Que tongo ni que tongo, eres mas pesada que una argentina."
     return "Que tongo ni que tongo, eres mas pesado que un argentino."
-
-
-# ── module-level hot-reload state ─────────────────────────────────────────────
-_cached_path: str | None = None
-_cached_mtime: float = 0.0
-_cached_data: list[str] = []
-
-
-def load_tongo_phrases(path: str) -> list[str]:
-    """Load phrases from *path* using mtime-based hot-reload.
-
-    Returns a list of non-empty, non-comment lines.
-    Falls back to built-in FRASES on missing file, empty result, or OSError.
-    Never raises.
-    """
-    global _cached_path, _cached_mtime, _cached_data
-
-    if not os.path.exists(path):
-        log.info("TongoPhrases.txt not found at %s — using built-in phrases", path)
-        return FRASES
-
-    try:
-        mtime = os.path.getmtime(path)
-    except OSError as exc:
-        log.warning("Cannot stat tongo phrases file %s: %s", path, exc)
-        return FRASES
-
-    if path == _cached_path and mtime == _cached_mtime and _cached_data:
-        return _cached_data
-
-    log.info("(Re)loading tongo phrases from %s", path)
-    try:
-        with open(path, encoding="utf-8") as fh:
-            raw_lines = fh.readlines()
-    except OSError as exc:
-        log.warning("Cannot read tongo phrases file %s: %s", path, exc)
-        return FRASES
-
-    phrases = [line.strip() for line in raw_lines]
-    phrases = [p for p in phrases if p and not p.startswith("#")]
-
-    if not phrases:
-        log.info("TongoPhrases.txt at %s has no usable phrases — using built-in phrases", path)
-        return FRASES
-
-    _cached_path = path
-    _cached_mtime = mtime
-    _cached_data = phrases
-    return phrases
 
 
 # ── context dataclass ─────────────────────────────────────────────────────────
@@ -237,146 +190,135 @@ class TongoUserConfig:
     sanchez_ratio: float | None = None
     phrases_mode: str = "append"
     phrases: list[str] = field(default_factory=list)
-    phrases_file: str | None = None
 
 
-# ── users YAML hot-reload state ───────────────────────────────────────────────
+# ── merged config dataclass ───────────────────────────────────────────────────
 
-_cached_users_path: str | None = None
-_cached_users_mtime: float = 0.0
-_cached_users_data: dict[str, TongoUserConfig] = {}
+@dataclass
+class TongoConfig:
+    """Merged tongo config loaded from a single YAML file (phrases: + users:)."""
+    phrases: list[str] = field(default_factory=list)
+    users: dict[str, TongoUserConfig] = field(default_factory=dict)
 
 
-def load_tongo_users(path: str) -> dict[str, TongoUserConfig]:
-    """Load per-user tongo config from *path* (YAML) with mtime-based hot-reload.
+# ── hot-reload state ──────────────────────────────────────────────────────────
 
-    Returns a dict keyed by lowercased Telegram username.
-    Invalid entries/fields are skipped with a warning (never raise).
-    Returns {} on missing file, empty file, YAML parse error, or OSError.
+_cached_config_path: str | None = None
+_cached_config_mtime: float = 0.0
+_cached_config_data: TongoConfig | None = None
+
+
+def load_tongo_config(path: str) -> TongoConfig:
+    """Load the merged tongo config from *path* (YAML) with mtime-based hot-reload.
+
+    The YAML must have:
+      - top-level ``phrases:`` list[str]  — global phrase pool
+      - top-level ``users:`` mapping      — per-user overrides
+
+    Validation is graceful: invalid fields are logged and skipped; the function
+    never raises.  Returns an empty TongoConfig() on missing file, empty file,
+    YAML error, or OSError.
     """
-    global _cached_users_path, _cached_users_mtime, _cached_users_data
+    global _cached_config_path, _cached_config_mtime, _cached_config_data
 
     if not os.path.exists(path):
-        log.debug("TongoUsers.yml not found at %s — no per-user overrides", path)
-        return {}
+        log.debug("TongoUsers.yml not found at %s — using built-in defaults", path)
+        return TongoConfig()
 
     try:
         mtime = os.path.getmtime(path)
     except OSError as exc:
-        log.warning("Cannot stat tongo users file %s: %s", path, exc)
-        return {}
+        log.warning("Cannot stat tongo config file %s: %s", path, exc)
+        return TongoConfig()
 
-    if path == _cached_users_path and mtime == _cached_users_mtime:
-        return _cached_users_data
+    if (
+        path == _cached_config_path
+        and mtime == _cached_config_mtime
+        and _cached_config_data is not None
+    ):
+        return _cached_config_data
 
-    log.info("(Re)loading tongo users from %s", path)
+    log.info("(Re)loading tongo config from %s", path)
     try:
         with open(path, encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh) or {}
+            raw = yaml.safe_load(fh)
     except yaml.YAMLError as exc:
-        log.warning("YAML parse error in tongo users file %s: %s", path, exc)
-        return {}
+        log.warning("YAML parse error in tongo config %s: %s", path, exc)
+        return TongoConfig()
     except OSError as exc:
-        log.warning("Cannot read tongo users file %s: %s", path, exc)
-        return {}
+        log.warning("Cannot read tongo config %s: %s", path, exc)
+        return TongoConfig()
 
     if not isinstance(raw, dict):
-        log.warning("TongoUsers.yml at %s is not a mapping — ignored", path)
-        return {}
+        if raw is not None:
+            log.warning("TongoUsers.yml at %s is not a mapping — ignored", path)
+        return TongoConfig()
 
-    result: dict[str, TongoUserConfig] = {}
-    for username, entry in raw.items():
-        uname = str(username).lower()
-        if not isinstance(entry, dict):
-            log.warning("TongoUsers.yml: entry %r is not a mapping — skipped", username)
-            continue
+    # Parse top-level phrases
+    raw_phrases = raw.get("phrases")
+    if raw_phrases is None:
+        phrases: list[str] = []
+    elif isinstance(raw_phrases, list) and all(isinstance(p, str) for p in raw_phrases):
+        phrases = list(raw_phrases)
+    else:
+        log.warning("TongoUsers.yml at %s: 'phrases' is not a list of strings — using []", path)
+        phrases = []
 
-        cfg = TongoUserConfig()
-
-        if "sanchez_ratio" in entry:
-            val = entry["sanchez_ratio"]
-            if isinstance(val, (int, float)) and 0.0 <= float(val) <= 1.0:
-                cfg.sanchez_ratio = float(val)
-            else:
+    # Parse users
+    raw_users = raw.get("users")
+    users: dict[str, TongoUserConfig] = {}
+    if raw_users is None:
+        pass  # absent or null → empty dict; no warning
+    elif not isinstance(raw_users, dict):
+        log.warning("TongoUsers.yml at %s: 'users' is not a mapping — ignored", path)
+    else:
+        for username, entry in raw_users.items():
+            uname = str(username).lower()
+            if not isinstance(entry, dict):
                 log.warning(
-                    "TongoUsers.yml: %s.sanchez_ratio=%r is not a number in [0,1] — ignored",
-                    uname, val,
+                    "TongoUsers.yml: users.%s is not a mapping — skipped", username
                 )
+                continue
 
-        if "phrases_mode" in entry:
-            val = entry["phrases_mode"]
-            if val in ("append", "replace"):
-                cfg.phrases_mode = val
-            else:
-                log.warning(
-                    "TongoUsers.yml: %s.phrases_mode=%r invalid (must be 'append' or 'replace') — using 'append'",
-                    uname, val,
-                )
+            cfg = TongoUserConfig()
 
-        if "phrases" in entry:
-            val = entry["phrases"]
-            if isinstance(val, list) and all(isinstance(p, str) for p in val):
-                cfg.phrases = list(val)
-            else:
-                log.warning(
-                    "TongoUsers.yml: %s.phrases is not a list of strings — ignored",
-                    uname,
-                )
+            if "sanchez_ratio" in entry:
+                val = entry["sanchez_ratio"]
+                if isinstance(val, (int, float)) and 0.0 <= float(val) <= 1.0:
+                    cfg.sanchez_ratio = float(val)
+                else:
+                    log.warning(
+                        "TongoUsers.yml: users.%s.sanchez_ratio=%r is not a number in [0,1] — ignored",
+                        uname, val,
+                    )
 
-        if "phrases_file" in entry:
-            val = entry["phrases_file"]
-            if isinstance(val, str) and val:
-                cfg.phrases_file = val
-            else:
-                log.warning(
-                    "TongoUsers.yml: %s.phrases_file=%r is not a non-empty string — ignored",
-                    uname, val,
-                )
+            if "phrases_mode" in entry:
+                val = entry["phrases_mode"]
+                if val in ("append", "replace"):
+                    cfg.phrases_mode = val
+                else:
+                    log.warning(
+                        "TongoUsers.yml: users.%s.phrases_mode=%r invalid (must be 'append' or 'replace') — using 'append'",
+                        uname, val,
+                    )
 
-        result[uname] = cfg
+            if "phrases" in entry:
+                val = entry["phrases"]
+                if isinstance(val, list) and all(isinstance(p, str) for p in val):
+                    cfg.phrases = list(val)
+                else:
+                    log.warning(
+                        "TongoUsers.yml: users.%s.phrases is not a list of strings — ignored",
+                        uname,
+                    )
 
-    _cached_users_path = path
-    _cached_users_mtime = mtime
-    _cached_users_data = result
+            users[uname] = cfg
+
+    result = TongoConfig(phrases=phrases, users=users)
+    _cached_config_path = path
+    _cached_config_mtime = mtime
+    _cached_config_data = result
     return result
-
-
-# ── per-user phrase file cache (path-keyed; avoids single-path cache thrash) ──
-
-_phrase_file_cache: dict[str, tuple[float, list[str]]] = {}
-
-
-def read_tongo_phrase_file(path: str) -> list[str]:
-    """Read non-empty, non-comment lines from a per-user phrase file.
-
-    Uses a path-keyed mtime cache so alternating across multiple users' files
-    does not thrash the single-entry cache used by load_tongo_phrases.
-    Returns [] on missing file, empty result, or OSError.  Never raises.
-    """
-    global _phrase_file_cache
-
-    if not os.path.exists(path):
-        return []
-
-    try:
-        mtime = os.path.getmtime(path)
-    except OSError:
-        return []
-
-    cached = _phrase_file_cache.get(path)
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
-
-    try:
-        with open(path, encoding="utf-8") as fh:
-            raw_lines = fh.readlines()
-    except OSError:
-        return []
-
-    phrases = [line.strip() for line in raw_lines]
-    phrases = [p for p in phrases if p and not p.startswith("#")]
-    _phrase_file_cache[path] = (mtime, phrases)
-    return phrases
 
 
 # ── pure selection function ───────────────────────────────────────────────────

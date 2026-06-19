@@ -1,0 +1,84 @@
+# =============================================================================
+# predictions.template.yml — PLANTILLA para las predicciones de la porra
+# =============================================================================
+#
+# Este archivo es la plantilla comprometida (git-tracked). El archivo de
+# ejecución REAL es data/predictions.yml (ignorado por git). Cópialo con:
+#
+#   cp data/predictions.template.yml data/predictions.yml
+#
+# y rellena las predicciones reales en data/predictions.yml.
+# El bot lo recarga automáticamente en cada comando sin reiniciar.
+#
+# =============================================================================
+# ESQUEMA:
+#
+#   participants:
+#     nombredeusuario:            # @username en minúsculas, sin @
+#       display_name: "Nombre"   # nombre para mostrar en clasificaciones
+#       base_score: 0            # puntos manuales adicionales (raramente necesario)
+#       groups:                  # predicciones de fase de grupos
+#         A: [TLA1, TLA2, TLA3] # top-3 en orden (1º, 2º, 3º)
+#         B: ...                 # grupos A..L (12 grupos en 2026)
+#       knockout:                # predicciones de fases eliminatorias
+#         round_of_32: []        # 16 equipos que pasan de 32vos
+#         round_of_16: []        # 8 equipos que pasan de 16vos
+#         quarter_finals: []     # 4 equipos que pasan de cuartos
+#         semi_finals: []        # 2 equipos que pasan de semis
+#         final: []              # campeón (1 equipo)
+#
+# NOTAS:
+#   - Usa "**" como comodín (no-pick): siempre puntúa 0, nunca da error.
+#   - Los códigos TLA deben coincidir exactamente con football-data.org
+#     (p.ej. KSA no SAU, URY no URU).  Códigos erróneos puntúan 0 en silencio.
+#   - Las fases de knockout se pueden dejar vacías ([]) hasta que avance la
+#     competición.
+# =============================================================================
+
+participants:
+
+  usuario_ejemplo:
+    display_name: "Nombre Apellido"
+    base_score: 0
+    groups:
+      A: ["MEX", "KOR", "CZE"]
+      B: ["CAN", "SUI", "**"]
+      C: ["BRA", "MAR", "SCO"]
+      D: ["USA", "TUR", "PAR"]
+      E: ["GER", "ECU", "CIV"]
+      F: ["JPN", "NED", "SWE"]
+      G: ["BEL", "EGY", "IRN"]
+      H: ["ESP", "URY", "**"]
+      I: ["FRA", "NOR", "SEN"]
+      J: ["ARG", "AUT", "ALG"]
+      K: ["POR", "COL", "UZB"]
+      L: ["ENG", "CRO", "PAN"]
+    knockout:
+      round_of_32: []
+      round_of_16: []
+      quarter_finals: []
+      semi_finals: []
+      final: []
+
+  otro_usuario:
+    display_name: "Otro Nombre"
+    base_score: 0
+    groups:
+      A: ["MEX", "CZE", "RSA"]
+      B: ["CAN", "SUI", "QAT"]
+      C: ["BRA", "SCO", "HAI"]
+      D: ["AUS", "PAR", "TUR"]
+      E: ["GER", "CIV", "CUW"]
+      F: ["NED", "SWE", "JPN"]
+      G: ["BEL", "NZL", "EGY"]
+      H: ["ESP", "URY", "CPV"]
+      I: ["FRA", "SEN", "**"]
+      J: ["ARG", "ALG", "AUT"]
+      K: ["POR", "COL", "COD"]
+      L: ["ENG", "PAN", "GHA"]
+    knockout:
+      round_of_32: []
+      round_of_16: []
+      quarter_finals: []
+      semi_finals: []
+      final: []
