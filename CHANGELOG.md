@@ -5,6 +5,15 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260619] - 2026-06-19
+
+- fix: the daily-summary AI prompt now requires writing each participant's full name (nombre y apellidos) exactly as it appears in the ranking, never just the first name — so bold_person_names always matches and everyone is bolded (first-name-only mentions like "Miquel"/"Cristina"/"Patri" were going unbolded)
+- Archived 14 pre-2026-06-18 decisions to decisions-archive.md (102KB → 33KB decisions.md)
+- Merged 2 inbox files (kante-czechia-team-alias.md, kante-endirecto-429-shared-scanner-cache.md)
+- Created orchestration-log/2026-06-18T17-21-15Z-kante.md (kante-42 + kante-43 summary)
+- Created log/2026-06-18T17-21-15Z-czechia-and-endirecto-429.md (session record for commit 6cfe641)
+
+
 ## [20260618.06] - 2026-06-18
 
 - fix: add a Czech Republic ↔ Czechia team alias so goal clips posted as "Czech Republic ..." match the football-data "Czechia" fixture and get the "Ver gol" button
