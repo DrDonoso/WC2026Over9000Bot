@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260619.03] - 2026-06-19
+
+- sanchez_ratio (0..1): override the global 1/3 'Sanchez ens roba' probability (e.g. 0.66 for 2/3, 0.0 to disable, 1.0 to always). - phrases (inline) + phrases_file (relative path): per-user phrases, full {{...}} templating supported. - phrases_mode: append (default, merge with the global pool) or replace (use only the user's phrases; empty -> safe fallback to global pool).
+
+
 ## [20260619.02] - 2026-06-19
 
 - feat(tongo): customizable templated phrases from data/TongoPhrases.txt
