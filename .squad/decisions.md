@@ -1052,3 +1052,344 @@ pool = rendered sender phrases + `frase_argentino(gender)` + gifs.
 - All 16 seed phrases in `TongoPhrases.txt` are plain strings with no template vars — identical to the previous hardcoded behavior.
 - `isinstance(val, str)` guard in `_extract_user_fields` makes context extraction safe against both real PTB User objects and MagicMock attributes in tests.
 - 1408 tests green (1357 before).
+
+
+# Design Proposal: Per-User `/tongo` Configuration
+
+**Author:** Pirlo (Tech Lead)  
+**Date:** 2026-06-19  
+**Status:** PROPOSAL — awaiting DrDonoso confirmation
+
+---
+
+## Problem Statement
+
+DrDonoso wants `/tongo` behavior to vary per user:
+- **User X scenario:** Override SANCHEZ probability (e.g., 2/3 instead of 1/3).
+- **User Y scenario:** Pull from a completely different phrase pool (skip/alter SANCHEZ behavior).
+
+Current behavior: global 1/3 SANCHEZ probability, single shared phrase pool for all users.
+
+---
+
+## 1. Where Per-User Config Lives — Options Evaluated
+
+### Option A: Extend `predictions.yml` with `tongo:` block
+```yaml
+participants:
+  drdonoso:
+    display_name: "David"
+    groups: {...}
+    knockout: {...}
+    tongo:  # NEW optional block
+      sanchez_ratio: 0.66
+      phrases_mode: replace
+      phrases:
+        - "Custom phrase for David {{first_name}}"
+```
+
+| Pro | Con |
+|-----|-----|
+| Single source of truth (already keyed by username) | Couples porra data with easter-egg config |
+| Already hot-reloads | `predictions.yml` is git-ignored — no version control for tongo config |
+| No new file/env needed | Validation complexity increases |
+
+### Option B: Dedicated `data/TongoUsers.yml` (RECOMMENDED)
+```yaml
+# data/TongoUsers.yml
+drdonoso:
+  sanchez_ratio: 0.66
+  phrases_mode: append
+  phrases:
+    - "Otra queja de David..."
+
+raona:
+  sanchez_ratio: 0.0
+  phrases_mode: replace
+  phrases_file: "tongo/raona.txt"  # OR inline phrases
+```
+
+| Pro | Con |
+|-----|-----|
+| Separation of concerns — tongo config is independent of porra | One more file to manage |
+| Can be committed (version-controlled) or git-ignored (operator choice) | New loader + hot-reload (minor, pattern exists) |
+| Clean validation — fails independently of predictions | — |
+| `data/` already mounted — no infra change | — |
+
+### Option C: In-band syntax in `TongoPhrases.txt`
+```
+# default section
+Per robos el de Javi a Raona.
+...
+
+[user:drdonoso ratio=0.66]
+Frase exclusiva para David.
+
+[user:raona ratio=0 mode=replace]
+Frase solo para Raona.
+```
+
+| Pro | Con |
+|-----|-----|
+| Single file | Messy parsing; error-prone |
+| — | Hard to read/maintain for humans |
+| — | Breaks current "one phrase per line" simplicity |
+
+### ✅ Recommendation: **Option B** — `data/TongoUsers.yml`
+
+Cleanest separation, familiar YAML, operator can decide commit vs git-ignore. Pattern mirrors `predictions.yml` loader.
+
+---
+
+## 2. Identification & Fallback
+
+- **Key by `username.lower()`** — consistent with `predictions.py` (`get_participant` already does this).
+- **No username?** → Fall back to default global behavior. (Some Telegram users have no @username — ~5% edge case.)
+- **Match by `id`?** Not recommended for v1. Adds complexity, operator can't easily configure (they know usernames, not numeric IDs). Revisit only if real need arises.
+
+---
+
+## 3. Semantics — Recommended Defaults
+
+| Setting | Type | Default | Meaning |
+|---------|------|---------|---------|
+| `sanchez_ratio` | float 0..1 | (absent = global 1/3) | Probability of SANCHEZ_ENS_ROBA on non-reply path. `0.0` = never, `1.0` = always. |
+| `phrases_mode` | `append` \| `replace` | `append` | `append` = user phrases + global pool; `replace` = ONLY user phrases. |
+| `phrases` | list[str] | `[]` | Inline phrases (templating applies). |
+| `phrases_file` | str (path relative to `data/`) | `null` | Alternative: load from `data/{path}`. Mutually exclusive with inline `phrases`. |
+
+**Edge-case behaviors:**
+- If `phrases_mode: replace` and user has 0 phrases → fall back to global pool (fail-safe).
+- Per-user phrases still support `{{...}}` templating.
+- GIFs stay global (simplest; no ask for per-user GIFs).
+- Reply-targeted path unchanged — per-user config only affects the non-reply path's SANCHEZ ratio and phrase pool. (If user X replies to a message, reply phrases still work as today.)
+
+**Case X (e.g., 2/3 SANCHEZ):**
+```yaml
+userx:
+  sanchez_ratio: 0.66
+```
+Everything else defaults — phrases from global pool.
+
+**Case Y (dedicated pool, no SANCHEZ):**
+```yaml
+usery:
+  sanchez_ratio: 0.0
+  phrases_mode: replace
+  phrases:
+    - "Frase especial 1 para Y"
+    - "Frase especial 2 para Y"
+```
+
+---
+
+## 4. Backward Compatibility
+
+- **Unconfigured users** must get **exact current behavior**: 1/3 SANCHEZ, global TongoPhrases.txt pool, reply-targeted path.
+- The global `"SANCHEZ 1/3"` invariant test must pass for any user NOT in `TongoUsers.yml`.
+- If `TongoUsers.yml` is missing entirely → all users get global behavior (no error).
+
+---
+
+## 5. Module Boundaries
+
+### Extract pure selection logic
+Move the random selection into a **pure, unit-testable function** in `data/tongo.py`:
+
+```python
+def choose_tongo_response(
+    username: str | None,
+    ctx: TongoContext,
+    user_cfg: TongoUserConfig | None,  # from loader
+    global_phrases: list[str],
+    gifs: list[Path],
+    gender: str,
+    rng: random.Random = random,  # injectable for tests
+) -> str | Path:
+    """Return the selected tongo response (rendered phrase or GIF path)."""
+```
+
+- **`cmd_tongo` becomes thin**: build context, load configs, call `choose_tongo_response`, send result.
+- **Pure function** = trivial to unit-test all edge cases (user with custom ratio, user with replace mode, unconfigured user, no-username user).
+
+### New types
+```python
+@dataclass
+class TongoUserConfig:
+    sanchez_ratio: float | None  # None = use global
+    phrases_mode: Literal["append", "replace"]
+    phrases: list[str]  # already rendered? No — raw, render at call time.
+```
+
+### Hot-reload
+`load_tongo_users(path: str) -> dict[str, TongoUserConfig]` — mtime-based, same pattern as `load_tongo_phrases` and `predictions.load`.
+
+---
+
+## 6. Implementation Sequence
+
+| Phase | Who | What |
+|-------|-----|------|
+| 1. Loader | Kanté | `load_tongo_users(path)` in `data/tongo.py` — mtime hot-reload, returns `dict[str, TongoUserConfig]`. |
+| 2. Pure selector | Kanté | `choose_tongo_response(...)` — all logic extracted from `cmd_tongo`. |
+| 3. Wire handler | Kanté | Slim `cmd_tongo` calls loader + selector. Add `TONGO_USERS_PATH` env var (default `data/TongoUsers.yml`). |
+| 4. Tests | Kanté | Unit tests for loader + selector; parametrize: unconfigured, ratio override, replace mode, edge cases. |
+| 5. Config (opt.) | Maldini | Only if new env var needs documenting in `docker-compose.yml` or README — minor. |
+
+**Out of scope for v1:**
+- Per-user GIFs.
+- Per-user reply-targeted phrase pools.
+- Matching by Telegram numeric ID.
+
+---
+
+## 7. Open Decisions for DrDonoso
+
+Before Kanté implements, please confirm:
+
+1. **File location & versioning:** `data/TongoUsers.yml` committed (version-controlled) or git-ignored (runtime-only like `predictions.yml`)? I recommend **committed** so you can track changes, but your call.
+
+2. **Inline phrases vs. per-user file:** Support both `phrases: [...]` inline AND `phrases_file: "tongo/raona.txt"`, or only one? I recommend **both** — inline for short lists, file for long lists.
+
+3. **Default phrases_mode:** `append` (merge with global) or `replace` (only user's phrases)? I recommend **`append`** as default.
+
+Once confirmed, Kanté can start immediately — this is a ~2-3 hour implementation with tests.
+
+---
+
+**End of proposal.**
+
+
+# Decision: Per-User /tongo Config (TongoUsers.yml)
+
+**Author:** Kanté  
+**Date:** 2026-06-19T09:41:34Z  
+**Status:** Implemented  
+
+---
+
+## Summary
+
+Implemented per-user `/tongo` configuration via a committed `data/TongoUsers.yml` file. Each participant can now have an overridden Sanchez probability and/or their own phrase pool, while all unconfigured users keep exactly the original behavior.
+
+---
+
+## Problem
+
+- DrDonoso wanted two use cases:
+  1. **Person X:** a higher Sanchez probability (e.g. 2/3 instead of 1/3).
+  2. **Person Y:** their own phrase list (replacing or appending to the global pool), optionally with no Sanchez at all.
+- Pirlo's approved design: `data/TongoUsers.yml`, keyed by lowercased Telegram username, `phrases_mode: append` default, support both inline `phrases` and `phrases_file`.
+
+---
+
+## Design Decisions
+
+### Config file committed and empty by default
+
+`data/TongoUsers.yml` is committed (not git-ignored) and ships with all example entries commented out. `yaml.safe_load` returns `{}` for a comment-only file → zero behavioral change on first deploy. This mirrors the `TongoPhrases.txt` pattern.
+
+### `TongoUserConfig` dataclass in `tongo.py`
+
+Kept in the same module as `TongoContext` for cohesion. Fields match the YAML schema exactly, all optional.
+
+### `load_tongo_users`: mtime hot-reload, graceful degradation
+
+Mirrors the `predictions.py` / `load_tongo_phrases` cache pattern:
+- Module-level `_cached_users_path`, `_cached_users_mtime`, `_cached_users_data`
+- Returns `{}` (not raises) on any error: missing file, YAML parse error, OSError
+- Per-field validation: invalid value → log warning + skip that field (never skip the whole entry)
+
+### `read_tongo_phrase_file`: path-keyed dict cache
+
+The existing `load_tongo_phrases` uses a single-path module-level cache. Reusing it for per-user files would thrash (cache invalidated on every alternating path). Solution: `_phrase_file_cache: dict[str, tuple[float, list[str]]]` — each path gets its own mtime entry. Files are tiny and `/tongo` is low-frequency, so memory is negligible.
+
+### `choose_tongo_response`: pure, injectable rng
+
+Extracted the reply-path / SANCHEZ-gate / sender-pool logic into a pure function with `rng` as a keyword argument (defaulting to the `random` module). The handler passes `rng=random` explicitly so existing tests that patch `worldcup_bot.bot.handlers.random` still control the selection without modification. New unit tests pass a `_FakeRNG` instance directly.
+
+### Effective phrases composition
+
+```
+per_user_phrases = user_cfg.phrases + read_tongo_phrase_file(phrases_file_abs)
+if mode == "replace" AND per_user_phrases non-empty:
+    effective = per_user_phrases
+else:
+    effective = global_phrases + per_user_phrases  # covers append + replace-empty guard
+```
+
+The "replace + empty" fallback to global prevents an empty pool (would crash `random.choice`).
+
+### GIF error fallback
+
+Computed inside the `except` block (not before the `try`) to avoid consuming a mock `side_effect` slot in tests that don't trigger the error path. Uses `global_phrases` (non-reply phrases rendered) or `FRASES` — never per-user phrases — to guarantee a safe fallback regardless of user config.
+
+---
+
+## Files Changed
+
+| File | Change |
+|---|---|
+| `data/TongoUsers.yml` | **NEW** — committed, comment-only (loads to `{}`) |
+| `src/worldcup_bot/data/tongo.py` | Added: `import random`, `from pathlib import Path`, `import yaml`; `TongoUserConfig` dataclass; `load_tongo_users`; `_phrase_file_cache` + `read_tongo_phrase_file`; `choose_tongo_response` |
+| `src/worldcup_bot/config.py` | Added `tongo_users_path: str = ""` field + `TONGO_USERS_PATH` env var in `load_settings()` |
+| `src/worldcup_bot/bot/handlers.py` | Updated imports (removed unused `SANCHEZ_ENS_ROBA`, `frase_argentino`, `phrase_eligible`; added `choose_tongo_response`, `load_tongo_users`, `read_tongo_phrase_file`); rewrote `cmd_tongo` |
+| `tests/test_tongo_users.py` | **NEW** — 55 tests |
+| `README.md` | Added per-user config section |
+| `.squad/agents/kante/history.md` | Appended session record |
+
+---
+
+## Test Count
+
+- Baseline: 1408
+- After: **1463** (+55)
+- All existing tests green — unconfigured-user SANCHEZ 1/3 invariant preserved.
+
+
+# Decision: Wire TONGO_USERS_PATH Environment Variable
+
+**Date:** 2026-06-19  
+**Agent:** Maldini (DevOps)  
+**Scope:** Infrastructure (environment variables, docker-compose files)
+
+## Context
+
+Kanté is adding a new per-user `/tongo` configuration file (`data/TongoUsers.yml`) that will store per-user settings (sanchez_ratio + custom phrases). For consistency with existing env-var patterns (`PREDICTIONS_PATH`, `TONGO_PHRASES_PATH`), we need to wire an optional env var to allow the file path to be overridden at runtime.
+
+## Changes Made
+
+1. **docker-compose.yml** (prod)
+   - Added `TONGO_USERS_PATH: "${TONGO_USERS_PATH:-/app/data/TongoUsers.yml}"` to the `environment:` block.
+   - Placed immediately after `TONGO_PHRASES_PATH` block.
+   - Comment: `# --- Config por persona de /tongo (fichero montado en data/, hot-reload) ---`
+
+2. **docker-compose.local.yml** (dev)
+   - Identical entry to prod.
+   - Ensures parity between local and production environments.
+
+3. **.env.example**
+   - Added commented documentation line: `# TONGO_USERS_PATH=/app/data/TongoUsers.yml   # config por persona de /tongo (sanchez_ratio + frases propias; default: data/TongoUsers.yml)`
+   - Placed immediately after `TONGO_PHRASES_PATH` line.
+   - Describes the file purpose and documents the default path.
+
+## Validation
+
+- **No new volumes needed:** The `data/` directory is already mounted read-only at `/app/data:ro` in both compose files.
+- **Gitignore check:** Verified that `data/TongoUsers.yml` is **not ignored** by `.gitignore` (exit code 1 from `git check-ignore`), so the file is committable.
+- **Parity:** Matches the env-var convention used for `PREDICTIONS_PATH` and `TONGO_PHRASES_PATH`:
+  - Form: `${VAR_NAME:-/app/data/filename}`
+  - Both compose files use identical entries.
+  - `.env.example` documents the optional nature and default.
+- **No code/test changes:** Dockerfile remains untouched; Kanté owns the application config logic in `config.py`.
+
+## Why This Matters
+
+- **Consistency:** Users (and Kanté's code) can now customize the path to `data/TongoUsers.yml` the same way they customize `predictions.yml` and `TongoPhrases.txt`.
+- **Hot-reload:** File is mounted read-only, supporting hot-reload workflows without container rebuild.
+- **Same image everywhere:** Prod and local use the same image; only env vars differ, maintaining the "single image" contract.
+
+## Next Steps
+
+- Kanté adds logic to `config.py` to read `TONGO_USERS_PATH` and load the file (defaulting to `/app/data/TongoUsers.yml` if unset).
+- File `data/TongoUsers.yml` can be committed to the repository.

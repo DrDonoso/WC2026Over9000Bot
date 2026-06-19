@@ -42,3 +42,11 @@
 - **Module decoupling worked:** Pure scoring function + separate API client normalization layer + data-driven configuration = easy testing, high confidence, maintainability.
 - **Team operated autonomously:** Pirlo specified contract → Maldini scaffolded → Kanté implemented → Buffon tested → bugs found and fixed pre-ship. No blocking; clear handoffs.
 - **Lesson for future sessions:** Architectural contracts (defining public APIs, dependencies, error handling) are worth the upfront effort.
+
+### 2026-06-19 — Per-User Tongo Config Design
+
+- **Feature request:** Make `/tongo` SANCHEZ ratio and phrase pool configurable per user (identified by Telegram username).
+- **Recommended approach:** Dedicated `data/TongoUsers.yml` file (Option B) over extending `predictions.yml` or in-band syntax. Clean separation, familiar pattern, operator-controlled commit/ignore.
+- **Key design choice:** Extract selection logic into a pure `choose_tongo_response()` function — keeps handler thin, enables comprehensive unit testing.
+- **Backward compat:** Unconfigured users must get exact current 1/3 SANCHEZ behavior. Missing config file = all global.
+- **Learning:** Easter-egg config should not couple with core porra data. Separate files allow independent versioning decisions.

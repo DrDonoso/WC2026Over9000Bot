@@ -83,6 +83,20 @@
 - Pipefail safety: `{ pipeline } > file || true` wraps the grep/sed chain — `set -eo pipefail` (GitHub Actions default) would abort if any `grep -v` sees empty input; the `|| true` absorbs the non-zero exit code.
 - Race-condition resilience: non-fast-forward push retried once with `git pull --rebase --autostash`; second failure emits a warning and exits 0 rather than failing the entire deploy workflow.
 
+### Tongo Phrases Optional Environment Variable (2026-06-19)
+- Wired `TONGO_PHRASES_PATH` optional env var for Kanté's new `/tongo` customizable phrases file (`data/TongoPhrases.txt`).
+- **Changes:** (1) `docker-compose.yml`: added `TONGO_PHRASES_PATH: "${TONGO_PHRASES_PATH:-/app/data/TongoPhrases.txt}"` with Spanish comment, right after `PREDICTIONS_PATH` block (line ~15). (2) `docker-compose.local.yml`: identical entry. (3) `.env.example`: added commented example with default path and description.
+- **No volume changes:** `data/` directory already mounted read-only at `/app/data:ro` in both compose files; no new mount needed.
+- **Gitignore:** `data/TongoPhrases.txt` is **committed** (not ignored). Verified via `git check-ignore` exit 1 (not matching any ignore rules). File follows pattern of other committed data files (e.g., `predictions.example.yml`).
+- **Parity with PREDICTIONS_PATH:** Same env-var convention (`${VAR:-default}`) for consistency across compose files and local/prod symmetry.
+
+### Tongo Users Per-Person Config Optional Environment Variable (2026-06-19)
+- Wired `TONGO_USERS_PATH` optional env var for Kanté's new per-user `/tongo` config file (`data/TongoUsers.yml`).
+- **Changes:** (1) `docker-compose.yml`: added `TONGO_USERS_PATH: "${TONGO_USERS_PATH:-/app/data/TongoUsers.yml}"` with Spanish comment, right after `TONGO_PHRASES_PATH` block. (2) `docker-compose.local.yml`: identical entry. (3) `.env.example`: added commented example with default path and description (sanchez_ratio + custom phrases per user).
+- **No volume changes:** `data/` directory already mounted read-only at `/app/data:ro` in both compose files; no new mount needed.
+- **Gitignore:** `data/TongoUsers.yml` is **committable** (not ignored). Verified via `git check-ignore` exit 1 (not matching any ignore rules).
+- **Parity with PREDICTIONS_PATH and TONGO_PHRASES_PATH:** Same env-var convention (`${VAR:-default}`) for consistency.
+
 ## Session Summary (2026-06-16T13:46:51Z)
 
 Maldini's daily-update rework (Phases 23–24) verified live on Telegram test group (message #446). All work integrated with Kanté's max_completion_tokens fix and HTML snapshot feature. Docker ownership fix applied; state volume working correctly. Code pending user approval for commit.

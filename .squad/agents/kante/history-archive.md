@@ -91,3 +91,87 @@ Over 2026-06-15 and 2026-06-17, completed rich-image feature with 6 major refine
 **Decisions linked:** kante-24, kante-25 (anchor), kante-26 (moderation), kante-27 (newline+richer), kante-29 (no-slashes)  
 **Key files:** `src/worldcup_bot/ai/rich_image.py`, `tests/test_rich_image.py`  
 **Final commit:** a8c773a on origin/main
+
+---
+
+## Session 2026-06-17: Streamff Mirrors + Thread-Based Goals + /endirecto Redesign + Clip Scorer (kante-32–36)
+
+6 major implementations completing live-match infrastructure. 1267 tests green.
+
+**Key changes:**
+- Streamff CDN mirror fix (any TLD via `cdn.streamff.one/{id}`)
+- Thread-based goal detection (race-free dedup via shared `bot_data` dict)
+- /endirecto live detail enrichment (Reddit MATCH EVENTS → JSON LLM extraction)
+- Clip finder merge (HTML search + /new/, deduplicated)
+- Robust clip scorer (accent folding + noise filtering)
+- /endirecto inline buttons (persistent JSON store, fixed render order)
+
+**Tests:** 1135 → 1267 (+132)
+
+**Key learnings:**
+- streamff CDN is TLD-agnostic; video IDs are consistent
+- Race-free dedup requires shared dict, not per-job disk loads
+- football-data free tier lacks detail arrays; Reddit MATCH EVENTS section is highly parseable
+- r/soccer HTML search index lags by minutes
+- Accent folding + noise filtering required for robust natural-name matching
+
+---
+
+## Session 2026-06-18: Czechia Team Alias Fix (live bug, clip-finder)
+
+**Problem:** "Ver gol" never appeared for Czechia 1-0 South Africa (Sadílek 6'). Clip existed but `_teams_match("Czech Republic", "Czechia")` was False.
+
+**Fix:** Added `WC_TEAM_ALIASES` entries for Czech Republic ↔ Czechia (+ variants). Same class of bug as D.R. Congo ↔ Congo DR.
+
+**Tests:** +7
+
+**Key learning:** r/soccer + ESPN clip titles use old names while football-data normalizes to new names. Requires explicit alias rather than fuzzy matching.
+
+---
+
+## Session 2026-06-18: /endirecto 429 Fix — Shared Scanner + TTL Cache (kante-endirecto-429)
+
+**Problem diagnosed live:** `/endirecto` showed no inline keyboard in prod. Each call created fresh `RedditMatchScanner` → hit Reddit cold → 429 (Too Many Requests) → returned None → fell back to plain format_match (score only).
+
+**Solution:** Three changes:
+1. **Scanner TTL caches** (30s match threads, 90s per-thread body). Never raises; returns stale cache on exception.
+2. **New `find_thread_permalink` method** scanning cached `/new/` listing (less 429-prone than /search).
+3. **Shared scanner in bot_data.** `/endirecto` reuses warm cache from goal poller (25s ticks).
+
+**Tests:** +21
+
+**Key learnings:**
+- Reddit rate-limits datacenter IPs aggressively; two independent callers ≈ 429
+- `/new/` listing is more reliable than `/search`; already cached by goal poller
+- Shared instance + per-instance TTL caches fix the problem; no external store needed
+
+---
+
+## Session 2026-06-19: /tongo Per-User Config (kante-tongo-per-user)
+
+**Design:** Committed `data/TongoUsers.yml` (empty/commented by default), keyed by lowercased username. Per-user settings: `sanchez_ratio` override, `phrases_mode` (append/replace), `phrases` (inline) or `phrases_file`.
+
+**Implementation:**
+- `TongoUserConfig` dataclass in `tongo.py`
+- `load_tongo_users` (mtime hot-reload, graceful degradation, per-field validation)
+- `read_tongo_phrase_file` (path-keyed mtime cache to avoid thrash when alternating per-user files)
+- `choose_tongo_response` pure function (injectable `rng` for testability)
+- Effective phrases composition: per-user + global (append), or per-user only (replace), with fallback to global if replace is empty
+
+**Files:** `data/TongoUsers.yml` (NEW), `tongo.py` (+TongoUserConfig, loaders, pure fn), `config.py` (+TONGO_USERS_PATH), `handlers.py` (rewritten cmd_tongo), `test_tongo_users.py` (NEW, 55 tests)
+
+**Tests:** 1408 → 1463 (+55)
+
+**Key learnings:**
+- `rng=random` kwarg pattern: pure selector passes the random module as an explicit kwarg, so existing handler tests (patching `worldcup_bot.bot.handlers.random`) control behavior without changes
+- Path-keyed cache dict avoids thrash when per-user files have alternating paths
+- GIF fallback inside `except` avoids consuming `side_effect` slots in tests that don't hit error path
+- Empty/commented YAML ships as `{}` → zero behavioral change on first deploy
+
+Backward compatibility preserved: unconfigured users get exact original behavior (1/3 SANCHEZ, global pool).
+
+---
+
+## Archive Trigger
+
+Kanté history.md archived at 16,618 bytes (>= 15,360 threshold) on 2026-06-19T09:51:10Z.
