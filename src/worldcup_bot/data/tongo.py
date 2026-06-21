@@ -36,13 +36,20 @@ FRASES: list[str] = [
     "Si, y Amalia y Suñé son mejores amigos ahora también",
     "Y Rosamar para cuando?",
     "Y Santvi para cuando?",
+    "Y Lubián, pa cuando?",
+    "Y una casa rural, pa cuando?"
+    "Y las llaves de la piscina de Can Corts pa cuando?",
     "Y Sant Celoni para cuando?",
+    "Y los pimientos rellenos pa cuando?"
     "Aguacate?",
     "Si, y Arbeloa es el jugador favorito de Laura. CAP17ÁN.",
     "Tongo es que Joan García no fue convocado con el Espanyol y vaya con el Barça, asi que a callar.",
+    "Tongo es que el Espanyol siga en primera.",
+    "Bueno, siempre nos quedará el consuelo que la única champions que se ha visto en el RCDE stadium sea la champions burger."
     "Como va a ser tongo, si no te interesa ni el futbol.",
     "Un conoooooo!! un cono!!!",
     "Por lo menos no somos italia.",
+    "Tongo sería que ganara el mundial Cristiano.",
     "Ah, pero ChatGPT decia que si.",
 ]
 
