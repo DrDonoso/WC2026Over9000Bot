@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260621] - 2026-06-21
+
+- Update daily_update.py
+
+
 ## [20260619.04] - 2026-06-19
 
 - New load_tongo_config(path) -> TongoConfig (phrases + users), mtime hot-reload, per-field graceful validation, never raises. Removed load_tongo_phrases / read_tongo_phrase_file and their caches.
