@@ -175,3 +175,134 @@ Backward compatibility preserved: unconfigured users get exact original behavior
 ## Archive Trigger
 
 Kanté history.md archived at 16,618 bytes (>= 15,360 threshold) on 2026-06-19T09:51:10Z.
+
+---
+
+## Session 2026-06-22: Scoring Rule Correction + /recalcular (kante-scoring-groupstage-fix)
+
+**Problem:** Group-stage scoring gave 0.5 points to any team that qualified to top-3 at the wrong position, including teams that simply swapped within the top-2 direct-qualifying zone (e.g., pred=1/actual=2).
+
+**Fix:** Implemented correct rule:
+- `pred ∈ {1,2} AND actual ∈ {1,2}` → **1.0** (exacto — order within top-2 irrelevant)
+- `pred == actual == 3` → **1.0** (exacto — exact 3rd)
+- One in top-2, other is 3rd → **0.5** (clasifica — boundary near-miss)
+- Otherwise (actual ≥ 4) → **0.0** (fallo)
+
+**Implementation:**
+- `DIRECT_QUALIFY = 2` constant in `src/worldcup_bot/porra/scoring.py`
+- `ensure_history(force: bool = False)` — when `force=True`, recomputes all jornadas from scratch (safe, requires one `get_all_matches()` call)
+- `/recalcular` hidden admin command (visibility = HIDDEN, same as `/updatediario`)
+
+**Tests:** 1463 → 1480 (+28)
+
+**Key learning:** History is fully reconstructable from match results; no date-parameterized API calls needed for force-rebuild.
+
+---
+
+## Session 2026-06-22: Four Live Goal-Notification Bugs Fixed (production incident)
+
+**Bug 1 — Duplicate goals (Spain 5-0 sent twice, ~8:03 PM):**
+- Root: `poll_goals_job` (API, ~60s) and `poll_thread_goals_job` (thread, 25s) both shared `context.bot_data["live_scores"]` but each updated AFTER slow `await` (Reddit + OpenAI / Telegram send).
+- Fix: `goal_lock = context.bot_data.setdefault("goal_lock", asyncio.Lock())`. Inside lock: read announced → reconcile → IMMEDIATELY write new_ann. Slow send outside lock. Concurrent job sees updated announced.
+
+**Bug 2 — Goal sent with no scorer and no "Ver gol" button (Spain 4-0, ~7:19 PM):**
+- Root: API detected 4-0 before thread; `_enrich_scorer` returned (None, None); clip-store entry created with scorer=None; clip finder requires scorer to match video title.
+- Fix: `_backfill_scorer_in_clip_store(match, events, settings, context)` in `poll_thread_goals_job`. Finds clip-store entries with scorer=None at match+score, edits original message to add scorer line, sets scorer in entry (idempotent, guarded by `entry["scorer"] is not None`).
+
+**Bug 3 — Wrong score in disallowed (Spain 3-0 shown, actual post-VAR was 4-0, ~8:00 PM):**
+- Root: `format_disallowed_message` fed `delta.new_home/away` from thread's under-read (3-0 vs actual 4-0 after VAR drop). Announced also updated to 3-0, causing API re-announce next tick.
+- Fix: After reconcile, for each disallowed delta, clamp: `d.new_X = max(d.new_X, ann_homeaway[X] - 1)`. Single VAR can only reverse one goal per side; post-VAR score is always ann-1 on affected side.
+
+**Bug 4 — Missing goals (NZ–EGY, ~4:30 AM):**
+- Root: Cross-job race (Bug 1) — one job updating announced past intermediate goal while other read stale announced.
+- Fix: Bug 1's lock. After lock, API job reads already-claimed announced; reconcile returns no delta; no intermediate goals skipped.
+
+**Tests:** 1480 → 1491 (+9 regression tests)
+
+**Key learnings:**
+- PTB's JobQueue runs jobs concurrently; shared mutable state needs explicit locking
+- Authoritative score after VAR drop is announced-1 on affected side
+- `asyncio.Lock()` must wrap the state mutation only, not slow I/O operations (send message)
+
+---
+
+## Session 2026-06-22: Goal Message Keyboard Preservation Fix
+
+**Problem:** `editMessageText` without `reply_markup` silently removes inline keyboards (PTB omits None kwargs → Telegram clears field).
+
+**Fix:** `_backfill_scorer_in_clip_store` checks `entry.get("status") == "ready"` and passes `reply_markup=build_goal_keyboard(tok)` to preserve the "Ver gol" button; otherwise `reply_markup=None`.
+
+**Tests:** 1491 → 1491 (2 new regression tests in existing suite)
+
+**Key learning:** Telegram API silently clears `reply_markup` field when omitted; must explicitly re-attach when editing.
+
+---
+
+## Session 2026-06-22: TVE (RTVE) Broadcast Markers 📺 (kante-tve-rtve-markers)
+
+**Feature:** `/hoy`, `/siguiente`, and daily AI update now show 📺 emoji next to World Cup fixtures broadcast on Spanish public TV (La 1 / Teledeporte).
+
+**RTVE schedule API (no auth):**
+- Endpoint: `https://www.rtve.es/api/schedule/{slug}.json` (slug: `tv1` for La 1, `dep` for Teledeporte)
+- Response: `{ "items": [ {...} ] }` with `idPrograma`, `name`, `begintime` (YYYYMMDDHHmmss, Europe/Madrid local), description
+- World Cup filter: `idPrograma == 1030562` AND "resumen" NOT in name/episode (excludes highlights)
+- Current-week only (~10 days); future fixtures won't have 📺 yet
+
+**ES→TLA mapping and time matching (`src/worldcup_bot/tve.py`):**
+- `ES_NAME_TO_TLA` dict with accent-stripped keys ("Túnez"/"Tunez" → TUN)
+- `tve_channel_for(match, broadcasts)`: primary = kickoff within ±20 min + unordered TLA pair; time-only fallback (exactly one broadcast in window); La 1 beats Teledeporte
+
+**Graceful degrade (hard constraint):**
+- Flaky RTVE API must NEVER break `/hoy`, `/siguiente`, or daily update
+- All use `try/except` around `asyncio.to_thread(load_tve_broadcasts, ...)`, fall back to `[]` on error
+- `load_tve_broadcasts` catches per-channel errors, caches `[]` on total failure, respects 6-hour TTL
+- Toggle: `TVE_ENABLED=false` in `.env`
+
+**Changes:** `config.py` (`tve_enabled`, `_parse_bool`), `formatters.py` (`tve_label` kwarg), `handlers.py` (`cmd_hoy`, `cmd_siguiente`), `daily_update.py` (`build_ai_user_message`, `tve_by_key`, `generate_daily_update`)
+
+**Tests:** 1491 → 1545 (+54)
+
+**Key learnings:**
+- RTVE schedule requires DST-aware localization (`pytz.timezone("Europe/Madrid")`)
+- Time windows (±20 min) match broadcasts to kickoffs; TLA fallback only when exactly one broadcast in window
+- Graceful degrade: NEVER let external flaky APIs break core bot commands
+
+---
+
+## Session 2026-06-22: 📺 TVE Marker Placement + /tongocheck (kante-dailyupdate-tve-and-tongocheck)
+
+**Task A — Deterministic TVE in `/updatediario`:**
+- **Problem:** 📺 channel label fed to AI via `build_ai_user_message` + `_SYSTEM` rule asking model to repeat. Fragile: AI could paraphrase, omit, or double it.
+- **Solution:** Move to `render_message` (deterministic HTML builder, like `/hoy`).
+- **Changes:**
+  - `render_message` gains `tve_by_key: dict[str, str] | None = None`
+  - Match line extended with ` 📺 {label}` when key present (Section 2, today fixtures)
+  - Removed `tve_by_key` from `build_ai_user_message` and `_SYSTEM` TVE rule
+  - `generate_daily_update` passes `tve_by_key` to `render_message` instead
+- **Net effect:** Deterministic > probabilistic for factual data; AI note focuses purely on curiosity/conflict
+
+**Task B — `/tongocheck` hidden admin validator:**
+- **Problem:** `load_tongo_config` swallows YAML errors, falls back to built-in FRASES. Stray character breaks file silently.
+- **Solution:** `check_tongo_config(path) → (bool, str)` pure validator exposed as `/tongocheck` (hidden, like `/recalcular`).
+- **Contract:**
+  - Missing file → `(False, "no encontrado en {path}")`
+  - YAML error → `(False, "Error de YAML: {exc}")` with line/col
+  - Non-mapping → `(False, "El fichero no es un mapping YAML válido")`
+  - Empty/comment-only → success (treated as `{}`)
+  - Success → `(True, "{N} frases globales, {M} usuarios configurados: alice, bob")` or `"sin overrides por persona"`
+  - Never raises; never modifies hot-reload cache
+- **Handler:** `cmd_tongocheck` — resolves path, replies `✅ TongoUsers.yml OK — {summary}` or `❌ TongoUsers.yml: {detail}`
+- **Registration:** `CommandHandler("tongocheck", cmd_tongocheck)` in `__main__.py` (hidden section)
+
+**Tests:** 1545 → 1565 (+20 net: render_message TVE ×5, AI no-TVE ×4, generate_daily_update TVE ×2, _SYSTEM ×1, check_tongo_config ×7, cmd_tongocheck ×5; minus 1 removed)
+
+**Key learnings:**
+- Deterministic rendering eliminates need for AI probabilistic inference on factual data
+- Silent YAML failures require explicit validation tools to diagnose from Telegram
+- Read-only admin tools (zero production risk) are safe entry points for operator diagnostics
+
+---
+
+**Test progression: 1463 → 1480 → 1491 → 1545 → 1565 (all green)**
+
+**Phases 26–31 now archived (2026-06-22 spawn complete).**

@@ -1907,3 +1907,88 @@ TVE_ENABLED=0
 - If RTVE API stabilizes, feature can stay enabled by default (1).
 - If RTVE API is fundamentally broken, feature can be removed in a future release without urgent code-push + rebuild.
 
+
+---
+
+# Decision: 📺 TVE on match line (deterministic) + `/tongocheck` admin validator
+
+**Date:** 2026-06-22  
+**Author:** Kanté (Backend Developer)  
+**Status:** Implemented
+
+---
+
+## Context
+
+Two small follow-up improvements after the TVE feature ship (2026-06-22):
+
+1. **📺 position in `/updatediario`** — The channel label was being fed to the AI
+   via `build_ai_user_message` and a `_SYSTEM` rule asking the model to repeat it
+   in the note.  This was fragile: the AI could paraphrase, omit, or double it.
+   `/hoy` already shows the label deterministically after the kickoff time.
+
+2. **Silent YAML failures in TongoUsers.yml** — `load_tongo_config` swallows all
+   YAML errors and falls back to built-in `FRASES`.  A stray character breaks the
+   whole file with no visible feedback.  A real incident: a stray `.` after a closing
+   quote dropped all custom phrases silently.
+
+---
+
+## Decisions
+
+### Task A — 📺 on the match line, not in the AI note
+
+**Decision:** Move the 📺 channel label from the AI path to `render_message` (purely
+deterministic HTML builder), matching `/hoy`'s format exactly.
+
+**Changes:**
+- `render_message` gains `tve_by_key: dict[str, str] | None = None`.  In Section 2
+  (today fixtures), the match line is extended with ` 📺 {label}` (no bold) when
+  the `home_tla-away_tla` key is present.
+- `build_ai_user_message` loses its `tve_by_key` parameter entirely.  The AI prompt
+  no longer contains TVE information; the AI note is purely about curiosity/conflict.
+- `_SYSTEM` loses the two-line TVE rule ("Si algún partido de hoy lleva el emoji 📺…").
+- `generate_daily_update` passes `tve_by_key` to `render_message` instead of to
+  `build_ai_user_message`.
+
+**Rationale:** Deterministic > probabilistic for factual data.  The channel label is
+a fact (either on TVE or not); the AI should focus on the curiosity/conflict note.
+
+### Task B — `/tongocheck` hidden admin command
+
+**Decision:** Add a `check_tongo_config(path) → (bool, str)` pure validator in
+`tongo.py` and expose it as hidden `/tongocheck` in Telegram (same visibility class
+as `/recalcular` / `/updatediario`).
+
+**check_tongo_config contract:**
+- Missing file → `(False, "no encontrado en {path}")`.
+- YAML parse error → `(False, "Error de YAML: {exc}")` — includes PyYAML line/col.
+- Non-mapping structure → `(False, "El fichero no es un mapping YAML válido")`.
+- Empty/comment-only file (parses to None) → treated as empty dict → success.
+- Success → `(True, "{N} frases globales, {M} usuarios configurados: alice, bob")`
+  or `"sin overrides por persona"` when no users.
+- Never modifies the hot-reload cache (`_cached_config_*`).
+- Never raises.
+
+**cmd_tongocheck** replies:
+- `✅ TongoUsers.yml OK — {summary}` on success.
+- `❌ TongoUsers.yml: {detail}` on failure.
+
+**Rationale:** Makes YAML typos diagnosable from Telegram without needing to read
+logs or restart the bot.  Zero risk to production: it's read-only, hidden, admin-only.
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/ai/daily_update.py` | Remove TVE from AI path; add to `render_message` |
+| `src/worldcup_bot/data/tongo.py` | Add `check_tongo_config` |
+| `src/worldcup_bot/bot/handlers.py` | Add `cmd_tongocheck`; import `check_tongo_config` |
+| `src/worldcup_bot/__main__.py` | Register `CommandHandler("tongocheck", cmd_tongocheck)` |
+| `tests/test_ai.py` | Add TVE render_message tests, _SYSTEM contract, generate_daily_update TVE |
+| `tests/test_tve.py` | Update `TestBuildAiUserMessageTve` (removed `tve_by_key` kwarg tests) |
+| `tests/test_tongo_users.py` | Add `TestCheckTongoConfig` (7 tests) + `TestCmdTongocheck` (5 tests) |
+
+**Test count:** 1545 → 1565 (+20 net).

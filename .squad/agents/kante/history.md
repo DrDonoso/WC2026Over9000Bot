@@ -2,32 +2,35 @@
 
 **Project:** WorldCup2026Over9000TelegramBot  
 **Stack:** Python, python-telegram-bot, football-data.org, Reddit scanner, LLM  
-**Test count:** 1463 (as of 2026-06-19, per-user /tongo feature)
+**Test count:** 1565 (as of 2026-06-22, TVE placement + tongocheck spawn)
 
-## Current Session: 2026-06-19 — Per-User /tongo Config
+## Current Session: 2026-06-22 — TVE Placement & /tongocheck
 
-**Feature:** DrDonoso wanted `/tongo` behavior to vary per user (custom sanchez_ratio, custom phrase pool).
+**Two follow-up improvements:**
 
-**Delivered:**
-- `data/TongoUsers.yml` — YAML config file (committed, empty/commented by default, loads to `{}` = zero behavior change until opt-in)
-- `TongoUserConfig` dataclass + `load_tongo_users(mtime cache)` in `tongo.py`
-- `read_tongo_phrase_file(path-keyed mtime cache)` to support per-user phrase files
-- `choose_tongo_response(pure, injectable rng)` extracted from handler
-- `cmd_tongo` rewritten to compose effective_phrases + sanchez_ratio, then delegate selection
-- 55 new tests; all existing tests green (1408 → 1463)
+### Task A — 📺 TVE deterministic rendering in `/updatediario`
+- **Change:** Move 📺 channel label from probabilistic AI path to deterministic `render_message`
+- **Implementation:**
+  - Added `tve_by_key: dict[str, str] | None = None` param to `render_message`
+  - Match line extended with ` 📺 {label}` when key `f"{m.home_tla}-{m.away_tla}"` present
+  - Removed `tve_by_key` from `build_ai_user_message` and `_SYSTEM` TVE rule
+- **Benefit:** Deterministic > probabilistic for factual data; AI note focuses on curiosity/conflict
 
-**Key design decisions:**
-- Committed (not git-ignored) to version-control user configs
-- Backward compatible: unconfigured users get exact original behavior (1/3 SANCHEZ, global pool)
-- Effective phrases: per-user + global (append mode, default), or per-user only (replace mode, with fallback to global if empty)
-- Path-keyed cache dict avoids thrash when alternating per-user file paths
-- `rng=random` kwarg pattern lets existing handler tests (patching `worldcup_bot.bot.handlers.random`) control behavior without changes
+### Task B — `/tongocheck` hidden admin validator
+- **Feature:** Diagnostic for TongoUsers.yml YAML validation
+- **Implementation:**
+  - `check_tongo_config(path) → (bool, str)` in `tongo.py`
+  - `cmd_tongocheck` handler in `handlers.py`, hidden (like `/recalcular`)
+  - Reports: missing file, YAML parse errors (with line/col), user/phrase counts
+- **Benefit:** Catches YAML typos instantly from Telegram without logs/restart
 
-**E2E verified:** Coordinator ran real Telegram tests (sanchez_ratio 1.0, 0.0, phrases_mode=replace, default user) — all 4 cases passed. Committed to origin/main (7ffaeb9).
+**Test count:** 1545 → 1565 (+20 net). All tests green.
 
-## Past Sessions Summary
+## Recent Sessions Summary
 
-**Archived to history-archive.md:** Phases 1–29 (Goal detection, live-match infrastructure, rich images, LLM scoring, `/endirecto` redesign, Czechia alias fix, Reddit 429 fix, /tongo templated phrases). 1463 tests total. All design constraints preserved (module decoupling, shared TTLCache, injectable test patterns).
+**Archived to history-archive.md:** All work phases (1–29) through 2026-06-22 prior spawn.
+Includes per-user /tongo, scoring fix, goal-notification bugs, TVE feature (54 tests).
+Test progression: 1463 → 1480 → 1491 → 1545 → 1565.
 
 ## Learnings
 
@@ -213,4 +216,54 @@ field + `_parse_bool`), `formatters.py` (`tve_label` kwarg in `format_match` /
 `format_match_with_date`), `handlers.py` (`cmd_hoy`, `cmd_siguiente`),
 `daily_update.py` (`build_ai_user_message` + `tve_by_key` + `generate_daily_update`).
 **Test count:** 1491 → 1545 (54 new tests in `tests/test_tve.py`).
+
+
+### 2026-06-22 — 📺 TVE marker moved to deterministic render_message line
+
+**Change:** The 📺 channel label (e.g. `📺 La 1`) in `/updatediario` used to be
+fed to the AI via `build_ai_user_message` (`tve_by_key` param) and a `_SYSTEM` rule
+that asked the model to repeat it in the note.  It is now appended deterministically
+by `render_message` to the match line — exactly like `/hoy` — after the kickoff time:
+`🏴 Inglaterra vs Ghana 🏴 — 22:00 📺 La 1`.
+
+**Removed from AI path:**
+- `tve_by_key` parameter removed from `build_ai_user_message`.
+- Two-line TVE rule removed from `_SYSTEM` ("Si algún partido de hoy lleva el
+  emoji 📺, consérvalo en la nota…").
+- `tve_by_key=tve_by_key or None` removed from the `build_ai_user_message(...)` call
+  inside `generate_daily_update`.
+
+**Added to deterministic path:**
+- `tve_by_key: dict[str, str] | None = None` param added to `render_message`.
+- In Section 2 (today fixtures), the match line is extended with ` 📺 {label}` when
+  the key `f"{m.home_tla}-{m.away_tla}"` is present in `tve_by_key`.  Not bold.
+- `generate_daily_update` passes `tve_by_key=tve_by_key or None` to `render_message`.
+
+**Net effect:** AI note (curiosity / conflict / empty-string) is unaffected by TVE;
+the channel info is shown on the deterministic match line and always correct.
+**Test count:** 1545 → (see below).
+
+
+### 2026-06-22 — `/tongocheck` hidden admin validator
+
+**Feature:** `check_tongo_config(path)` added to `tongo.py`.  Returns
+`(True, summary)` on a valid file (`"{N} frases globales, {M} usuarios configurados:
+alice, bob"` / `"sin overrides por persona"`) or `(False, detail)` on missing file,
+YAML parse error, or non-mapping structure.  Never raises.  Does NOT touch the
+hot-reload cache.
+
+**Handler:** `cmd_tongocheck` in `handlers.py` — resolves path like `cmd_tongo`
+does (`settings.tongo_users_path` or `predictions_path parent / TongoUsers.yml`),
+calls `check_tongo_config`, replies `✅ TongoUsers.yml OK — {summary}` or
+`❌ TongoUsers.yml: {detail}`.
+
+**Registration:** `CommandHandler("tongocheck", cmd_tongocheck)` in `__main__.py`
+— hidden, same section as `/recalcular` / `/updatediario`, not in `/start` help.
+
+**Motivation:** `load_tongo_config` swallows YAML errors (graceful degradation);
+a stray character that breaks the file goes unnoticed until someone asks why all
+phrases are wrong.  `/tongocheck` makes the error visible from Telegram instantly.
+**Test count:** 1545 → 1565 (20 net new tests: render_message TVE ×5, AI no-TVE ×4,
+generate_daily_update TVE ×2, _SYSTEM contract ×1, check_tongo_config ×7,
+cmd_tongocheck ×5; minus 1 removed test from TestBuildAiUserMessageTve).
 
