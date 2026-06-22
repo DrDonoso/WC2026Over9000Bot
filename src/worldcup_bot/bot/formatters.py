@@ -401,6 +401,24 @@ def render_endirecto(snap: dict) -> tuple[str, list]:
     )
 
 
+# ── match-start notice ───────────────────────────────────────────────────────
+
+
+def format_match_start(match: Match) -> str:
+    """Return the HTML 'match starting' notice for a scheduled kickoff.
+
+    Suitable for parse_mode="HTML" (team names are html.escaped).
+    """
+    home_fl = team_flag(match.home_tla)
+    away_fl = team_flag(match.away_tla)
+    home = html.escape(match.home_name, quote=False)
+    away = html.escape(match.away_name, quote=False)
+    return (
+        f"🟢 <b>¡Empieza el partido!</b>\n"
+        f"{home_fl} <b>{home}</b> vs <b>{away}</b> {away_fl}"
+    )
+
+
 # ── private helpers ───────────────────────────────────────────────────────────
 
 

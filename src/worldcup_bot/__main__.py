@@ -10,7 +10,7 @@ import html
 import logging
 import shutil
 import sys
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 import pytz
@@ -22,7 +22,7 @@ from worldcup_bot.ai.daily_update import generate_daily_update
 from worldcup_bot.ai.goal_extractor import extract_scorer
 from worldcup_bot.ai.rich_image import run_rich_iteration
 from worldcup_bot.api.client import FootballAPIError
-from worldcup_bot.bot.formatters import bold_person_names, team_flag
+from worldcup_bot.bot.formatters import bold_person_names, format_match_start, team_flag
 from worldcup_bot.bot.handlers import (
     cmd_actual,
     cmd_ayer,
@@ -998,6 +998,121 @@ async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("poll_goal_clips_job: unexpected error: %s", exc)
 
 
+# Grace window: never announce a kickoff that was >30 minutes ago.  Protects
+# against the rare case where the seed pass missed a match somehow.
+_KICKOFF_GRACE = timedelta(minutes=30)
+
+
+async def poll_kickoff_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Repeating job: post a 'match starting' notice at each scheduled kickoff time.
+
+    Dedup strategy (persistent, restart-safe):
+    - `kickoff_announced` (bot_data + disk): set of match ids whose kick-off
+      notice has already been sent (or seeded as already-handled).  Persisted to
+      `{state_dir}/kickoff_announced.json` after every change.
+    - SEED on first run (gate: `kickoff_seeded`): mark every match whose kickoff
+      is already in the past OR whose status is IN_PLAY / PAUSED / FINISHED as
+      announced.  Persist and return — no sends on the seed pass.
+    - NORMAL pass: for each SCHEDULED/TIMED match not in `announced`, announce
+      when `kickoff <= now_utc` AND `now_utc - kickoff <= 30 min` (grace window).
+    """
+    try:
+        settings: Settings = context.bot_data["settings"]
+        announced: set = context.bot_data["kickoff_announced"]
+        path = f"{settings.state_dir}/kickoff_announced.json"
+
+        client = make_client(settings)
+        try:
+            all_matches = client.get_all_matches()
+        except FootballAPIError as exc:
+            log.warning("poll_kickoff_job: could not get matches: %s", exc)
+            return
+
+        now_utc = datetime.now(timezone.utc)
+        silent = _is_silent_hour(datetime.now(pytz.timezone(settings.timezone)))
+
+        # ── seed on first run ─────────────────────────────────────────────────
+        if not context.bot_data.get("kickoff_seeded", False):
+            seeded: set[int] = set()
+            for m in all_matches:
+                if m.status in ("IN_PLAY", "PAUSED", "FINISHED"):
+                    seeded.add(int(m.id))
+                else:
+                    try:
+                        kickoff = datetime.strptime(
+                            m.utc_date, "%Y-%m-%dT%H:%M:%SZ"
+                        ).replace(tzinfo=timezone.utc)
+                        if kickoff <= now_utc:
+                            seeded.add(int(m.id))
+                    except Exception:
+                        pass
+            announced.update(seeded)
+            save_finished(path, announced)
+            context.bot_data["kickoff_seeded"] = True
+            log.info(
+                "poll_kickoff_job: seeded %d already-kicked-off matches (no sends)",
+                len(seeded),
+            )
+            return
+
+        # ── normal pass ───────────────────────────────────────────────────────
+        for m in all_matches:
+            mid = int(m.id)
+            if mid in announced:
+                continue
+
+            # FINISHED matches: mark quietly without sending
+            if m.status == "FINISHED":
+                announced.add(mid)
+                save_finished(path, announced)
+                continue
+
+            # Only consider matches that haven't definitely started yet
+            # (SCHEDULED / TIMED) — IN_PLAY/PAUSED are handled by seed normally
+            # but may appear between seed and first normal tick; announce them.
+            try:
+                kickoff = datetime.strptime(
+                    m.utc_date, "%Y-%m-%dT%H:%M:%SZ"
+                ).replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+
+            elapsed = now_utc - kickoff
+            if kickoff > now_utc:
+                continue  # not yet
+            if elapsed > _KICKOFF_GRACE:
+                # Escaped the seed somehow; mark and skip silently.
+                announced.add(mid)
+                save_finished(path, announced)
+                continue
+
+            # Announce
+            try:
+                text = format_match_start(m)
+                await context.bot.send_message(
+                    chat_id=settings.telegram_group_id,
+                    text=text,
+                    parse_mode="HTML",
+                    disable_notification=silent,
+                )
+                log.info(
+                    "poll_kickoff_job: sent kickoff notice for match %d (%s vs %s)",
+                    mid,
+                    m.home_name,
+                    m.away_name,
+                )
+            except Exception as exc:
+                log.error(
+                    "poll_kickoff_job: failed to send for match %d: %s", mid, exc
+                )
+            finally:
+                announced.add(mid)
+                save_finished(path, announced)
+
+    except Exception as exc:
+        log.exception("poll_kickoff_job: unexpected error: %s", exc)
+
+
 async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Repeating job: detect newly-finished matches, post stats card + porra commentary.
 
@@ -1219,6 +1334,11 @@ def build_app(settings: Settings) -> Application:
     # False until first poll_finished_matches_job run completes its seed pass.
     app.bot_data["finished_seeded"] = False
     app.bot_data["espn_client"] = None
+    # kickoff-start tracker: persisted set of match ids already announced or seeded.
+    kickoff_path = f"{settings.state_dir}/kickoff_announced.json"
+    app.bot_data["kickoff_announced"] = load_finished(kickoff_path)
+    # False until first poll_kickoff_job run completes its seed pass.
+    app.bot_data["kickoff_seeded"] = False
 
     handlers = [
         CommandHandler("start", cmd_start),
@@ -1374,6 +1494,17 @@ def main() -> None:
         )
         log.info(
             "Goal-clip searcher enabled — polling every 45s for group %s",
+            settings.telegram_group_id,
+        )
+
+        app.job_queue.run_repeating(
+            poll_kickoff_job,
+            interval=30,
+            first=20,
+            name="poll_kickoff",
+        )
+        log.info(
+            "Kickoff-start notifier enabled — polling every 30s for group %s",
             settings.telegram_group_id,
         )
 
