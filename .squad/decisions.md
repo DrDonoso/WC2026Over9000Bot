@@ -1602,3 +1602,137 @@ The 3rd-place boundary remains a near-miss (0.5) in either direction.
   API calls needed.  `force=True` is safe to call anytime; it just costs one
   `get_all_matches()` call.
 - Hidden command pattern keeps /recalcular off the public BotFather menu.
+
+# Goal-Notification Pipeline: Four Live Bug Fixes
+
+**Date:** 2026-06-22  
+**Author:** Kanté (Backend Developer)  
+**Incident:** Four bugs observed in production during Spain–Saudi Arabia match and New Zealand–Egypt match.
+
+---
+
+## Bug 1 — Duplicate goal (Spain 5-0 sent TWICE, ~8:03 PM)
+
+**Root cause:** `poll_goals_job` (API, ~60 s interval) and `poll_thread_goals_job`
+(thread, 25 s) both read `scores[key]` as the announced score, then updated it only
+*after* the slow `await` (Reddit+OpenAI enrichment or Telegram send).  PTB's JobQueue
+runs jobs concurrently; while job A was awaiting, job B read the stale announced (4-0),
+reconciled new=5-0, and announced again → duplicate.
+
+**Fix:** `context.bot_data.setdefault("goal_lock", asyncio.Lock())` — shared by both
+jobs.  Inside the lock: read announced → reconcile → **immediately** write
+`scores[key] = new_ann`.  Lock released; slow enrichment + send happen outside.  Any
+concurrent job that acquires the lock next finds the updated announced and produces no
+delta.  Send failures are logged without re-announcing (score was already claimed).
+
+**Files:** `src/worldcup_bot/__main__.py` — `poll_goals_job`, `poll_thread_goals_job`.
+
+---
+
+## Bug 2 — Goal sent with no scorer and no "Ver gol" button (Spain 4-0, ~7:19 PM)
+
+**Root cause:** API detected the 4-0 goal before the thread had the scorer.
+`_enrich_scorer` returned `(None, None)` (thread not ready / 429 / OpenAI miss).
+`_notify_goal` stored a clip-store entry with `scorer=None`; the clip finder requires a
+scorer to match video titles, so `poll_goal_clips_job` never found the clip and the
+"Ver gol" button was never added.  Later, when the thread saw 4-0, reconcile returned
+no deltas (already announced) → the scorer was never applied retroactively.
+
+**Fix:** New helper `_backfill_scorer_in_clip_store(match, events, settings, context)`
+— called in `poll_thread_goals_job` after every match (even when there are no new
+deltas).  For each thread event with a known scorer it looks up the clip-store entry by
+token key `{match.id}:{team}:{h}-{w}`, skips if `scorer is not None` (idempotent),
+then: (a) sets `entry["scorer"]` so `poll_goal_clips_job` can find the clip, and
+(b) calls `context.bot.edit_message_text` to add the `🎯 scorer (min')` line to the
+original goal message.
+
+**Files:** `src/worldcup_bot/__main__.py` — new `_backfill_scorer_in_clip_store`,
+`poll_thread_goals_job` now calls it unconditionally per match.
+
+---
+
+## Bug 3 — Disallowed message showed WRONG score (Spain 3-0 shown, post-VAR was 4-0, ~8:00 PM)
+
+**Root cause:** Goal 5 was VAR'd.  After the VAR, the thread momentarily under-read
+the score as 3-0 (a parse glitch that missed event 4).  `reconcile` saw
+`seen=5 → new=3`, correctly identified a real disallowed (source's own value dropped),
+and emitted a delta with `new_home=3`.  The message said "Spain 3-0" instead of the
+correct post-VAR "Spain 4-0".  Worse, `announced` was updated to 3-0, so the API
+next tick would re-announce goal 4 as a new goal.
+
+**Fix:** In `poll_thread_goals_job`, after reconcile, for each disallowed delta:
+```python
+clamped = max(d.new_home, ann_homeaway["home"] - 1)  # never below announced-1
+d.new_home = clamped
+new_ann["home"] = clamped
+```
+A single VAR can only reverse one goal per side; the authoritative post-VAR score is
+always `announced − 1` on the affected side.  A thread that correctly reads the drop
+(e.g. 4-0 after goal 5 VAR'd from 5-0) is unchanged: `max(4, 5-1) = 4`.
+
+**Files:** `src/worldcup_bot/__main__.py` — `poll_thread_goals_job` lock block.
+
+---
+
+## Bug 4 — Missing goals (NZ–EGY 1-2 Salah / 1-3 Trezeguet not sent, ~4:30 AM)
+
+**Root cause:** The cross-job race described in Bug 1.  One job updating announced
+past an intermediate score while the other had already read the stale announced could
+skip announcing that score.  (Silent hour only sets `disable_notification=True`; goals
+are still sent — expected behavior, not a bug.)
+
+**Analysis:** The per-target expansion in `poll_thread_goals_job` iterates
+`range(ann+1, new_ann+1)` and produces one notification per intermediate running
+score — this is correct.  The API path creates N deltas for an N-goal jump, all
+showing the final score (pre-existing behaviour, not a drop), but no goals are
+omitted.
+
+**Fix:** Bug 1's `goal_lock` covers Bug 4.  Once the first job claims the score inside
+the lock, the other job reads the updated announced and produces no delta — no
+intermediate goals are skipped.
+
+**Files:** Covered by Bug 1 fix.
+
+---
+
+## Regression tests added (`tests/test_poll_thread_goals_job.py`)
+
+| Class | Tests | Covers |
+|---|---|---|
+| `TestCrossJobRace` | 2 | Bug 1: concurrent gather + sequential ordering |
+| `TestScorerBackfill` | 5 | Bug 2: edit message, idempotency, skip-if-known, keyboard preserved (ready), keyboard absent (searching) |
+| `TestDisallowedAuthoritativeScore` | 2 | Bug 3: under-read clamped; correct read unchanged |
+| `TestMultiGoalExpansion` | 2 | Bug 4: 3-goal jump → 3 messages; API catchup → 0 extras |
+
+**Test count:** 1480 → **1489** (all green).
+
+---
+
+## Follow-up fix (code review, 2026-06-22) — Bug 2 regression: Ver gol keyboard stripped by backfill
+
+**Root cause:** `_backfill_scorer_in_clip_store` called `context.bot.edit_message_text`
+without `reply_markup`.  Telegram's `editMessageText` API removes the inline keyboard
+when the field is absent (PTB omits `None` kwargs → keyboard silently cleared).  If the
+clip was already found and `edit_message_reply_markup` had attached the "Ver gol" button
+before the backfill ran, that button was permanently lost.
+
+**Race sequence that triggered it:**
+1. API announces goal with `scorer=None` → clip-store entry created (`status="searching"`).
+2. `poll_goal_clips_job` finds the clip → calls `edit_message_reply_markup` → sets
+   `status="ready"`.
+3. Thread reports scorer → `_backfill_scorer_in_clip_store` runs, edits the same
+   `message_id` text WITHOUT `reply_markup` → keyboard cleared, button gone forever.
+   (`poll_goal_clips_job` skips `ready` entries and won't re-add the keyboard.)
+
+**Fix:** Determine keyboard attachment state from `entry["status"]`.  When
+`entry.get("status") == "ready"`, pass `reply_markup=build_goal_keyboard(tok)` to
+`edit_message_text`; otherwise `reply_markup=None`.  `build_goal_keyboard` was already
+imported in `__main__.py`.  No schema change needed.
+
+**Files:** `src/worldcup_bot/__main__.py` — `_backfill_scorer_in_clip_store`.
+
+**New tests:** `TestScorerBackfill.test_backfill_preserves_keyboard_when_clip_ready` and
+`test_backfill_no_keyboard_when_clip_not_ready` in `tests/test_poll_thread_goals_job.py`.
+
+**Test count:** 1489 → **1491** (all green).
+
