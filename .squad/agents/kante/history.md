@@ -71,3 +71,31 @@ users:                    # per-user overrides (keyed by @username lowercase)
 **Test count:** 1463 → 1452 (removed txt-loader and file-reader tests; replaced with 26
 `TestLoadTongoConfig` tests covering merged schema validation).
 
+### 2026-06-22 — Corrected group-stage scoring rule + /recalcular
+
+**Scoring fix:** The original `score_groups` rule gave 0.5 to any team that
+qualified to the top-3 at the wrong position — including two teams that simply
+swapped within the top-2 direct-qualifying zone (e.g. pred=1/actual=2).  The
+correct rule is:
+
+- `pred ∈ {1,2} AND actual ∈ {1,2}` → **1.0** ("exacto") — order within top-2 is irrelevant
+- `pred == actual == 3`              → **1.0** ("exacto") — exact 3rd
+- One in top-2, other is 3rd        → **0.5** ("clasifica") — boundary near-miss
+- Otherwise (actual ≥ 4)            → **0.0** ("fallo")
+
+Implemented via `DIRECT_QUALIFY = 2` constant in `scoring.py` (separate from
+`QUALIFY_PER_GROUP = 3` which counts picks-per-group and is unchanged).
+
+**`ensure_history` force-rebuild:** Added `force: bool = False` parameter.
+When `force=True` the function ignores the on-disk history and recomputes
+every jornada from scratch — safe anytime, costs one `get_all_matches()` call.
+The history is fully reconstructable from match results; no date-parameterised
+API calls are needed.
+
+**`/recalcular` hidden admin command:** Calls `ensure_history(…, force=True)`,
+mirrors the visibility pattern of `/updatediario` (registered in `__main__.py`,
+not exposed in `/start` help, not in BotFather menu).  Replies with jornada
+count and a reminder that `/evolucion` reflects the new scoring.
+
+**Test count:** 1452 → 1480 (28 new tests across test_scoring, test_history, test_evolucion_handler).
+

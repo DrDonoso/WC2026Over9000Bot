@@ -1509,3 +1509,96 @@ users:              # Per-user overrides (keyed by @username lowercase)
 
 - App code changes: Kanté (consolidation in `config.py`)
 - History entry: `.squad/agents/maldini/history.md` → "## Learnings" → "/tongo YAML Merge"
+
+---
+
+# Decision: Corrected Group-Stage Scoring Rule + /recalcular Admin Command
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-22  
+**Status:** IMPLEMENTED — 1480 tests green
+
+---
+
+## Problem
+
+The `score_groups` function in `src/worldcup_bot/porra/scoring.py` used a
+flawed rule: any team that qualified to the top-3 (but at the wrong position)
+earned 0.5 points.  This meant a user who predicted a team **1st** and it
+finished **2nd** (or vice-versa) — both still in the top-2 direct-qualifying
+zone — wrongly received 0.5 instead of 1.0.
+
+DrDonoso's real-data sanity check confirmed: five swap teams (SUI, EGY, FRA,
+COL, ENG) each went from 0.5 → 1.0, moving his group total from 16.5 → 19.0.
+
+---
+
+## Corrected Scoring Rule
+
+Per predicted team (`pred_pos ∈ {1,2,3}`, `actual_pos` = 1-indexed real position):
+
+| pred_pos | actual_pos | points | note |
+|---|---|---|---|
+| 1 or 2 | 1 or 2 | **1.0** | `exacto` — both in direct top-2 qualifying zone |
+| 3 | 3 | **1.0** | `exacto` — exact 3rd |
+| 1 or 2 | 3 | **0.5** | `clasifica` — boundary near-miss |
+| 3 | 1 or 2 | **0.5** | `clasifica` — boundary near-miss |
+| any | 4+ | **0.0** | `fallo` |
+
+Key invariant: **order within the top-2 direct-qualifying zone is irrelevant.**
+The 3rd-place boundary remains a near-miss (0.5) in either direction.
+
+---
+
+## Implementation
+
+### `src/worldcup_bot/porra/scoring.py`
+- Introduced `DIRECT_QUALIFY = 2` module-level constant (separate from
+  `QUALIFY_PER_GROUP = 3` which means "3 picks per group" — left unchanged).
+- Replaced the old `if actual_pos == pred_pos / elif actual_pos <= QUALIFY_PER_GROUP`
+  block with the three-branch logic above.
+- Notes remain `"exacto"` / `"clasifica"` / `"fallo"` — the formatter's
+  `note_map` in `formatters.py` continues to render ✅/🔶/❌ correctly.
+
+### `src/worldcup_bot/porra/history.py`
+- Added `force: bool = False` parameter to `ensure_history`.
+- When `force=True`: initialises `history = {}` (ignores disk cache) and runs
+  reconstruction for **every** past jornada, not just the uncached ones.
+- Both existing call sites (scheduler job, `/evolucion`) pass no `force`
+  argument → unchanged behaviour.
+
+### `src/worldcup_bot/bot/handlers.py`
+- Added `cmd_recalcular` — a hidden admin command (`/recalcular`) that calls
+  `ensure_history(..., force=True)` in a background thread.
+- Replies `⏳` while working, then `✅ Histórico recalculado: N jornadas.
+  /evolucion ya refleja la nueva puntuación.` on success, or `❌ …` on error.
+- Pattern mirrors `cmd_update_diario` (same visibility: not listed in `/start`).
+
+### `src/worldcup_bot/__main__.py`
+- Imported `cmd_recalcular`; registered `CommandHandler("recalcular", cmd_recalcular)`.
+
+---
+
+## Tests
+
+- `tests/test_scoring.py`: full truth table (12 cases), regression for DrDonoso's
+  5-swap scenario, updated `TestScoreGroupsOffByOne` and
+  `TestScoreGroupsQualifiesWrongPosition` tests that asserted the old 0.5 behaviour.
+- `tests/test_history.py`: `TestEnsureHistoryForce` — 4 tests for `force=True`
+  recompute semantics and `force=False` cache-preservation.
+- `tests/test_evolucion_handler.py`: `TestCmdRecalcular` — 5 handler tests
+  (force=True called, reply count, no-predictions guard, error path, hidden from /start);
+  `TestCmdRecalcularRegistered` — build_app registration check.
+
+**Total: 1452 → 1480 tests (all pass).**
+
+---
+
+## Why this approach
+
+- Pure function (`score_groups`) → single fix propagates to all consumers:
+  live ranking, /evolucion history, /listaaciertos, /listaaciertosactual.
+- History is fully reconstructable from match results — no date-parameterised
+  API calls needed.  `force=True` is safe to call anytime; it just costs one
+  `get_all_matches()` call.
+- Hidden command pattern keeps /recalcular off the public BotFather menu.
