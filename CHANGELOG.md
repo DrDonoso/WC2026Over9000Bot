@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260622.06] - 2026-06-22
+
+- feat(kickoff): announce when a match starts at its scheduled kickoff
+
+
 ## [20260622.05] - 2026-06-22
 
 - refactor(tongo): require TongoUsers.yml — fail (no fallback) if it can't load
