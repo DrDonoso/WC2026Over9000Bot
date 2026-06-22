@@ -108,4 +108,11 @@
 - **No template negation needed:** The merged file pattern `data/TongoUsers.yml` doesn't accidentally catch the committed templates (`data/TongoUsers.template.yml`, `data/predictions.template.yml`); they don't match the runtime path rule.
 - **Parity:** Same image everywhere (prod/local); only env var binding differs. Runtime file must NOT be committed (private usernames).
 
+### TVE_ENABLED Optional Environment Variable (2026-06-22)
+- Wired `TVE_ENABLED` optional env var (default 1) to toggle Kanté's new "📺 partido en TVE" feature (RTVE-API lookup for match broadcasts on TVE/La1/Teledeporte).
+- **Changes:** (1) `docker-compose.yml`: added `TVE_ENABLED: "${TVE_ENABLED:-1}"` with Spanish comment "Marca con 📺 los partidos que da TVE (vía API de RTVE). '0' para desactivar.", right after `BELOVED_TEAMS` block (line ~43). (2) `docker-compose.local.yml`: identical entry. (3) `.env.example`: added commented line with description ("Mark matches that are broadcast on TVE... Set to 0 to disable if the undocumented RTVE API breaks mid-tournament"). (4) **Both compose files validated cleanly** via `docker compose config -q` exit 0.
+- **No volume changes:** Feature uses existing data/code bindings. Runtime toggle allows quick disabling of RTVE lookup without code change if the undocumented API breaks during tournament.
+- **Parity:** Same optional env-var pattern (`${VAR:-default}`) as PREDICTIONS_PATH, TONGO_USERS_PATH, BELOVED_TEAMS, etc.
+
+
 

@@ -1736,3 +1736,174 @@ imported in `__main__.py`.  No schema change needed.
 
 **Test count:** 1489 → **1491** (all green).
 
+---
+
+# Decision: TVE broadcast markers (📺) via RTVE schedule API
+
+**Author:** Kanté (Backend Developer)
+**Date:** 2026-06-22
+**Status:** IMPLEMENTED — 1545 tests green
+
+---
+
+## Problem
+
+DrDonoso wanted `/hoy`, `/siguiente`, and the daily AI update to show which World
+Cup fixtures are broadcast on Spanish public TV (La 1 / Teledeporte), marked with a
+📺 emoji.  The detection must be automatic (no manual override file) via RTVE's
+public schedule API.
+
+---
+
+## Decision
+
+### New module: `src/worldcup_bot/tve.py`
+
+Single-file module; no sub-package needed.  Owns:
+- `TveBroadcast` dataclass (kickoff_utc, home_tla, away_tla, channel).
+- `ES_NAME_TO_TLA`: static dict of Spanish team name → FIFA TLA for all WC 2026
+  nations.  Keys are accent-stripped, lowercased via `_norm()` (unicodedata NFKD),
+  so "Túnez", "Tunez", "TUNEZ" all hit the same key.
+- `fetch_rtve_schedule(slug)`: thin `requests.get` wrapper, returns JSON or None on
+  any error (logs warning, never raises).
+- `parse_wc_broadcasts(schedule_json, channel_label)`: filters `idPrograma == 1030562`,
+  excludes "resumen" items, parses kickoff via description `(HH:MM)` for La 1 /
+  `begintime` for Teledeporte, converts Madrid-local → UTC via `pytz.localize()` (DST-
+  correct; do NOT hardcode UTC offset).
+- `tve_channel_for(match, broadcasts)`: ±20 min window + unordered TLA pair; time-only
+  fallback only when exactly one broadcast is in the window (defensive against
+  simultaneous games).  La 1 wins over Teledeporte.
+- `load_tve_broadcasts(*, ttl_seconds=21600, tve_enabled=True)`: module-level TTL
+  cache (~6 h), fetches tv1 + dep, returns `[]` on total failure.
+
+### RTVE API details
+
+| Property | Value |
+|---|---|
+| Base URL | `https://www.rtve.es/api/schedule/{slug}.json` |
+| **Dead URL (do NOT use)** | `api.rtve.es` (404) |
+| Slugs | `tv1` (La 1), `dep` (Teledeporte) |
+| WC `idPrograma` | `1030562` |
+| Resumen exclusion | `"resumen"` in `name` / `original_episode_name` / `original_event_name` (case-insensitive) |
+| Time coverage | Current broadcast week (~10 days); no date param works |
+| Time format | `begintime`: YYYYMMDDHHMMSS, Europe/Madrid local |
+| La 1 kickoff | Prefer `(HH:MM)` in `description` (actual kickoff) over `begintime` |
+
+### Config change
+
+`tve_enabled: bool = True` added to `Settings`; read from `TVE_ENABLED` env var
+(parse `"0"/"false"/"no"` → False).  Maldini wires it in docker-compose.
+
+### Formatter changes
+
+`format_match(match, tz_name, *, tve_label=None)` and `format_match_with_date(...)`
+accept an optional `tve_label` kwarg.  When set AND match status is `SCHEDULED`, the
+text gains ` 📺 {tve_label}`.  Finished/in-play lines are unchanged.
+
+### Handler changes
+
+`cmd_hoy` and `cmd_siguiente`: `await asyncio.to_thread(load_tve_broadcasts, ...)`
+inside a `try/except` — on any error, `broadcasts = []` and the command proceeds
+normally without 📺.
+
+### Daily AI update changes
+
+`build_ai_user_message` gains `tve_by_key: dict[str, str] | None = None`.  Today
+fixture lines get ` 📺 {label}` appended so the AI model sees which matches are on
+TVE.  `_SYSTEM` gains one sentence: "Si algún partido de hoy lleva el emoji 📺,
+consérvalo en la nota de ese partido y menciona brevemente que se emite en TVE."
+`generate_daily_update` fetches TVE broadcasts (to_thread, graceful degrade) and
+builds `tve_by_key` before the AI call.
+
+---
+
+## Why no manual override file
+
+User chose automatic-only mode.  The RTVE API is free, no-auth, and publicly
+accessible.  A `TVE_ENABLED` toggle covers the "turn it off" use case without
+a file.
+
+---
+
+## Graceful degrade rule
+
+**A flaky RTVE API must NEVER break a command.**  Every call to `load_tve_broadcasts`
+is wrapped in `try/except`; on any failure the result is `[]` (no 📺, no crash).
+The TTL cache means a transient failure within a 6-hour window still serves stale
+data from the last successful fetch.
+
+---
+
+## Files changed
+
+| File | Change |
+|---|---|
+| `src/worldcup_bot/tve.py` | New module |
+| `src/worldcup_bot/config.py` | `tve_enabled` field + `_parse_bool` + `load_settings` wiring |
+| `src/worldcup_bot/bot/formatters.py` | `tve_label` kwarg in `format_match` / `format_match_with_date` |
+| `src/worldcup_bot/bot/handlers.py` | `cmd_hoy`, `cmd_siguiente` TVE integration + import |
+| `src/worldcup_bot/ai/daily_update.py` | `asyncio` import, `build_ai_user_message` `tve_by_key`, `_SYSTEM` rule, `generate_daily_update` TVE step |
+| `tests/conftest.py` | `reset_tve_cache` autouse fixture |
+| `tests/test_tve.py` | 54 new tests (all network mocked) |
+| `README.md` | 📺 note in bot commands table + Notes section |
+| `.squad/agents/kante/history.md` | Learnings appended |
+
+---
+
+# Decision: TVE_ENABLED Optional Environment Variable
+
+**Date:** 2026-06-22  
+**Owner:** Maldini (DevOps)  
+**Status:** Implemented ✅
+
+## Decision
+
+Wire optional environment variable `TVE_ENABLED` (default: **1**) to allow quick runtime toggle of the "📺 partido en TVE" feature.
+
+## Rationale
+
+Kanté is adding a new feature that marks matches broadcast on TVE (La1/Teledeporte) in `/hoy`, `/siguiente`, and the daily update. The RTVE API is undocumented — if it breaks mid-tournament, we need a quick kill-switch **without a code change or container rebuild**.
+
+## Changes
+
+**1. `docker-compose.yml` (prod)**  
+Added after `BELOVED_TEAMS`:
+```yaml
+# --- Marca con 📺 los partidos que da TVE (vía API de RTVE). "0" para desactivar. ---
+TVE_ENABLED: "${TVE_ENABLED:-1}"
+```
+
+**2. `docker-compose.local.yml` (dev)**  
+Identical entry (parity).
+
+**3. `.env.example`**  
+Added commented example:
+```bash
+# TVE_ENABLED=1   # marca con 📺 los partidos en TVE; 0 para desactivar
+```
+
+## Validation
+
+- Both compose files parse cleanly: `docker compose config -q` → exit 0 ✅
+- No volume or Dockerfile changes needed
+- Env-var follows established pattern: `${VAR:-default}` (same as `PREDICTIONS_PATH`, `BELOVED_TEAMS`, etc.)
+
+## Usage
+
+To disable the TVE feature if the RTVE API breaks:
+```bash
+export TVE_ENABLED=0
+docker compose up -d
+```
+
+Or set in `.env`:
+```
+TVE_ENABLED=0
+```
+
+## Future
+
+- Kanté reads `TVE_ENABLED` from `config.py` and self-disables the feature if unset/0.
+- If RTVE API stabilizes, feature can stay enabled by default (1).
+- If RTVE API is fundamentally broken, feature can be removed in a future release without urgent code-push + rebuild.
+
