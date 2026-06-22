@@ -86,8 +86,11 @@ def team_label(tla: str, name: str | None = None) -> str:
 # ── match formatting ──────────────────────────────────────────────────────────
 
 
-def format_match(match: Match, tz_name: str = "Europe/Madrid") -> str:
-    """Format a single match for display."""
+def format_match(match: Match, tz_name: str = "Europe/Madrid", *, tve_label: str | None = None) -> str:
+    """Format a single match for display.
+
+    tve_label: when provided and the match is SCHEDULED, appends '📺 {tve_label}'.
+    """
     home_fl = team_flag(match.home_tla)
     away_fl = team_flag(match.away_tla)
 
@@ -106,16 +109,19 @@ def format_match(match: Match, tz_name: str = "Europe/Madrid") -> str:
     else:
         # Scheduled — show local time
         local_time = _format_local_time(match.utc_date, tz_name)
-        return (
+        base = (
             f"{home_fl} {match.home_name} vs {match.away_name} {away_fl}"
             f" - ⌚ {local_time}"
         )
+        if tve_label:
+            return f"{base} 📺 {tve_label}"
+        return base
 
 
-def format_match_with_date(match: Match, tz_name: str = "Europe/Madrid") -> str:
+def format_match_with_date(match: Match, tz_name: str = "Europe/Madrid", *, tve_label: str | None = None) -> str:
     """Format match with date prefix (dd-mm-YYYY)."""
     date_str = _format_date(match.utc_date, tz_name)
-    return f"{date_str}: {format_match(match, tz_name)}"
+    return f"{date_str}: {format_match(match, tz_name, tve_label=tve_label)}"
 
 
 # ── standings formatting ──────────────────────────────────────────────────────

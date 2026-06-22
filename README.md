@@ -88,9 +88,9 @@ docker compose pull && docker compose up -d
 | `/actual` | Provisional leaderboard (live standings; only groups with ≥1 finished match score, so un-started groups award 0 pts) — sends top-3 photo album |
 | `/general` | Official leaderboard (only fully finished groups score) — sends top-3 photo album |
 | `/porra` | Alias of `/actual` |
-| `/hoy` | Matches in the current football day (09:00–09:00 local window) |
+| `/hoy` | Matches in the current football day (09:00–09:00 local window); TVE matches marked 📺 |
 | `/ayer` | Results from the previous football day (09:00–09:00 local window) |
-| `/siguiente` | Next upcoming match |
+| `/siguiente` | Next upcoming match; 📺 marker if broadcast on TVE |
 | `/endirecto` | Matches currently live |
 | `/listaaciertos` | Official picks breakdown (only closed groups/rounds count) |
 | `/listaaciertosactual` | Provisional picks breakdown (live standings; only groups with ≥1 finished match score) |
@@ -153,3 +153,4 @@ Both ranking commands send a **Telegram photo album** with the photos of the top
 - **Corporate / SSL-inspection networks:** the container uses [`truststore`](https://pypi.org/project/truststore/) to pick up the OS CA bundle automatically. On a normal cloud host nothing extra is needed.
 - **Image:** `drdonoso/worldcup2026` on Docker Hub.
 - **Volume mount:** `./data` is mounted read-only into `/app/data` inside the container. The `PREDICTIONS_PATH` env var defaults to `/app/data/predictions.yml`.
+- **TVE broadcast markers (📺):** `/hoy`, `/siguiente`, and the daily AI update automatically mark World Cup fixtures broadcast on Spanish public TV (La 1 / Teledeporte) with 📺, fetched from the RTVE schedule API. Disable with `TVE_ENABLED=false` in `.env`.

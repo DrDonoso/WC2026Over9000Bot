@@ -45,6 +45,12 @@ class Settings:
     openai_image_base_url: str = ""
     rich_image_hour: int = 0
     beloved_teams: tuple[str, ...] = ("PAN", "UZB", "CUW")
+    tve_enabled: bool = True
+
+
+def _parse_bool(raw: str) -> bool:
+    """Parse a boolean-ish env var ('0', 'false', 'no' → False; anything else → True)."""
+    return raw.strip().lower() not in ("0", "false", "no")
 
 
 def ai_enabled(settings: "Settings") -> bool:
@@ -125,4 +131,5 @@ def load_settings() -> Settings:
         openai_image_base_url=os.getenv("OPENAI_IMAGE_BASE_URL", ""),
         rich_image_hour=int(os.getenv("RICH_IMAGE_HOUR", "0")),
         beloved_teams=_parse_tla_list(os.getenv("BELOVED_TEAMS", "PAN,UZB,CUW")),
+        tve_enabled=_parse_bool(os.getenv("TVE_ENABLED", "1")),
     )

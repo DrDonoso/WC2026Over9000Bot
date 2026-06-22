@@ -19,6 +19,7 @@ None return   - no matches either day → generate_daily_update returns None (ca
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -85,6 +86,8 @@ _SYSTEM = (
     "Devuelve ÚNICAMENTE el objeto JSON, sin marcas de código ni nada más. "
     'Formato exacto: {"today_notes": {"TLA1-TLA2": "nota o cadena vacía"}, '
     '"standings_comment": "narrativa corta"}\n\n'
+    "Si algún partido de hoy lleva el emoji 📺, consérvalo en la nota de ese partido "
+    "y menciona brevemente que se emite en TVE.\n\n"
     "Cariño especial: Panamá 🇵🇦, Uzbekistán 🇺🇿 y Curaçao 🇨🇼 son las selecciones favoritas de esta porra. "
     "Siempre que las menciones, muéstrales un poco de amor y ánimo (con naturalidad, sin pasarte "
     "ni romper el formato): un emoji de corazón, una palabra de apoyo o un guiño cariñoso."
@@ -130,8 +133,13 @@ def build_ai_user_message(
     scenario: str = "normal",
     next_match: Match | None = None,
     next_date_str: str | None = None,
+    tve_by_key: dict[str, str] | None = None,
 ) -> str:
-    """Build the user message string sent to the AI model. Pure function — no I/O."""
+    """Build the user message string sent to the AI model. Pure function — no I/O.
+
+    tve_by_key: optional {f'{home_tla}-{away_tla}': channel_label} for today's matches.
+    When a fixture is on TVE, its line carries ' 📺 {label}' so the model knows.
+    """
     # Yesterday's results
     if yesterday:
         results_lines = [
@@ -144,11 +152,17 @@ def build_ai_user_message(
 
     # Today's fixtures — include TLA key so the model uses the right key
     if today:
-        today_lines = [
-            f"- [{m.home_tla}-{m.away_tla}] {m.home_name} vs {m.away_name}"
-            f" ({_format_kickoff(m.utc_date, tz_name)})"
-            for m in today
-        ]
+        today_lines: list[str] = []
+        for m in today:
+            line = (
+                f"- [{m.home_tla}-{m.away_tla}] {m.home_name} vs {m.away_name}"
+                f" ({_format_kickoff(m.utc_date, tz_name)})"
+            )
+            if tve_by_key:
+                label = tve_by_key.get(f"{m.home_tla}-{m.away_tla}")
+                if label:
+                    line += f" 📺 {label}"
+            today_lines.append(line)
         today_block = "\n".join(today_lines)
     else:
         today_block = "Sin partidos hoy."
@@ -384,7 +398,21 @@ async def generate_daily_update(
     movements = _snapshot.compute_movements(baseline or {}, current_positions, names)
     first_snapshot = baseline is None
 
-    # 4. AI call
+    # 4. TVE broadcasts (degrade gracefully — a RTVE failure must never break the update)
+    tve_by_key: dict[str, str] = {}
+    try:
+        from worldcup_bot.tve import load_tve_broadcasts, tve_channel_for
+        broadcasts = await asyncio.to_thread(
+            load_tve_broadcasts, tve_enabled=getattr(settings, "tve_enabled", True)
+        )
+        for m in today:
+            label = tve_channel_for(m, broadcasts)
+            if label:
+                tve_by_key[f"{m.home_tla}-{m.away_tla}"] = label
+    except Exception as exc:
+        log.warning("generate_daily_update: TVE fetch failed: %s", exc)
+
+    # 5. AI call
     user_msg = build_ai_user_message(
         yesterday,
         today,
@@ -395,6 +423,7 @@ async def generate_daily_update(
         scenario=scenario,
         next_match=next_match,
         next_date_str=next_date_str,
+        tve_by_key=tve_by_key or None,
     )
     try:
         raw = await ai.complete(_SYSTEM, user_msg, max_completion_tokens=1500)
@@ -406,7 +435,7 @@ async def generate_daily_update(
         )
         today_notes, standings_comment = {}, ""
 
-    # 5. Render HTML
+    # 6. Render HTML
     participant_names = [r.display_name for r in ranking]
     return render_message(
         yesterday,

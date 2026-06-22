@@ -29,6 +29,17 @@ def reset_predictions_cache():
 
 
 @pytest.fixture(autouse=True)
+def reset_tve_cache():
+    """Reset the TVE module-level TTL cache before and after every test."""
+    from worldcup_bot import tve as tve_module
+    tve_module._tve_cache["data"] = None
+    tve_module._tve_cache["fetched_at"] = 0.0
+    yield
+    tve_module._tve_cache["data"] = None
+    tve_module._tve_cache["fetched_at"] = 0.0
+
+
+@pytest.fixture(autouse=True)
 def reset_api_default_cache():
     """Reset the process-wide shared API cache before and after every test."""
     from worldcup_bot.api.cache import reset_default_cache

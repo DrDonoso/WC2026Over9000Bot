@@ -72,6 +72,7 @@ from worldcup_bot.reddit.vergol_stats import load_stats as _vs_load_stats
 from worldcup_bot.reddit.vergol_stats import record_view as _vs_record_view
 from worldcup_bot.reddit.vergol_stats import save_stats as _vs_save_stats
 from worldcup_bot.reddit.video import VideoTooLargeError, compress_if_needed, probe_video
+from worldcup_bot.tve import load_tve_broadcasts, tve_channel_for
 
 log = logging.getLogger(__name__)
 
@@ -472,10 +473,30 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if selected_offset == 0:
         header = f"⚽️ Partidos de hoy ({h:02d}:00–{h:02d}:00):"
-        lines = [format_match(m, settings.timezone) for m in selected]
+        try:
+            broadcasts = await asyncio.to_thread(
+                load_tve_broadcasts, tve_enabled=settings.tve_enabled
+            )
+        except Exception:
+            broadcasts = []
+        lines = [
+            format_match(m, settings.timezone, tve_label=tve_channel_for(m, broadcasts))
+            for m in selected
+        ]
     else:
         header = "⚽️ Ya han acabado los partidos de hoy. Estos son los próximos:"
-        lines = [format_match_with_date(m, settings.timezone) for m in selected]
+        try:
+            broadcasts = await asyncio.to_thread(
+                load_tve_broadcasts, tve_enabled=settings.tve_enabled
+            )
+        except Exception:
+            broadcasts = []
+        lines = [
+            format_match_with_date(
+                m, settings.timezone, tve_label=tve_channel_for(m, broadcasts)
+            )
+            for m in selected
+        ]
 
     await update.message.reply_text("\n".join([header, ""] + lines))
 
@@ -534,6 +555,15 @@ async def cmd_siguiente(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"{hf} {nxt.home_name} vs {nxt.away_name} {af}\n"
         f" ⌚: {date_str}"
     )
+    try:
+        broadcasts = await asyncio.to_thread(
+            load_tve_broadcasts, tve_enabled=settings.tve_enabled
+        )
+        label = tve_channel_for(nxt, broadcasts)
+        if label:
+            text += f" 📺 {label}"
+    except Exception:
+        pass
     await update.message.reply_text(text)
 
 

@@ -47,6 +47,9 @@ services:
       # --- Selecciones 'favoritas' (❤️ junto a la bandera) — TLAs separadas por comas ---
       BELOVED_TEAMS: "${BELOVED_TEAMS:-PAN,UZB,CUW}"
 
+      # --- Marca con 📺 los partidos que da TVE (vía API de RTVE). "0" para desactivar. ---
+      TVE_ENABLED: "${TVE_ENABLED:-1}"
+
       # --- Persistent state directory for porra snapshot ---
       STATE_DIR: /app/state
 
