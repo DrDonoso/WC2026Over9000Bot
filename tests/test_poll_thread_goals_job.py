@@ -607,3 +607,745 @@ class TestFlipFlopFix:
 
         ctx.bot.send_message.assert_not_called()
         mock_save.assert_not_called()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bug 1 regression — cross-job race: goal announced exactly once
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCrossJobRace:
+    """Regression tests for Bug 1: poll_goals_job and poll_thread_goals_job both see
+    the same new score while the announced is still the old value.  Without the
+    goal_lock the slow enrichment/send await yields control and the other job
+    re-reconciles from the stale announced → duplicate.  With the lock only the
+    first claimer updates announced; the second finds no delta.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_goal_announced_exactly_once(self, tmp_path):
+        """Both jobs see Spain 5-0 while announced=4-0, run concurrently via gather.
+        The lock must ensure only ONE send_message call despite the race.
+        """
+        import asyncio as _asyncio
+
+        from worldcup_bot.__main__ import poll_goals_job, poll_thread_goals_job
+
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            5, "IN_PLAY",
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=5, away_score=0,
+        )
+
+        # Both jobs share the same bot_data dict (same lock, same live_scores).
+        shared_scores = {"5": {"home": 4, "away": 0, "status": "IN_PLAY"}}
+        shared_bot_data = {
+            "settings": settings,
+            "live_scores": shared_scores,
+            "clip_store": {},
+            "seen_scores": {
+                "api": {"5": {"home": 4, "away": 0}},
+                "thread": {"5": {"home": 4, "away": 0}},
+            },
+        }
+
+        goal_event = _make_goal_event(
+            scorer="Morata", scoring_team="Spain",
+            home_score=5, away_score=0, minute_text="78",
+            home_team="Spain", away_team="Saudi Arabia",
+        )
+        thread_result = _make_thread_result("ESP", "SAU", [goal_event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[thread_result])
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+        shared_bot_data["reddit_scanner"] = mock_scanner
+
+        send_count = 0
+
+        async def counting_send(**kwargs):
+            nonlocal send_count
+            await _asyncio.sleep(0)  # yield — lets the other coroutine interleave
+            send_count += 1
+            return MagicMock(message_id=99)
+
+        ctx_api = MagicMock()
+        ctx_api.bot_data = shared_bot_data
+        ctx_api.bot.send_message = counting_send
+        ctx_api.bot.edit_message_text = AsyncMock()
+
+        ctx_thread = MagicMock()
+        ctx_thread.bot_data = shared_bot_data
+        ctx_thread.bot.send_message = counting_send
+        ctx_thread.bot.edit_message_text = AsyncMock()
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            mock_client.return_value.get_live_matches.return_value = [match]
+
+            await _asyncio.gather(
+                poll_goals_job(ctx_api),
+                poll_thread_goals_job(ctx_thread),
+            )
+
+        assert send_count == 1, (
+            f"Expected exactly 1 goal notification, got {send_count} — "
+            "Bug 1: concurrent jobs must not duplicate the same goal"
+        )
+
+    @pytest.mark.asyncio
+    async def test_sequential_api_then_thread_no_duplicate(self, tmp_path):
+        """API job claims 5-0 first; thread job then sees announced=5-0 → no second send."""
+        from worldcup_bot.__main__ import poll_goals_job, poll_thread_goals_job
+
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            5, "IN_PLAY",
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=5, away_score=0,
+        )
+
+        shared_scores = {"5": {"home": 4, "away": 0, "status": "IN_PLAY"}}
+        shared_bot_data = {
+            "settings": settings,
+            "live_scores": shared_scores,
+            "clip_store": {},
+            "seen_scores": {
+                "api": {"5": {"home": 4, "away": 0}},
+                "thread": {"5": {"home": 4, "away": 0}},
+            },
+        }
+
+        goal_event = _make_goal_event(
+            scorer="Morata", scoring_team="Spain",
+            home_score=5, away_score=0, minute_text="78",
+            home_team="Spain", away_team="Saudi Arabia",
+        )
+        thread_result = _make_thread_result("ESP", "SAU", [goal_event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[thread_result])
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+        shared_bot_data["reddit_scanner"] = mock_scanner
+
+        ctx_api = MagicMock()
+        ctx_api.bot_data = shared_bot_data
+        ctx_api.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+        ctx_api.bot.edit_message_text = AsyncMock()
+
+        ctx_thread = MagicMock()
+        ctx_thread.bot_data = shared_bot_data
+        ctx_thread.bot.send_message = AsyncMock(return_value=MagicMock(message_id=2))
+        ctx_thread.bot.edit_message_text = AsyncMock()
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            mock_client.return_value.get_live_matches.return_value = [match]
+
+            # API runs first and claims 5-0
+            await poll_goals_job(ctx_api)
+            # Thread then sees announced=5-0 → no delta
+            await poll_thread_goals_job(ctx_thread)
+
+        total_sends = (
+            ctx_api.bot.send_message.call_count
+            + ctx_thread.bot.send_message.call_count
+        )
+        assert total_sends == 1, (
+            f"Expected 1 total notification, got {total_sends}"
+        )
+        # Shared announced score must be 5-0
+        assert shared_scores["5"]["home"] == 5
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bug 2 regression — scorer back-fill on already-announced scorer-less goal
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestScorerBackfill:
+    """Regression tests for Bug 2: API announces a goal with scorer=None (enrichment
+    failed or thread not ready).  When the thread later reports the scorer, the job
+    must edit the original message and update the clip-store entry so the clip search
+    can proceed.
+    """
+
+    def _make_scorer_less_entry(self, match_id, scoring_team, home_score, away_score,
+                                message_id, home_name, away_name, home_tla, away_tla):
+        from worldcup_bot.reddit.clip_store import goal_token, add_entry
+        data = {}
+        key = f"{match_id}:{scoring_team}:{home_score}-{away_score}"
+        tok = goal_token(key)
+        add_entry(
+            data,
+            token=tok,
+            chat_id="-100999",
+            message_id=message_id,
+            home_name=home_name,
+            away_name=away_name,
+            home_tla=home_tla,
+            away_tla=away_tla,
+            home_score=home_score,
+            away_score=away_score,
+            scoring_team=scoring_team,
+            scorer=None,
+            minute=None,
+        )
+        return data, tok
+
+    @pytest.mark.asyncio
+    async def test_backfill_edits_message_and_sets_scorer(self, tmp_path):
+        """Thread provides scorer for a 4-0 goal that API announced with scorer=None.
+        Message must be edited with scorer line; clip-store entry scorer must be set.
+        """
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            1, "IN_PLAY",
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=4, away_score=0,
+        )
+
+        clip_data, tok = self._make_scorer_less_entry(
+            match_id=1, scoring_team="Spain",
+            home_score=4, away_score=0,
+            message_id=42,
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+        )
+
+        # announced=4-0, thread_seen=4-0 → no new deltas, but backfill should run
+        live_scores = {"1": {"home": 4, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 4, "away": 0}})
+        ctx.bot_data["clip_store"] = clip_data
+        ctx.bot.edit_message_text = AsyncMock()
+
+        event = _make_goal_event(
+            scorer="Morata", scoring_team="Spain",
+            home_score=4, away_score=0, minute_text="67",
+        )
+        result = _make_thread_result("ESP", "SAU", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        # No new goal message (score already announced)
+        ctx.bot.send_message.assert_not_called()
+
+        # edit_message_text must have been called to add the scorer line
+        ctx.bot.edit_message_text.assert_called_once()
+        edit_kwargs = ctx.bot.edit_message_text.call_args.kwargs
+        assert edit_kwargs["message_id"] == 42
+        assert "Morata" in edit_kwargs["text"]
+        assert "🎯" in edit_kwargs["text"]
+
+        # Clip-store entry scorer updated
+        assert clip_data[tok]["scorer"] == "Morata"
+
+    @pytest.mark.asyncio
+    async def test_backfill_idempotent_no_double_edit(self, tmp_path):
+        """Running the job twice after backfill: edit_message_text called only once."""
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            1, "IN_PLAY",
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=4, away_score=0,
+        )
+
+        clip_data, tok = self._make_scorer_less_entry(
+            match_id=1, scoring_team="Spain",
+            home_score=4, away_score=0,
+            message_id=42,
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+        )
+
+        live_scores = {"1": {"home": 4, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 4, "away": 0}})
+        ctx.bot_data["clip_store"] = clip_data
+        ctx.bot.edit_message_text = AsyncMock()
+
+        event = _make_goal_event(
+            scorer="Morata", scoring_team="Spain",
+            home_score=4, away_score=0, minute_text="67",
+        )
+        result = _make_thread_result("ESP", "SAU", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            # First run: backfills scorer, edits message
+            await poll_thread_goals_job(ctx)
+            # Second run: scorer already set → no second edit
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.edit_message_text.call_count == 1, (
+            "edit_message_text must be called exactly once — backfill must be idempotent"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_backfill_when_scorer_already_known(self, tmp_path):
+        """If clip-store entry already has a scorer, backfill must not edit the message."""
+        from worldcup_bot.reddit.clip_store import goal_token, add_entry
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            1, "IN_PLAY",
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=4, away_score=0,
+        )
+
+        clip_data: dict = {}
+        tok = goal_token("1:Spain:4-0")
+        add_entry(
+            clip_data, token=tok,
+            chat_id="-100999", message_id=42,
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=4, away_score=0,
+            scoring_team="Spain",
+            scorer="Morata",  # already known
+            minute="67",
+        )
+
+        live_scores = {"1": {"home": 4, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 4, "away": 0}})
+        ctx.bot_data["clip_store"] = clip_data
+        ctx.bot.edit_message_text = AsyncMock()
+
+        event = _make_goal_event(scorer="Morata", scoring_team="Spain", home_score=4, away_score=0)
+        result = _make_thread_result("ESP", "SAU", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        ctx.bot.edit_message_text.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_backfill_preserves_keyboard_when_clip_ready(self, tmp_path):
+        """When the clip-store entry is already 'ready' (Ver gol keyboard attached),
+        the backfill must pass reply_markup=build_goal_keyboard(tok) so the keyboard
+        is preserved after editMessageText — not silently cleared by Telegram.
+        """
+        from worldcup_bot.reddit.clip_store import goal_token, add_entry
+        from worldcup_bot.reddit.notifier import build_goal_keyboard
+
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            1, "IN_PLAY",
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=4, away_score=0,
+        )
+
+        clip_data: dict = {}
+        tok = goal_token("1:Spain:4-0")
+        add_entry(
+            clip_data, token=tok,
+            chat_id="-100999", message_id=77,
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=4, away_score=0,
+            scoring_team="Spain",
+            scorer=None,
+            minute=None,
+        )
+        # Simulate clip already found and keyboard attached
+        clip_data[tok]["status"] = "ready"
+        clip_data[tok]["clip_path"] = "/data/clips/abc.mp4"
+
+        live_scores = {"1": {"home": 4, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 4, "away": 0}})
+        ctx.bot_data["clip_store"] = clip_data
+        ctx.bot.edit_message_text = AsyncMock()
+
+        event = _make_goal_event(
+            scorer="Morata", scoring_team="Spain",
+            home_score=4, away_score=0, minute_text="67",
+        )
+        result = _make_thread_result("ESP", "SAU", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        ctx.bot.edit_message_text.assert_called_once()
+        edit_kwargs = ctx.bot.edit_message_text.call_args.kwargs
+        assert edit_kwargs["message_id"] == 77
+        # reply_markup must be the Ver gol keyboard (not None)
+        expected_markup = build_goal_keyboard(tok)
+        assert edit_kwargs.get("reply_markup") == expected_markup, (
+            "Backfill must re-attach the Ver gol keyboard when clip status is 'ready'"
+        )
+
+    @pytest.mark.asyncio
+    async def test_backfill_no_keyboard_when_clip_not_ready(self, tmp_path):
+        """When the clip-store entry is still 'searching' (no clip yet, no keyboard),
+        the backfill must NOT pass a keyboard — reply_markup should be None so we
+        don't add a stale/broken button before the clip is ready.
+        """
+        from worldcup_bot.reddit.clip_store import goal_token, add_entry
+
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            1, "IN_PLAY",
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=4, away_score=0,
+        )
+
+        clip_data: dict = {}
+        tok = goal_token("1:Spain:4-0")
+        add_entry(
+            clip_data, token=tok,
+            chat_id="-100999", message_id=88,
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=4, away_score=0,
+            scoring_team="Spain",
+            scorer=None,
+            minute=None,
+        )
+        # Entry still searching — no clip, no keyboard yet
+        assert clip_data[tok]["status"] == "searching"
+
+        live_scores = {"1": {"home": 4, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 4, "away": 0}})
+        ctx.bot_data["clip_store"] = clip_data
+        ctx.bot.edit_message_text = AsyncMock()
+
+        event = _make_goal_event(
+            scorer="Morata", scoring_team="Spain",
+            home_score=4, away_score=0, minute_text="67",
+        )
+        result = _make_thread_result("ESP", "SAU", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        ctx.bot.edit_message_text.assert_called_once()
+        edit_kwargs = ctx.bot.edit_message_text.call_args.kwargs
+        assert edit_kwargs["message_id"] == 88
+        # reply_markup must be None — no clip yet, no keyboard to attach
+        assert edit_kwargs.get("reply_markup") is None, (
+            "Backfill must NOT add a keyboard when clip is not yet ready"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bug 3 regression — disallowed must show authoritative post-VAR score
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDisallowedAuthoritativeScore:
+    """Regression tests for Bug 3: thread momentarily under-reads after a VAR.
+
+    Scenario: thread had announced goal 5 (announced=5-0, thread_seen=5-0).
+    VAR reverses goal 5.  Thread mis-parses and reads 3-0 (under-reads goal 4 too).
+    Without the clamp the disallowed message would say "3-0" — wrong.
+    With the clamp (announced−1 per side) the message says "4-0" — correct.
+    """
+
+    @pytest.mark.asyncio
+    async def test_under_read_disallowed_shows_announced_minus_1(self, tmp_path):
+        """Thread under-reads 3-0 when announced=5-0 (VAR on goal 5).
+        Disallowed message must show 4-0; announced must be updated to 4-0.
+        """
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            5, "IN_PLAY",
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=3, away_score=0,
+        )
+
+        # State: thread previously announced goal 5 → both announced and thread_seen at 5-0
+        live_scores = {"5": {"home": 5, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(
+            settings,
+            live_scores=live_scores,
+            seen_thread={"5": {"home": 5, "away": 0}},
+        )
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        ctx.bot.edit_message_text = AsyncMock()
+
+        # Thread under-reads: only event at 3-0 visible (missed event 4)
+        event_at_3 = _make_goal_event(
+            scorer="Morata", scoring_team="Spain",
+            home_score=3, away_score=0, minute_text="55",
+            home_team="Spain", away_team="Saudi Arabia",
+        )
+        result = _make_thread_result("ESP", "SAU", [event_at_3])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        # One disallowed notification
+        ctx.bot.send_message.assert_called_once()
+        disallowed_text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "❌" in disallowed_text or "VAR" in disallowed_text
+
+        # Message must show 4-0 (announced-1), NOT the under-read 3-0
+        assert "4-0" in disallowed_text, (
+            f"Disallowed message should say 4-0 (announced-1), got: {disallowed_text!r}"
+        )
+        assert "3-0" not in disallowed_text, (
+            f"Disallowed message must not contain under-read score 3-0: {disallowed_text!r}"
+        )
+
+        # Announced updated to 4-0 (not 3-0)
+        assert live_scores["5"]["home"] == 4, (
+            f"Announced must be updated to 4-0, got {live_scores['5']['home']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_correct_read_disallowed_unchanged(self, tmp_path):
+        """Thread correctly reads 4-0 after VAR on goal 5 (announced=5-0).
+        Clamp must not change anything: max(4, 5-1)=4, message shows 4-0 as expected.
+        """
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            5, "IN_PLAY",
+            home_name="Spain", away_name="Saudi Arabia",
+            home_tla="ESP", away_tla="SAU",
+            home_score=4, away_score=0,
+        )
+
+        live_scores = {"5": {"home": 5, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(
+            settings,
+            live_scores=live_scores,
+            seen_thread={"5": {"home": 5, "away": 0}},
+        )
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        ctx.bot.edit_message_text = AsyncMock()
+
+        event_at_4 = _make_goal_event(
+            scorer="Morata", scoring_team="Spain",
+            home_score=4, away_score=0, minute_text="60",
+            home_team="Spain", away_team="Saudi Arabia",
+        )
+        result = _make_thread_result("ESP", "SAU", [event_at_4])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        ctx.bot.send_message.assert_called_once()
+        disallowed_text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "4-0" in disallowed_text
+        assert live_scores["5"]["home"] == 4
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bug 4 regression — multi-goal jump announces all intermediate goals
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMultiGoalExpansion:
+    """Regression tests for Bug 4: when the thread sees a score jump >1 in one tick,
+    every intermediate goal must be announced with the correct running score.
+    Also verifies no goal is dropped when the two sources update around the same time
+    (covered by Bug 1's lock fix; confirmed here via the per-target expansion).
+    """
+
+    @pytest.mark.asyncio
+    async def test_three_away_goals_in_one_tick_sends_three_messages(self, tmp_path):
+        """Thread sees NZ 1-3 EGY when announced was 1-0.
+        Must send 3 notifications with scores 1-1, 1-2, 1-3.
+        """
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            7, "IN_PLAY",
+            home_name="New Zealand", away_name="Egypt",
+            home_tla="NZL", away_tla="EGY",
+            home_score=1, away_score=3,
+        )
+
+        live_scores = {"7": {"home": 1, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(
+            settings,
+            live_scores=live_scores,
+            seen_thread={"7": {"home": 1, "away": 0}},
+        )
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        ctx.bot.edit_message_text = AsyncMock()
+
+        events = [
+            _make_goal_event(
+                scorer="Salah", scoring_team="Egypt",
+                home_score=1, away_score=1, minute_text="67", minute_sort=67.0,
+                home_team="New Zealand", away_team="Egypt",
+            ),
+            _make_goal_event(
+                scorer="Trezeguet", scoring_team="Egypt",
+                home_score=1, away_score=2, minute_text="82", minute_sort=82.0,
+                home_team="New Zealand", away_team="Egypt",
+            ),
+            _make_goal_event(
+                scorer="Zizo", scoring_team="Egypt",
+                home_score=1, away_score=3, minute_text="88", minute_sort=88.0,
+                home_team="New Zealand", away_team="Egypt",
+            ),
+        ]
+        result = _make_thread_result("NZL", "EGY", events)
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 3, (
+            f"Expected 3 goal notifications for 3-goal jump, got {ctx.bot.send_message.call_count}"
+        )
+
+        # Verify intermediate scores are shown correctly (not all showing 1-3)
+        texts = [call.kwargs["text"] for call in ctx.bot.send_message.call_args_list]
+        scores_in_messages = set()
+        for text in texts:
+            for score in ["1-1", "1-2", "1-3"]:
+                if score in text:
+                    scores_in_messages.add(score)
+        assert scores_in_messages == {"1-1", "1-2", "1-3"}, (
+            f"Expected intermediate scores 1-1, 1-2, 1-3 in messages, got {scores_in_messages}"
+        )
+
+        # All goals announced; announced updated to 1-3
+        assert live_scores["7"]["away"] == 3
+
+    @pytest.mark.asyncio
+    async def test_multi_goal_no_goals_dropped_after_lock_claim(self, tmp_path):
+        """After thread claims 1-3, a second call (simulating API catchup) produces no extra sends.
+        Verifies Bug 4 is covered by Bug 1's lock fix.
+        """
+        from worldcup_bot.__main__ import poll_goals_job, poll_thread_goals_job
+
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            7, "IN_PLAY",
+            home_name="New Zealand", away_name="Egypt",
+            home_tla="NZL", away_tla="EGY",
+            home_score=1, away_score=3,
+        )
+
+        # Shared state: announced at 1-0
+        shared_scores = {"7": {"home": 1, "away": 0, "status": "IN_PLAY"}}
+        shared_bot_data = {
+            "settings": settings,
+            "live_scores": shared_scores,
+            "clip_store": {},
+            "seen_scores": {
+                "api": {"7": {"home": 1, "away": 0}},
+                "thread": {"7": {"home": 1, "away": 0}},
+            },
+        }
+
+        events = [
+            _make_goal_event(scorer="Salah", scoring_team="Egypt",
+                             home_score=1, away_score=1, minute_text="67", minute_sort=67.0,
+                             home_team="New Zealand", away_team="Egypt"),
+            _make_goal_event(scorer="Trezeguet", scoring_team="Egypt",
+                             home_score=1, away_score=2, minute_text="82", minute_sort=82.0,
+                             home_team="New Zealand", away_team="Egypt"),
+            _make_goal_event(scorer="Zizo", scoring_team="Egypt",
+                             home_score=1, away_score=3, minute_text="88", minute_sort=88.0,
+                             home_team="New Zealand", away_team="Egypt"),
+        ]
+        thread_result = _make_thread_result("NZL", "EGY", events)
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[thread_result])
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+        shared_bot_data["reddit_scanner"] = mock_scanner
+
+        ctx_thread = MagicMock()
+        ctx_thread.bot_data = shared_bot_data
+        ctx_thread.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        ctx_thread.bot.edit_message_text = AsyncMock()
+
+        ctx_api = MagicMock()
+        ctx_api.bot_data = shared_bot_data
+        ctx_api.bot.send_message = AsyncMock(return_value=MagicMock(message_id=100))
+        ctx_api.bot.edit_message_text = AsyncMock()
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            mock_client.return_value.get_all_matches.return_value = [match]
+
+            # Thread announces all 3 goals
+            await poll_thread_goals_job(ctx_thread)
+            # API catchup at 1-3: announced already 1-3 → no new sends
+            await poll_goals_job(ctx_api)
+
+        thread_sends = ctx_thread.bot.send_message.call_count
+        api_sends = ctx_api.bot.send_message.call_count
+        assert thread_sends == 3, f"Thread should send 3 goals, sent {thread_sends}"
+        assert api_sends == 0, f"API catchup must send 0 (all claimed), sent {api_sends}"

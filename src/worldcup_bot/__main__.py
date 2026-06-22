@@ -287,6 +287,108 @@ async def _notify_goal(
     log.debug("Clip-store entry created: token=%s key=%s", tok, token_key)
 
 
+async def _backfill_scorer_in_clip_store(
+    match,
+    events: list,
+    settings: Settings,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Bug 2 fix: back-fill scorer onto an already-announced goal whose clip-store entry
+    has scorer=None (happens when the API detected the goal before the thread reported
+    the scorer — e.g. enrichment returned (None, None) due to 429 / thread lag).
+
+    For each thread event that has a known scorer:
+      1. Locate the clip-store entry by token key ``{match.id}:{team}:{h}-{w}``.
+      2. If the entry exists and its scorer is None, update it and edit the original
+         Telegram goal message to add the ``🎯 scorer (min')`` line.
+      3. Save the updated clip-store so poll_goal_clips_job picks up the scorer
+         and can find the clip.
+
+    Idempotent: entry["scorer"] is only filled once (checked before every edit).
+    Never raises — all failures are caught and logged.
+    """
+    try:
+        clips_path = f"{settings.state_dir}/goal_clips.json"
+        clip_data: dict = context.bot_data.setdefault("clip_store", load_clips(clips_path))
+
+        filled: list[str] = []
+
+        for event in events:
+            if not event.scorer:
+                continue
+
+            # Use the canonical team name (same value _notify_goal stored in the token key).
+            if _teams_match(event.scoring_team, match.home_name):
+                scoring_team = match.home_name
+            else:
+                scoring_team = match.away_name
+
+            token_key = f"{match.id}:{scoring_team}:{event.home_score}-{event.away_score}"
+            tok = _cs_goal_token(token_key)
+            entry = clip_data.get(tok)
+
+            if entry is None or entry.get("scorer") is not None:
+                continue  # no entry, or scorer already known — nothing to do
+
+            # Update scorer (and minute if still unknown) so the clip search can proceed.
+            entry["scorer"] = event.scorer
+            if entry.get("minute") is None and event.minute_text:
+                entry["minute"] = event.minute_text
+
+            # Rebuild the goal message text with the now-known scorer and edit it.
+            new_text = format_new_goal_message(
+                scoring_team=scoring_team,
+                home_name=match.home_name,
+                away_name=match.away_name,
+                home_score=entry["home_score"],
+                away_score=entry["away_score"],
+                home_tla=entry.get("home_tla", ""),
+                away_tla=entry.get("away_tla", ""),
+                scorer=event.scorer,
+                minute=entry["minute"],
+            )
+            # Re-attach the "Ver gol" keyboard when the clip is already ready;
+            # omitting reply_markup would clear it from the message.
+            keyboard = build_goal_keyboard(tok) if entry.get("status") == "ready" else None
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=entry["chat_id"],
+                    message_id=entry["message_id"],
+                    text=new_text,
+                    parse_mode="HTML",
+                    reply_markup=keyboard,
+                )
+                log.info(
+                    "_backfill_scorer: edited message %d for %s vs %s (%d-%d) → scorer=%s%s",
+                    entry["message_id"],
+                    match.home_name, match.away_name,
+                    entry["home_score"], entry["away_score"],
+                    event.scorer,
+                    " (keyboard preserved)" if keyboard else "",
+                )
+            except Exception as exc:
+                log.warning(
+                    "_backfill_scorer: could not edit message %d: %s",
+                    entry.get("message_id"), exc,
+                )
+                # Scorer is still updated in the entry so the clip search can proceed.
+
+            filled.append(tok)
+
+        if filled:
+            save_clips(clips_path, clip_data)
+            log.info(
+                "_backfill_scorer: filled scorer for %d goal(s) in %s vs %s",
+                len(filled), match.home_name, match.away_name,
+            )
+
+    except Exception as exc:
+        log.exception(
+            "_backfill_scorer: unexpected error for %s vs %s: %s",
+            match.home_name, match.away_name, exc,
+        )
+
+
 async def _process_goal_delta(
     delta: GoalDelta,
     match,
@@ -340,6 +442,12 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     Uses reconcile() with per-source "seen" so that a lagging source's catch-up
     never produces a false disallowed, and only the first source to detect a score
     change announces it.
+
+    Bug 1 fix: the "read announced → reconcile → claim new_ann" step is performed
+    inside goal_lock so it is atomic across both poll jobs.  The slow enrichment
+    + Telegram send happen OUTSIDE the lock; a concurrent job that acquires the
+    lock afterwards sees the already-updated announced and reconcile returns no
+    delta → no duplicate announcement.
     """
     try:
         settings: Settings = context.bot_data["settings"]
@@ -351,6 +459,9 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Per-source seen — in-memory only (rebuilt by re-seeding on restart).
         seen_scores = context.bot_data.setdefault("seen_scores", {"api": {}, "thread": {}})
         seen_api: dict = seen_scores["api"]
+
+        # Shared lock: both poll jobs use this to atomically claim score changes.
+        goal_lock: asyncio.Lock = context.bot_data.setdefault("goal_lock", asyncio.Lock())
 
         if context.bot_data.get("reddit_scanner") is None:
             context.bot_data["reddit_scanner"] = RedditMatchScanner(
@@ -386,67 +497,78 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             curr_home = int(match.home_score) if match.home_score is not None else 0
             curr_away = int(match.away_score) if match.away_score is not None else 0
 
-            stored = scores.get(match_key)
-            ann_homeaway = (
-                {"home": int(stored["home"]), "away": int(stored["away"])}
-                if stored is not None else None
-            )
+            # Deltas to process after the lock is released (slow sends must not hold it).
+            deltas_to_process: list = []
 
-            source_seen = seen_api.get(match_key)
-            deltas, new_seen, new_ann = reconcile(source_seen, ann_homeaway, curr_home, curr_away)
-
-            # Always advance this source's seen baseline.
-            seen_api[match_key] = new_seen
-
-            if stored is None:
-                # First-seen by any source: seed live_scores entry.
-                log.info(
-                    "poll_goals_job: seeding match %d (%s vs %s) at %d-%d",
-                    match.id, match.home_name, match.away_name,
-                    new_ann["home"], new_ann["away"],
+            async with goal_lock:
+                stored = scores.get(match_key)
+                ann_homeaway = (
+                    {"home": int(stored["home"]), "away": int(stored["away"])}
+                    if stored is not None else None
                 )
-                scores[match_key] = {
-                    "home": new_ann["home"],
-                    "away": new_ann["away"],
-                    "status": match.status,
-                }
-                changed = True
-                continue
 
-            if not deltas:
-                # No goals/disallowed to announce, but status or lag-resolved score may change.
-                announced_changed = (
-                    new_ann["home"] != stored["home"] or new_ann["away"] != stored["away"]
+                source_seen = seen_api.get(match_key)
+                deltas, new_seen, new_ann = reconcile(
+                    source_seen, ann_homeaway, curr_home, curr_away
                 )
-                status_changed = stored.get("status") != match.status
-                if announced_changed or status_changed:
-                    scores[match_key]["home"] = new_ann["home"]
-                    scores[match_key]["away"] = new_ann["away"]
-                    scores[match_key]["status"] = match.status
+
+                # Always advance this source's seen baseline.
+                seen_api[match_key] = new_seen
+
+                if stored is None:
+                    # First-seen by any source: seed live_scores entry.
+                    log.info(
+                        "poll_goals_job: seeding match %d (%s vs %s) at %d-%d",
+                        match.id, match.home_name, match.away_name,
+                        new_ann["home"], new_ann["away"],
+                    )
+                    scores[match_key] = {
+                        "home": new_ann["home"],
+                        "away": new_ann["away"],
+                        "status": match.status,
+                    }
                     changed = True
-                continue
+                    # reconcile rule 1 always returns [] for first-seen; nothing to send.
 
-            # Process deltas — fill in scoring_team before passing to handler.
-            for delta in deltas:
-                delta.scoring_team = (
-                    match.home_name if delta.side == "home" else match.away_name
-                )
+                elif deltas:
+                    for delta in deltas:
+                        delta.scoring_team = (
+                            match.home_name if delta.side == "home" else match.away_name
+                        )
+                    # CLAIM the announced score immediately so a concurrent job that
+                    # acquires the lock next sees new_ann and produces no delta.
+                    scores[match_key] = {
+                        "home": new_ann["home"],
+                        "away": new_ann["away"],
+                        "status": match.status,
+                    }
+                    changed = True
+                    deltas_to_process = list(deltas)
+
+                else:
+                    # No goals/disallowed to announce, but status or lag-resolved score may change.
+                    announced_changed = (
+                        new_ann["home"] != stored["home"] or new_ann["away"] != stored["away"]
+                    )
+                    status_changed = stored.get("status") != match.status
+                    if announced_changed or status_changed:
+                        scores[match_key]["home"] = new_ann["home"]
+                        scores[match_key]["away"] = new_ann["away"]
+                        scores[match_key]["status"] = match.status
+                        changed = True
+
+            # ── Outside the lock: slow enrichment + Telegram sends ────────────────
+            for delta in deltas_to_process:
                 try:
                     await _process_goal_delta(
                         delta, match, scanner, settings, context, silent
                     )
                 except Exception as exc:
+                    # Score already claimed; log only — do not re-announce.
                     log.error(
                         "poll_goals_job: error processing delta for match %d: %s",
                         match.id, exc,
                     )
-
-            scores[match_key] = {
-                "home": new_ann["home"],
-                "away": new_ann["away"],
-                "status": match.status,
-            }
-            changed = True
 
         if changed:
             save_scores(state_path, scores)
@@ -470,6 +592,16 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     Only processes matches already seeded in live_scores by poll_goals_job (avoids
     replaying historical goals on startup).
+
+    Bug 1 fix: goal_lock makes the "read announced → reconcile → claim" step atomic
+    with poll_goals_job — prevents concurrent jobs from announcing the same goal twice.
+
+    Bug 2 fix: _backfill_scorer_in_clip_store edits already-sent scorer-less messages
+    once the thread provides the scorer.
+
+    Bug 3 fix: thread disallowed score is clamped to announced−1 per dropped side so
+    a momentary thread under-read never shows a score below the authoritative post-VAR
+    value (e.g. shows 4-0 instead of 3-0 when only goal 5 was VAR'd, not goal 4).
     """
     try:
         settings: Settings = context.bot_data["settings"]
@@ -481,6 +613,9 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Per-source thread seen — in-memory only.
         seen_scores = context.bot_data.setdefault("seen_scores", {"api": {}, "thread": {}})
         seen_thread: dict = seen_scores["thread"]
+
+        # Shared lock (created by poll_goals_job on its first run, or here if thread runs first).
+        goal_lock: asyncio.Lock = context.bot_data.setdefault("goal_lock", asyncio.Lock())
 
         if context.bot_data.get("reddit_scanner") is None:
             context.bot_data["reddit_scanner"] = RedditMatchScanner(
@@ -541,130 +676,160 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 thread_home = max((e.home_score for e in events), default=0)
                 thread_away = max((e.away_score for e in events), default=0)
 
-                ann_homeaway = {
-                    "home": int(stored["home"]),
-                    "away": int(stored["away"]),
-                }
-                source_seen = seen_thread.get(key)
-
-                deltas, new_seen, new_ann = reconcile(
-                    source_seen, ann_homeaway, thread_home, thread_away
-                )
-
-                # Always advance this source's seen baseline.
-                seen_thread[key] = new_seen
-
-                if not deltas:
-                    # Lag catch-up may update new_ann (stays equal to ann in lag branch),
-                    # so no live_scores change needed.
-                    continue
-
+                # Sort once; used for both goals_to_notify expansion and backfill.
                 sorted_events = sorted(events, key=lambda e: e.minute_sort)
 
+                # Variables set inside the lock and used outside it.
+                deltas: list = []
+                ann_homeaway: dict = {}
+                new_ann: dict = {}
                 goals_to_notify: list[dict] = []
+                disallowed_deltas: list = []
 
-                # Build per-goal notifications using intermediate target scores so each
-                # notification shows the correct running score (e.g. 3-2, then 4-2).
-                if new_ann["home"] > ann_homeaway["home"]:
-                    for target in range(ann_homeaway["home"] + 1, new_ann["home"] + 1):
-                        event = next(
-                            (
-                                e for e in sorted_events
-                                if e.home_score == target
-                                and _teams_match(e.scoring_team, match.home_name)
-                            ),
-                            None,
-                        )
-                        goals_to_notify.append({
-                            "scoring_team": match.home_name,
-                            "new_home": target,
-                            "new_away": event.away_score if event else ann_homeaway["away"],
-                            "scorer": event.scorer if event else None,
-                            "minute": event.minute_text if event else None,
-                            "minute_sort": event.minute_sort if event else float("inf"),
-                        })
+                async with goal_lock:
+                    ann_homeaway = {
+                        "home": int(stored["home"]),
+                        "away": int(stored["away"]),
+                    }
+                    source_seen = seen_thread.get(key)
 
-                if new_ann["away"] > ann_homeaway["away"]:
-                    for target in range(ann_homeaway["away"] + 1, new_ann["away"] + 1):
-                        event = next(
-                            (
-                                e for e in sorted_events
-                                if e.away_score == target
-                                and _teams_match(e.scoring_team, match.away_name)
-                            ),
-                            None,
-                        )
-                        goals_to_notify.append({
-                            "scoring_team": match.away_name,
-                            "new_home": event.home_score if event else ann_homeaway["home"],
-                            "new_away": target,
-                            "scorer": event.scorer if event else None,
-                            "minute": event.minute_text if event else None,
-                            "minute_sort": event.minute_sort if event else float("inf"),
-                        })
+                    deltas, new_seen, new_ann = reconcile(
+                        source_seen, ann_homeaway, thread_home, thread_away
+                    )
 
-                goals_to_notify.sort(key=lambda g: g["minute_sort"])
+                    # Always advance this source's seen baseline.
+                    seen_thread[key] = new_seen
 
-                for g in goals_to_notify:
-                    try:
-                        await _notify_goal(
-                            match=match,
-                            new_home=g["new_home"],
-                            new_away=g["new_away"],
-                            scoring_team=g["scoring_team"],
-                            scorer=g["scorer"] or None,
-                            minute=g["minute"],
-                            settings=settings,
-                            context=context,
-                            silent=silent,
-                        )
-                    except Exception as exc:
-                        log.error(
-                            "poll_thread_goals_job: _notify_goal failed for match %d: %s",
-                            match.id, exc,
-                        )
+                    if deltas:
+                        # Bug 3: clamp disallowed score to announced−1 per dropped side.
+                        # The thread can momentarily under-read (e.g. read 3-0 when 4-0 stands
+                        # after a VAR on the 5th goal).  Using announced−1 instead of the raw
+                        # thread read ensures the disallowed message and the new announced value
+                        # are always authoritative and never go below the truly-confirmed score.
+                        for d in deltas:
+                            if d.kind == "disallowed":
+                                if d.side == "home":
+                                    clamped = max(d.new_home, ann_homeaway["home"] - 1)
+                                    d.new_home = clamped
+                                    new_ann["home"] = clamped
+                                else:
+                                    clamped = max(d.new_away, ann_homeaway["away"] - 1)
+                                    d.new_away = clamped
+                                    new_ann["away"] = clamped
 
-                # Handle disallowed deltas (thread's own score dropped = real VAR).
-                for delta in (d for d in deltas if d.kind == "disallowed"):
-                    try:
-                        text = format_disallowed_message(
-                            home_name=match.home_name,
-                            away_name=match.away_name,
-                            home_score=delta.new_home,
-                            away_score=delta.new_away,
-                            home_tla=match.home_tla,
-                            away_tla=match.away_tla,
-                        )
-                        await context.bot.send_message(
-                            chat_id=settings.telegram_group_id,
-                            text=text,
-                            parse_mode="HTML",
-                            disable_notification=silent,
-                        )
-                        log.info(
-                            "poll_thread_goals_job: thread-VAR disallowed for match %d (%s vs %s)",
-                            match.id, match.home_name, match.away_name,
-                        )
-                    except Exception as exc:
-                        log.error(
-                            "poll_thread_goals_job: disallowed notification failed for match %d: %s",
-                            match.id, exc,
-                        )
+                        # CLAIM the announced score before slow Telegram sends.
+                        scores[key]["home"] = new_ann["home"]
+                        scores[key]["away"] = new_ann["away"]
+                        changed = True
 
-                # Update shared announced score.
-                scores[key]["home"] = new_ann["home"]
-                scores[key]["away"] = new_ann["away"]
-                changed = True
+                # ── Outside the lock: build notifications ─────────────────────
 
-                log.info(
-                    "poll_thread_goals_job: match %d (%s vs %s) thread score %d-%d "
-                    "(was %d-%d), %d goal(s) + %d disallowed notified",
-                    match.id, match.home_name, match.away_name,
-                    thread_home, thread_away,
-                    ann_homeaway["home"], ann_homeaway["away"],
-                    len(goals_to_notify),
-                    sum(1 for d in deltas if d.kind == "disallowed"),
-                )
+                if deltas:
+                    goal_deltas = [d for d in deltas if d.kind == "goal"]
+                    disallowed_deltas = [d for d in deltas if d.kind == "disallowed"]
+
+                    # Build per-goal notifications using intermediate target scores so each
+                    # notification shows the correct running score (e.g. 3-2, then 4-2).
+                    if new_ann["home"] > ann_homeaway["home"]:
+                        for target in range(ann_homeaway["home"] + 1, new_ann["home"] + 1):
+                            event = next(
+                                (
+                                    e for e in sorted_events
+                                    if e.home_score == target
+                                    and _teams_match(e.scoring_team, match.home_name)
+                                ),
+                                None,
+                            )
+                            goals_to_notify.append({
+                                "scoring_team": match.home_name,
+                                "new_home": target,
+                                "new_away": event.away_score if event else ann_homeaway["away"],
+                                "scorer": event.scorer if event else None,
+                                "minute": event.minute_text if event else None,
+                                "minute_sort": event.minute_sort if event else float("inf"),
+                            })
+
+                    if new_ann["away"] > ann_homeaway["away"]:
+                        for target in range(ann_homeaway["away"] + 1, new_ann["away"] + 1):
+                            event = next(
+                                (
+                                    e for e in sorted_events
+                                    if e.away_score == target
+                                    and _teams_match(e.scoring_team, match.away_name)
+                                ),
+                                None,
+                            )
+                            goals_to_notify.append({
+                                "scoring_team": match.away_name,
+                                "new_home": event.home_score if event else ann_homeaway["home"],
+                                "new_away": target,
+                                "scorer": event.scorer if event else None,
+                                "minute": event.minute_text if event else None,
+                                "minute_sort": event.minute_sort if event else float("inf"),
+                            })
+
+                    goals_to_notify.sort(key=lambda g: g["minute_sort"])
+
+                    for g in goals_to_notify:
+                        try:
+                            await _notify_goal(
+                                match=match,
+                                new_home=g["new_home"],
+                                new_away=g["new_away"],
+                                scoring_team=g["scoring_team"],
+                                scorer=g["scorer"] or None,
+                                minute=g["minute"],
+                                settings=settings,
+                                context=context,
+                                silent=silent,
+                            )
+                        except Exception as exc:
+                            log.error(
+                                "poll_thread_goals_job: _notify_goal failed for match %d: %s",
+                                match.id, exc,
+                            )
+
+                    # Handle disallowed deltas (thread's own score dropped = real VAR).
+                    for delta in disallowed_deltas:
+                        try:
+                            text = format_disallowed_message(
+                                home_name=match.home_name,
+                                away_name=match.away_name,
+                                home_score=delta.new_home,
+                                away_score=delta.new_away,
+                                home_tla=match.home_tla,
+                                away_tla=match.away_tla,
+                            )
+                            await context.bot.send_message(
+                                chat_id=settings.telegram_group_id,
+                                text=text,
+                                parse_mode="HTML",
+                                disable_notification=silent,
+                            )
+                            log.info(
+                                "poll_thread_goals_job: thread-VAR disallowed for match %d (%s vs %s)",
+                                match.id, match.home_name, match.away_name,
+                            )
+                        except Exception as exc:
+                            log.error(
+                                "poll_thread_goals_job: disallowed notification failed for match %d: %s",
+                                match.id, exc,
+                            )
+
+                    log.info(
+                        "poll_thread_goals_job: match %d (%s vs %s) thread score %d-%d "
+                        "(was %d-%d), %d goal(s) + %d disallowed notified",
+                        match.id, match.home_name, match.away_name,
+                        thread_home, thread_away,
+                        ann_homeaway["home"], ann_homeaway["away"],
+                        len(goals_to_notify),
+                        len(disallowed_deltas),
+                    )
+
+                # Bug 2 fix: back-fill scorer onto scorer-less announced goals.
+                # Runs regardless of whether there were new deltas this tick —
+                # the API may have beaten the thread to the announcement.
+                await _backfill_scorer_in_clip_store(match, sorted_events, settings, context)
 
             except Exception as exc:
                 log.exception(
