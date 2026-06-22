@@ -5,6 +5,13 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260622.02] - 2026-06-22
+
+- Duplicate goal (e.g. '5-0' sent twice): both jobs read a stale announced score and re-announced. Fixed with a shared asyncio goal_lock — each job now claims the new announced score atomically inside the lock BEFORE the slow enrichment/send, so the other job sees it and produces no delta. This also fixes goals being missed in the same race (NZ-Egypt).
+- Goal sent with no scorer and no 'Ver gol' button (API beat the thread and scorer enrichment was empty): the thread now back-fills the scorer onto the already-sent message (edits text + sets the clip-store scorer so the clip search runs), and re-attaches the existing 'Ver gol' keyboard so the edit cannot strip it.
+- VAR 'Gol anulado' showed a wrong, too-low score from a momentary thread mis-read: the post-VAR score is clamped to announced-1 on the dropped side.
+
+
 ## [20260622] - 2026-06-22
 
 - pred & actual both in top-2 (positions 1-2) -> 1.0 (order irrelevant) - exact 3rd (pred=3, actual=3) -> 1.0 - boundary between top-2 and 3rd -> 0.5 - otherwise -> 0
