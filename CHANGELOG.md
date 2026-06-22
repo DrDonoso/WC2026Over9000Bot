@@ -5,6 +5,15 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260622.05] - 2026-06-22
+
+- refactor(tongo): require TongoUsers.yml — fail (no fallback) if it can't load
+- Merge decisions/inbox (kante-dailyupdate-tve-and-tongocheck) into decisions.md
+- Condensed kante history.md (15566→15221 bytes, <15360 threshold)
+- Appended phases 26–31 to history-archive.md (2026-06-22 TVE + tongocheck details)
+- No entries >7 days old to archive
+
+
 ## [20260622.04] - 2026-06-22
 
 - Daily update (/updatediario): the 📺 + channel now appears on the match line right after the kickoff (e.g. 'Inglaterra vs Ghana — 22:00 📺 La 1'), exactly like /hoy — rendered deterministically by render_message. The AI no longer mentions TVE (removed from _SYSTEM and build_ai_user_message), so it is no longer redundant with the line marker.
