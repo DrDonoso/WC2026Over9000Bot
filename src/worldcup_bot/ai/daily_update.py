@@ -86,8 +86,6 @@ _SYSTEM = (
     "Devuelve ÚNICAMENTE el objeto JSON, sin marcas de código ni nada más. "
     'Formato exacto: {"today_notes": {"TLA1-TLA2": "nota o cadena vacía"}, '
     '"standings_comment": "narrativa corta"}\n\n'
-    "Si algún partido de hoy lleva el emoji 📺, consérvalo en la nota de ese partido "
-    "y menciona brevemente que se emite en TVE.\n\n"
     "Cariño especial: Panamá 🇵🇦, Uzbekistán 🇺🇿 y Curaçao 🇨🇼 son las selecciones favoritas de esta porra. "
     "Siempre que las menciones, muéstrales un poco de amor y ánimo (con naturalidad, sin pasarte "
     "ni romper el formato): un emoji de corazón, una palabra de apoyo o un guiño cariñoso."
@@ -133,13 +131,8 @@ def build_ai_user_message(
     scenario: str = "normal",
     next_match: Match | None = None,
     next_date_str: str | None = None,
-    tve_by_key: dict[str, str] | None = None,
 ) -> str:
-    """Build the user message string sent to the AI model. Pure function — no I/O.
-
-    tve_by_key: optional {f'{home_tla}-{away_tla}': channel_label} for today's matches.
-    When a fixture is on TVE, its line carries ' 📺 {label}' so the model knows.
-    """
+    """Build the user message string sent to the AI model. Pure function — no I/O."""
     # Yesterday's results
     if yesterday:
         results_lines = [
@@ -158,10 +151,6 @@ def build_ai_user_message(
                 f"- [{m.home_tla}-{m.away_tla}] {m.home_name} vs {m.away_name}"
                 f" ({_format_kickoff(m.utc_date, tz_name)})"
             )
-            if tve_by_key:
-                label = tve_by_key.get(f"{m.home_tla}-{m.away_tla}")
-                if label:
-                    line += f" 📺 {label}"
             today_lines.append(line)
         today_block = "\n".join(today_lines)
     else:
@@ -252,6 +241,7 @@ def render_message(
     scenario: str = "normal",
     next_date_str: str | None = None,
     participant_names: list[str] | None = None,
+    tve_by_key: dict[str, str] | None = None,
 ) -> str:
     """Assemble the final HTML Telegram message. Pure function — no I/O.
 
@@ -298,10 +288,13 @@ def render_message(
             home_esc = html.escape(m.home_name, quote=False)
             away_esc = html.escape(m.away_name, quote=False)
             kickoff = _format_kickoff(m.utc_date, tz_name)
-            lines.append(
-                f"{hf} <b>{home_esc}</b> vs <b>{away_esc}</b> {af} — {kickoff}"
-            )
             key = f"{m.home_tla}-{m.away_tla}"
+            match_line = f"{hf} <b>{home_esc}</b> vs <b>{away_esc}</b> {af} — {kickoff}"
+            if tve_by_key:
+                label = tve_by_key.get(key)
+                if label:
+                    match_line += f" 📺 {label}"
+            lines.append(match_line)
             note = today_notes.get(key, "").strip()
             if note:
                 lines.append(f"   <i>{html.escape(note, quote=False)}</i>")
@@ -423,7 +416,6 @@ async def generate_daily_update(
         scenario=scenario,
         next_match=next_match,
         next_date_str=next_date_str,
-        tve_by_key=tve_by_key or None,
     )
     try:
         raw = await ai.complete(_SYSTEM, user_msg, max_completion_tokens=1500)
@@ -446,4 +438,5 @@ async def generate_daily_update(
         scenario=scenario,
         next_date_str=next_date_str,
         participant_names=participant_names,
+        tve_by_key=tve_by_key or None,
     )

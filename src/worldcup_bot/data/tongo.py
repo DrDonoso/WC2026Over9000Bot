@@ -321,6 +321,60 @@ def load_tongo_config(path: str) -> TongoConfig:
     return result
 
 
+# ── config validator ─────────────────────────────────────────────────────────
+
+
+def check_tongo_config(path: str) -> tuple[bool, str]:
+    """Validate the tongo config at *path* without touching the hot-reload cache.
+
+    Returns:
+        (True, summary)  on success — e.g. "3 frases globales, 2 usuarios configurados: alice, bob"
+        (False, detail)  on any problem — file missing, YAML error, or bad structure.
+    Never raises.
+    """
+    if not os.path.exists(path):
+        return False, f"no encontrado en {path}"
+
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+    except yaml.YAMLError as exc:
+        return False, f"Error de YAML: {exc}"
+    except OSError as exc:
+        return False, f"No se puede leer el fichero: {exc}"
+
+    if raw is None:
+        raw = {}
+    elif not isinstance(raw, dict):
+        return False, "El fichero no es un mapping YAML válido"
+
+    # Count phrases (same validation logic as load_tongo_config)
+    raw_phrases = raw.get("phrases")
+    if isinstance(raw_phrases, list) and all(isinstance(p, str) for p in raw_phrases):
+        n_phrases = len(raw_phrases)
+    else:
+        n_phrases = 0
+
+    # Count users (same validation logic as load_tongo_config)
+    raw_users = raw.get("users")
+    if isinstance(raw_users, dict):
+        usernames = sorted(str(k) for k in raw_users.keys())
+        n_users = len(usernames)
+    else:
+        usernames = []
+        n_users = 0
+
+    if n_users > 0:
+        summary = (
+            f"{n_phrases} frases globales, {n_users} usuarios configurados: "
+            f"{', '.join(usernames)}"
+        )
+    else:
+        summary = f"{n_phrases} frases globales, sin overrides por persona"
+
+    return True, summary
+
+
 # ── pure selection function ───────────────────────────────────────────────────
 
 def choose_tongo_response(

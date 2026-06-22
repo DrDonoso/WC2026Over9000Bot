@@ -660,3 +660,140 @@ class TestCmdTongoUsersIntegration:
             await cmd_tongo(update, context)
 
         update.message.reply_text.assert_called_once_with("Trampa de Bob!")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# check_tongo_config — YAML validator (no cache side-effects)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+from worldcup_bot.data.tongo import check_tongo_config
+
+
+class TestCheckTongoConfig:
+    def test_valid_file_returns_ok_with_phrase_and_user_counts(self, tmp_path):
+        path = _write_yaml(tmp_path, {
+            "phrases": ["Frase uno.", "Frase dos.", "Frase tres."],
+            "users": {
+                "alice": {"sanchez_ratio": 0.5},
+                "bob": {},
+            },
+        })
+        ok, detail = check_tongo_config(path)
+        assert ok is True
+        assert "3 frases globales" in detail
+        assert "2 usuarios configurados" in detail
+        assert "alice" in detail
+        assert "bob" in detail
+
+    def test_valid_file_no_users_says_sin_overrides(self, tmp_path):
+        path = _write_yaml(tmp_path, {"phrases": ["Una frase."], "users": {}})
+        ok, detail = check_tongo_config(path)
+        assert ok is True
+        assert "1 frases globales" in detail
+        assert "sin overrides por persona" in detail
+
+    def test_yaml_syntax_error_returns_false_with_error_string(self, tmp_path):
+        f = tmp_path / "TongoUsers.yml"
+        f.write_text("phrases:\n  - foo\nbad: yaml: [\n", encoding="utf-8")
+        ok, detail = check_tongo_config(str(f))
+        assert ok is False
+        assert "Error de YAML" in detail
+
+    def test_missing_file_returns_false_no_encontrado(self, tmp_path):
+        ok, detail = check_tongo_config(str(tmp_path / "nonexistent.yml"))
+        assert ok is False
+        assert "no encontrado" in detail
+
+    def test_empty_comment_only_file_returns_ok_zero_phrases(self, tmp_path):
+        f = tmp_path / "TongoUsers.yml"
+        f.write_text("# solo un comentario\n", encoding="utf-8")
+        ok, detail = check_tongo_config(str(f))
+        assert ok is True
+        assert "0 frases" in detail
+        assert "sin overrides" in detail
+
+    def test_does_not_modify_hot_reload_cache(self, tmp_path):
+        """check_tongo_config must NOT update the module-level hot-reload cache."""
+        path = _write_yaml(tmp_path, {"phrases": ["Frase."], "users": {}})
+        check_tongo_config(path)
+        assert _tongo_mod._cached_config_path is None
+        assert _tongo_mod._cached_config_data is None
+
+    def test_never_raises_on_unexpected_structure(self, tmp_path):
+        f = tmp_path / "TongoUsers.yml"
+        f.write_text("- lista\n- invalida\n", encoding="utf-8")
+        # Must not raise
+        ok, detail = check_tongo_config(str(f))
+        assert ok is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_tongocheck handler
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+from worldcup_bot.bot.handlers import cmd_tongocheck
+
+
+class TestCmdTongocheck:
+    async def test_valid_yaml_replies_ok_prefix(self, tmp_path):
+        """✅ reply on a valid config."""
+        _write_yaml(tmp_path, {"phrases": ["Frase."], "users": {}})
+        update = _make_update_mock()
+        ctx = _make_context(tmp_path, config_file=tmp_path / "TongoUsers.yml")
+        await cmd_tongocheck(update, ctx)
+        text = update.message.reply_text.call_args[0][0]
+        assert text.startswith("✅ TongoUsers.yml OK")
+
+    async def test_valid_yaml_reply_contains_summary(self, tmp_path):
+        """OK reply includes the phrase+user counts summary."""
+        _write_yaml(tmp_path, {
+            "phrases": ["Frase uno.", "Frase dos."],
+            "users": {"alice": {}},
+        })
+        update = _make_update_mock()
+        ctx = _make_context(tmp_path, config_file=tmp_path / "TongoUsers.yml")
+        await cmd_tongocheck(update, ctx)
+        text = update.message.reply_text.call_args[0][0]
+        assert "2 frases globales" in text
+        assert "alice" in text
+
+    async def test_yaml_error_replies_error_prefix(self, tmp_path):
+        """❌ reply when YAML is broken."""
+        f = tmp_path / "TongoUsers.yml"
+        f.write_text("bad: yaml: [\n", encoding="utf-8")
+        update = _make_update_mock()
+        ctx = _make_context(tmp_path, config_file=f)
+        await cmd_tongocheck(update, ctx)
+        text = update.message.reply_text.call_args[0][0]
+        assert text.startswith("❌ TongoUsers.yml:")
+
+    async def test_missing_file_replies_error_prefix(self, tmp_path):
+        """❌ reply when file doesn't exist."""
+        update = _make_update_mock()
+        ctx = _make_context(tmp_path, config_file=tmp_path / "TongoUsers.yml")
+        # Don't create the file
+        await cmd_tongocheck(update, ctx)
+        text = update.message.reply_text.call_args[0][0]
+        assert text.startswith("❌ TongoUsers.yml:")
+        assert "no encontrado" in text
+
+    async def test_resolves_path_from_predictions_parent_when_no_tongo_path(self, tmp_path):
+        """When tongo_users_path is empty, uses predictions_path parent / TongoUsers.yml."""
+        (tmp_path / "TongoUsers.yml").write_text(
+            "phrases:\n  - Frase.\nusers:\n", encoding="utf-8"
+        )
+        settings = Settings(
+            telegram_bot_token="fake",
+            football_data_api_key="fake",
+            predictions_path=str(tmp_path / "predictions.yml"),
+            tongo_users_path="",  # empty → derive from predictions parent
+        )
+        update = _make_update_mock()
+        ctx = MagicMock()
+        ctx.bot_data = {"settings": settings}
+        await cmd_tongocheck(update, ctx)
+        text = update.message.reply_text.call_args[0][0]
+        assert text.startswith("✅ TongoUsers.yml OK")
+

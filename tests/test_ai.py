@@ -1156,3 +1156,148 @@ class TestSystemPromptContract:
             or "nunca solo" in _SYSTEM.lower()
         )
 
+    def test_system_prompt_does_not_have_tve_rule(self):
+        """TVE is now shown deterministically in render_message — AI must not mention it."""
+        assert "emite en TVE" not in _SYSTEM
+        assert "lleva el emoji 📺" not in _SYSTEM
+
+
+# ── render_message: TVE label ─────────────────────────────────────────────────
+
+
+class TestRenderMessageTVE:
+    def test_tve_label_appended_when_in_tve_by_key(self):
+        """A match in tve_by_key gets ' 📺 {label}' appended after the kickoff."""
+        m = _make_match(
+            "England", "Ghana",
+            status="SCHEDULED", utc_date="2026-06-15T20:00:00Z",
+            home_tla="ENG", away_tla="GHA",
+        )
+        result = render_message([], [m], "Europe/Madrid", {}, "", tve_by_key={"ENG-GHA": "La 1"})
+        assert "📺 La 1" in result
+        # Exact suffix: kickoff (UTC+2 = 22:00) then space + emoji + space + label
+        assert "22:00 📺 La 1" in result
+
+    def test_tve_label_absent_when_key_not_in_tve_by_key(self):
+        """A match NOT in tve_by_key must NOT show the 📺 marker."""
+        m = _make_match(
+            "Germany", "Brazil",
+            status="SCHEDULED", utc_date="2026-06-15T18:00:00Z",
+            home_tla="GER", away_tla="BRA",
+        )
+        result = render_message([], [m], "Europe/Madrid", {}, "", tve_by_key={"ESP-FRA": "La 1"})
+        assert "📺" not in result
+
+    def test_tve_label_absent_when_tve_by_key_is_none(self):
+        """Default (tve_by_key=None) must not show 📺."""
+        m = _make_match(
+            "Germany", "Brazil",
+            status="SCHEDULED", utc_date="2026-06-15T18:00:00Z",
+            home_tla="GER", away_tla="BRA",
+        )
+        result = render_message([], [m], "Europe/Madrid", {}, "")
+        assert "📺" not in result
+
+    def test_tve_label_not_bold(self):
+        """The 📺 suffix must NOT be wrapped in <b>."""
+        m = _make_match(
+            "England", "Ghana",
+            status="SCHEDULED", utc_date="2026-06-15T20:00:00Z",
+            home_tla="ENG", away_tla="GHA",
+        )
+        result = render_message([], [m], "Europe/Madrid", {}, "", tve_by_key={"ENG-GHA": "Teledeporte"})
+        assert "<b>Teledeporte</b>" not in result
+        assert "📺 Teledeporte" in result
+
+    def test_tve_label_on_one_match_not_another(self):
+        """Only the marked match gets 📺; the other does not."""
+        m1 = _make_match(
+            "England", "Ghana",
+            status="SCHEDULED", utc_date="2026-06-15T18:00:00Z",
+            home_tla="ENG", away_tla="GHA",
+        )
+        m2 = _make_match(
+            "Germany", "Brazil",
+            status="SCHEDULED", utc_date="2026-06-15T20:00:00Z",
+            home_tla="GER", away_tla="BRA",
+        )
+        result = render_message([], [m1, m2], "Europe/Madrid", {}, "", tve_by_key={"ENG-GHA": "La 1"})
+        lines = result.splitlines()
+        eng_line = next(ln for ln in lines if "England" in ln)
+        ger_line = next(ln for ln in lines if "Germany" in ln)
+        assert "📺 La 1" in eng_line
+        assert "📺" not in ger_line
+
+
+# ── build_ai_user_message: no TVE annotation ─────────────────────────────────
+
+
+class TestBuildAiUserMessageNoTVE:
+    def test_today_block_never_contains_tve_emoji(self):
+        """build_ai_user_message must NOT annotate today fixtures with 📺 (AI gets no TVE info)."""
+        today = [_make_match(
+            "England", "Ghana",
+            status="SCHEDULED", utc_date="2026-06-15T20:00:00Z",
+            home_tla="ENG", away_tla="GHA",
+        )]
+        msg = build_ai_user_message([], today, [], [], "Europe/Madrid")
+        assert "📺" not in msg
+
+
+# ── generate_daily_update: TVE passed to render_message ──────────────────────
+
+
+class TestGenerateDailyUpdateTVE:
+    async def test_tve_label_in_output_when_tve_channel_for_returns_label(self):
+        """generate_daily_update passes tve_by_key to render_message, so output shows 📺."""
+        today_m = _make_match(
+            "England", "Ghana",
+            status="SCHEDULED", utc_date="2026-06-15T20:00:00Z",
+            home_tla="ENG", away_tla="GHA",
+        )
+        mock_client = MagicMock()
+        mock_client.get_football_day_matches.side_effect = [[], [today_m]]
+
+        mock_ai = MagicMock()
+        mock_ai.complete = AsyncMock(return_value='{"today_notes": {}, "standings_comment": ""}')
+
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            timezone="Europe/Madrid",
+            football_day_start_hour=9,
+        )
+        with _make_generate_patches():
+            with patch("worldcup_bot.tve.load_tve_broadcasts", return_value=[]):
+                with patch("worldcup_bot.tve.tve_channel_for", return_value="La 1"):
+                    result = await generate_daily_update(mock_client, mock_ai, settings)
+
+        assert result is not None
+        assert "📺 La 1" in result
+
+    async def test_no_tve_label_when_tve_channel_for_returns_none(self):
+        """When tve_channel_for returns None, no 📺 in output."""
+        today_m = _make_match(
+            "Germany", "Brazil",
+            status="SCHEDULED", utc_date="2026-06-15T18:00:00Z",
+            home_tla="GER", away_tla="BRA",
+        )
+        mock_client = MagicMock()
+        mock_client.get_football_day_matches.side_effect = [[], [today_m]]
+
+        mock_ai = MagicMock()
+        mock_ai.complete = AsyncMock(return_value='{"today_notes": {}, "standings_comment": ""}')
+
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            timezone="Europe/Madrid",
+            football_day_start_hour=9,
+        )
+        with _make_generate_patches():
+            with patch("worldcup_bot.tve.load_tve_broadcasts", return_value=[]):
+                with patch("worldcup_bot.tve.tve_channel_for", return_value=None):
+                    result = await generate_daily_update(mock_client, mock_ai, settings)
+
+        assert result is not None
+        assert "📺" not in result

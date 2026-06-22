@@ -40,6 +40,7 @@ from worldcup_bot.data.stages import GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
 from worldcup_bot.data.tongo import (
     FRASES,
     build_tongo_context,
+    check_tongo_config,
     choose_tongo_response,
     load_tongo_config,
     phrase_uses_reply,
@@ -1091,6 +1092,30 @@ async def cmd_update_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
 
 
+
+# ── /tongocheck — hidden admin: validate TongoUsers.yml from Telegram ────────
+
+
+async def cmd_tongocheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hidden admin: validate TongoUsers.yml and report result in Telegram. /tongocheck
+
+    Not listed in /start help.  Useful to diagnose YAML typos that would otherwise
+    silently fall back to built-in FRASES without any visible error.
+    """
+    settings: Settings = context.bot_data["settings"]
+    predictions_parent = Path(settings.predictions_path).parent
+
+    if settings.tongo_users_path:
+        path = str(Path(settings.tongo_users_path))
+    else:
+        path = str(predictions_parent / "TongoUsers.yml")
+
+    ok, detail = check_tongo_config(path)
+    if ok:
+        await update.message.reply_text(f"✅ TongoUsers.yml OK — {detail}")
+    else:
+        await update.message.reply_text(f"❌ TongoUsers.yml: {detail}")
+
 
 # ── /recalcular — hidden admin: rebuild history with current scoring ──────────
 

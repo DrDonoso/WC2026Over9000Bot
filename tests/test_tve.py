@@ -469,15 +469,21 @@ class TestFormatMatchTveLabel:
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-class TestBuildAiUserMessageTve:
-    """build_ai_user_message annotates today fixtures with 📺 when tve_by_key is set."""
+# ══════════════════════════════════════════════════════════════════════════════
+# build_ai_user_message TVE integration — TVE is now deterministic in render_message
+# ══════════════════════════════════════════════════════════════════════════════
 
-    def test_today_fixture_on_tve_carries_emoji(self):
+
+class TestBuildAiUserMessageTve:
+    """build_ai_user_message must NOT annotate fixtures with 📺.
+    TVE markers moved to render_message (deterministic); the AI never sees them.
+    """
+
+    def test_today_fixture_never_carries_tve_emoji(self):
         from worldcup_bot.ai.daily_update import build_ai_user_message
         today = [_make_match("ARG", "AUT", "2026-06-22T17:00:00Z", "SCHEDULED")]
-        tve_by_key = {"ARG-AUT": "La 1"}
-        msg = build_ai_user_message([], today, [], [], "Europe/Madrid", tve_by_key=tve_by_key)
-        assert "📺 La 1" in msg
+        msg = build_ai_user_message([], today, [], [], "Europe/Madrid")
+        assert "📺" not in msg
 
     def test_today_fixture_not_on_tve_no_emoji(self):
         from worldcup_bot.ai.daily_update import build_ai_user_message
@@ -485,22 +491,13 @@ class TestBuildAiUserMessageTve:
         msg = build_ai_user_message([], today, [], [], "Europe/Madrid")
         assert "📺" not in msg
 
-    def test_tve_by_key_none_no_emoji(self):
-        from worldcup_bot.ai.daily_update import build_ai_user_message
-        today = [_make_match("ARG", "AUT", "2026-06-22T17:00:00Z", "SCHEDULED")]
-        msg = build_ai_user_message([], today, [], [], "Europe/Madrid", tve_by_key=None)
-        assert "📺" not in msg
-
-    def test_only_matching_fixture_gets_emoji(self):
-        """Only the fixture in tve_by_key is annotated; others are untouched."""
+    def test_multiple_fixtures_none_carry_tve_emoji(self):
+        """No fixture in build_ai_user_message output ever gets 📺."""
         from worldcup_bot.ai.daily_update import build_ai_user_message
         today = [
             _make_match("ARG", "AUT", "2026-06-22T17:00:00Z"),
             _make_match("ESP", "KSA", "2026-06-22T20:00:00Z"),
         ]
-        tve_by_key = {"ESP-KSA": "La 1"}
-        msg = build_ai_user_message([], today, [], [], "Europe/Madrid", tve_by_key=tve_by_key)
-        lines = msg.splitlines()
-        tve_lines = [l for l in lines if "📺" in l]
-        assert len(tve_lines) == 1
-        assert "ESP-KSA" in tve_lines[0]
+        msg = build_ai_user_message([], today, [], [], "Europe/Madrid")
+        assert "📺" not in msg
+
