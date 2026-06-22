@@ -195,20 +195,19 @@ def compute_ranking_at_jornada(
     return engine.compute_general_ranking_from(predictions, actual_standings, actual_winners)
 
 
-def ensure_history(client, predictions: dict, settings, path: str) -> dict:
+def ensure_history(client, predictions: dict, settings, path: str, force: bool = False) -> dict:
     """Build/update ranking history for every jornada (football-day window).
 
-    - Loads existing history from path.
-    - Calls get_all_matches() ONCE; derives jornadas from football_day_of.
-    - Past jornadas not already stored → ranking via reconstruct_group_standings.
-    - LATEST jornada always (re)computed using the exact live ranking
-      (engine.compute_general_ranking, official=False) so the newest data
-      point matches /actual exactly, with no approximation.
+    - When force=False (default): loads existing history; past jornadas already
+      cached are skipped.  Latest jornada is always refreshed with the live ranking.
+    - When force=True: ignores the existing file and recomputes EVERY jornada from
+      scratch (past via reconstruct_group_standings, latest via the live ranking).
+      Use this after a scoring-rule fix to correct stale cached points.
     - Saves and returns the updated history dict.
     """
     from worldcup_bot.porra import engine  # avoid top-level circular import
 
-    history = load_history(path)
+    history = {} if force else load_history(path)
 
     try:
         matches = client.get_all_matches()
@@ -224,7 +223,7 @@ def ensure_history(client, predictions: dict, settings, path: str) -> dict:
     latest = jornadas[-1]
 
     for jornada in jornadas:
-        if jornada in history and jornada != latest:
+        if not force and jornada in history and jornada != latest:
             continue
         try:
             if jornada == latest:

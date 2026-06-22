@@ -1060,6 +1060,43 @@ async def cmd_update_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "❌ Error al generar el resumen. Revisa los logs."
         )
 
+
+
+# ── /recalcular — hidden admin: rebuild history with current scoring ──────────
+
+
+async def cmd_recalcular(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hidden admin trigger: recomputes ALL jornadas from scratch. /recalcular
+
+    Useful after a scoring-rule fix to correct stale cached points so
+    /evolucion reflects the corrected history.  Not listed in /start help.
+    """
+    settings: Settings = context.bot_data["settings"]
+    predictions = pred_loader.load(settings.predictions_path)
+
+    if not predictions.get("participants"):
+        await update.message.reply_text(_msg_no_predictions(settings.predictions_path))
+        return
+
+    client = make_client(settings)
+    history_path = f"{settings.state_dir}/porra_history.json"
+
+    await update.message.reply_text("⏳ Recalculando histórico desde cero…")
+
+    try:
+        history = await asyncio.to_thread(
+            ensure_history, client, predictions, settings, history_path, True
+        )
+    except Exception:
+        log.exception("cmd_recalcular: error rebuilding history")
+        await update.message.reply_text("❌ Error al recalcular el histórico. Revisa los logs.")
+        return
+
+    n = len(history)
+    await update.message.reply_text(
+        f"✅ Histórico recalculado: {n} jornadas. /evolucion ya refleja la nueva puntuación."
+    )
+
 
 # ── /evolucion — ranking evolution chart ─────────────────────────────────────
 

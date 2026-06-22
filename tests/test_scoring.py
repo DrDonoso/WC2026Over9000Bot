@@ -55,16 +55,16 @@ class TestScoreGroupsExact:
 class TestScoreGroupsOffByOne:
     def test_upward_shift(self):
         # GER pred=1, actual=2; ESP pred=2, actual=1; BRA pred=3, actual=3
+        # Corrected rule: both GER and ESP are in the top-2 zone → each earns 1.0
         user = {"A": ["GER", "ESP", "BRA"]}
         actual = {"GROUP_A": ["ESP", "GER", "BRA", "USA"]}
         pts, detail = score_groups(user, actual)
-        # GER: actual=2 <=3 → clasifica +0.5; ESP: actual=1 <=3 → clasifica +0.5; BRA: exact +1.0
-        assert pts == 2.0
+        assert pts == 3.0
         notes = [d["note"] for d in detail]
-        assert notes == ["clasifica", "clasifica", "exacto"]
+        assert notes == ["exacto", "exacto", "exacto"]
 
     def test_downward_shift(self):
-        # GER exact, BRA pred=2 actual=3 (clasifica), ESP pred=3 actual=2 (clasifica)
+        # GER exact (pred=1/actual=1), BRA pred=2/actual=3 (boundary), ESP pred=3/actual=2 (boundary)
         user = {"A": ["GER", "BRA", "ESP"]}
         actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
         pts, detail = score_groups(user, actual)
@@ -77,12 +77,14 @@ class TestScoreGroupsOffByOne:
     def test_qualified_wrong_position_value_is_0_5(self):
         assert GROUP_SCORING["qualified_wrong_position"] == 0.5
 
-    def test_qualified_wrong_position_points_in_detail(self):
+    def test_top2_swap_earns_full_point_not_half(self):
+        # GER pred=1, actual=2 — both in top-2 zone → 1.0 (not 0.5 under the old rule)
         user = {"A": ["GER", "ESP", "BRA"]}
         actual = {"GROUP_A": ["ESP", "GER", "BRA", "USA"]}
         _, detail = score_groups(user, actual)
         ger = next(d for d in detail if d["team"] == "GER")
-        assert ger["points"] == 0.5
+        assert ger["points"] == 1.0
+        assert ger["note"] == "exacto"
 
 
 class TestScoreGroupsFallo:
@@ -202,15 +204,15 @@ class TestScoreGroupsMultipleGroups:
     def test_two_groups_independent_scoring(self):
         user = {
             "A": ["GER", "ESP", "BRA"],  # all exact → +3.0
-            "B": ["ARG", "FRA", "ENG"],  # ARG↔FRA swapped → clasifica,clasifica; ENG exact
+            "B": ["ARG", "FRA", "ENG"],  # ARG↔FRA swapped (both top-2) → exacto,exacto; ENG exact
         }
         actual = {
             "GROUP_A": ["GER", "ESP", "BRA", "USA"],
             "GROUP_B": ["FRA", "ARG", "ENG", "MEX"],
         }
         pts, detail = score_groups(user, actual)
-        # A: 1+1+1 = 3; B: ARG pred=1/actual=2 (+0.5) + FRA pred=2/actual=1 (+0.5) + ENG exact (+1.0)
-        assert pts == 5.0
+        # A: 1+1+1 = 3; B: ARG pred=1/actual=2 (+1.0) + FRA pred=2/actual=1 (+1.0) + ENG exact (+1.0)
+        assert pts == 6.0
 
     def test_detail_has_group_key(self):
         user = {"A": ["GER", "ESP", "BRA"], "B": ["FRA", "ARG", "ENG"]}
@@ -268,12 +270,13 @@ class TestScoreGroupsQualifiesWrongPosition:
         assert ger["note"] == "clasifica"
 
     def test_predicted_1st_actual_2nd(self):
+        # pred=1, actual=2 — BOTH in the direct top-2 qualifying zone → 1.0 (corrected rule)
         user = {"A": ["GER", "ESP", "BRA"]}
         actual = {"GROUP_A": ["ESP", "GER", "BRA", "USA"]}
         _, detail = score_groups(user, actual)
         ger = next(d for d in detail if d["team"] == "GER")
-        assert ger["points"] == 0.5
-        assert ger["note"] == "clasifica"
+        assert ger["points"] == 1.0
+        assert ger["note"] == "exacto"
 
     def test_predicted_1st_actual_4th(self):
         user = {"A": ["GER", "ESP", "BRA"]}
@@ -517,3 +520,130 @@ class TestScoreKnockoutAllStagesIntegration:
         stages_in_detail = {d["stage"] for d in detail}
         assert stages_in_detail == {"FINAL"}
         assert pts == 5.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# score_groups — corrected rule truth table (2026-06-22)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestScoreGroupsTruthTable:
+    """Full truth table for the corrected group-scoring rule.
+
+    pred_pos→actual_pos → expected points:
+      1→1:1.0  1→2:1.0  1→3:0.5  1→4+:0
+      2→1:1.0  2→2:1.0  2→3:0.5  2→4+:0
+      3→1:0.5  3→2:0.5  3→3:1.0  3→4+:0
+    """
+
+    def _pts(self, pred_pos: int, actual_pos: int) -> tuple[float, str]:
+        """Score a single team at pred_pos against actual_pos."""
+        teams = ["GER", "ESP", "BRA", "ITA"]
+        user = {"A": teams[:3]}  # 3 predictions
+        # build standings with desired team at actual_pos
+        ordered = ["POR", "NED", "MEX", "POL"]
+        ordered[actual_pos - 1] = teams[pred_pos - 1]
+        actual = {"GROUP_A": ordered}
+        _, detail = score_groups(user, actual)
+        team = teams[pred_pos - 1]
+        entry = next(d for d in detail if d["team"] == team)
+        return entry["points"], entry["note"]
+
+    # pred=1
+    def test_1_to_1(self):
+        assert self._pts(1, 1) == (1.0, "exacto")
+
+    def test_1_to_2(self):
+        assert self._pts(1, 2) == (1.0, "exacto")
+
+    def test_1_to_3(self):
+        assert self._pts(1, 3) == (0.5, "clasifica")
+
+    def test_1_to_4(self):
+        assert self._pts(1, 4) == (0.0, "fallo")
+
+    # pred=2
+    def test_2_to_1(self):
+        assert self._pts(2, 1) == (1.0, "exacto")
+
+    def test_2_to_2(self):
+        assert self._pts(2, 2) == (1.0, "exacto")
+
+    def test_2_to_3(self):
+        assert self._pts(2, 3) == (0.5, "clasifica")
+
+    def test_2_to_4(self):
+        assert self._pts(2, 4) == (0.0, "fallo")
+
+    # pred=3
+    def test_3_to_1(self):
+        assert self._pts(3, 1) == (0.5, "clasifica")
+
+    def test_3_to_2(self):
+        assert self._pts(3, 2) == (0.5, "clasifica")
+
+    def test_3_to_3(self):
+        assert self._pts(3, 3) == (1.0, "exacto")
+
+    def test_3_to_4(self):
+        assert self._pts(3, 4) == (0.0, "fallo")
+
+
+class TestScoreGroupsRegressionDrDonoso:
+    """Regression test based on DrDonoso's real data.
+
+    Five teams were predicted as 1st or 2nd and finished in the top-2 (swapped
+    order).  Each must score 1.0 (not 0.5 under the old rule).
+    Prediction: MEX1/CZE2/KOR3, etc.
+    Swap teams: SUI(pred1,real2), EGY(pred2,real1), FRA(pred1,real2),
+                COL(pred2,real1), ENG(pred2,real1).
+    """
+
+    def _swap_group(self, pred_first: str, pred_second: str) -> tuple[float, str, str]:
+        """pred_first finishes 2nd, pred_second finishes 1st."""
+        user = {"X": [pred_first, pred_second, "PAD"]}
+        actual = {"GROUP_X": [pred_second, pred_first, "PAD", "OTH"]}
+        _, detail = score_groups(user, actual)
+        e1 = next(d for d in detail if d["team"] == pred_first)
+        e2 = next(d for d in detail if d["team"] == pred_second)
+        return e1["points"], e1["note"], e2["note"]
+
+    def test_sui_pred1_real2_earns_full(self):
+        pts, note, _ = self._swap_group("SUI", "MEX")
+        assert pts == 1.0
+        assert note == "exacto"
+
+    def test_egy_pred2_real1_earns_full(self):
+        _, _, note = self._swap_group("GRP", "EGY")
+        assert note == "exacto"
+
+    def test_fra_pred1_real2_earns_full(self):
+        pts, note, _ = self._swap_group("FRA", "GER")
+        assert pts == 1.0
+        assert note == "exacto"
+
+    def test_col_pred2_real1_earns_full(self):
+        _, _, note = self._swap_group("ARG", "COL")
+        assert note == "exacto"
+
+    def test_eng_pred2_real1_earns_full(self):
+        _, _, note = self._swap_group("URY", "ENG")
+        assert note == "exacto"
+
+    def test_five_swapped_pairs_yield_10_not_5(self):
+        """Five top-2 swaps should produce 10 pts total (5×1.0 each pair), not 5×0.5 each."""
+        swaps = [
+            ("SUI", "MEX"),
+            ("EGY", "ALG"),
+            ("FRA", "GER"),
+            ("COL", "ARG"),
+            ("ENG", "URY"),
+        ]
+        total = 0.0
+        for pred1, pred2 in swaps:
+            user = {"X": [pred1, pred2, "**"]}  # wildcard 3rd slot → 0
+            actual = {"GROUP_X": [pred2, pred1, "OTHER", "OTH2"]}
+            pts, _ = score_groups(user, actual)
+            # pred1 earns 1.0, pred2 earns 1.0, "**" wildcard → 0
+            total += pts
+        assert total == 10.0

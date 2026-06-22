@@ -1,6 +1,11 @@
 """Pure scoring functions — zero I/O.
 
-score_groups: group standings scoring (exact position +1.0, qualifies in wrong position +0.5).
+score_groups: group standings scoring.
+  Corrected rule (2026-06-22):
+  - pred ∈ {1,2} AND actual ∈ {1,2} → 1.0  (both in the direct-qualifying top-2; order irrelevant)
+  - pred == actual == 3               → 1.0  (exact 3rd)
+  - one in top-2, other is 3rd        → 0.5  (boundary near-miss)
+  - otherwise                         → 0.0
 score_knockout: knockout stage scoring (correct qualifier → +stage_points).
 score_user_groups_detail: same as score_groups but returns per-team breakdown.
 """
@@ -8,6 +13,10 @@ score_user_groups_detail: same as score_groups but returns per-team breakdown.
 from __future__ import annotations
 
 from worldcup_bot.data.stages import GROUP_SCORING, KNOCKOUT_STAGES, QUALIFY_PER_GROUP, STAGE_YAML_KEYS
+
+# The top-2 finishers are direct qualifiers; swapping within this zone still earns full points.
+# QUALIFY_PER_GROUP (=3) means "3 picks per group" and is left unchanged.
+DIRECT_QUALIFY = 2
 
 # ── type aliases ──────────────────────────────────────────────────────────────
 
@@ -77,10 +86,16 @@ def score_groups(
                 )
                 continue
 
-            if actual_pos == pred_pos:
+            if pred_pos <= DIRECT_QUALIFY and actual_pos <= DIRECT_QUALIFY:
+                # Both in the direct-qualifying zone (positions 1–2); order irrelevant.
+                pts = GROUP_SCORING["exact_position"]
+                note = "exacto"
+            elif pred_pos == actual_pos:
+                # Exact match at position 3 (the only remaining exact-match case).
                 pts = GROUP_SCORING["exact_position"]
                 note = "exacto"
             elif actual_pos <= QUALIFY_PER_GROUP:
+                # Boundary near-miss: one side is top-2, the other is 3rd.
                 pts = GROUP_SCORING["qualified_wrong_position"]
                 note = "clasifica"
             else:

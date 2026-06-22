@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from worldcup_bot.bot.handlers import cmd_evolucion, cmd_start
+from worldcup_bot.bot.handlers import cmd_evolucion, cmd_recalcular, cmd_start
 from worldcup_bot.config import Settings
 
 
@@ -197,3 +197,103 @@ class TestCmdEvolucionRegistered:
         src = inspect.getsource(main_mod.build_app)
         assert "evolucion" in src
         assert "cmd_evolucion" in src
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_recalcular — hidden admin history rebuild
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCmdRecalcular:
+    async def test_calls_ensure_history_with_force_true(self, fake_settings, tmp_path):
+        """cmd_recalcular must call ensure_history with force=True."""
+        fake_settings = fake_settings  # already uses tmp_path state_dir
+
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        ensure_calls: list = []
+
+        def fake_ensure(client, predictions, settings, path, force=False):
+            ensure_calls.append(force)
+            return {"2026-06-13": {}, "2026-06-14": {}}
+
+        with patch("worldcup_bot.bot.handlers.pred_loader.load", return_value=_FAKE_PREDICTIONS):
+            with patch("worldcup_bot.bot.handlers.make_client"):
+                with patch("worldcup_bot.bot.handlers.ensure_history", side_effect=fake_ensure):
+                    await cmd_recalcular(update, context)
+
+        assert len(ensure_calls) == 1
+        assert ensure_calls[0] is True
+
+    async def test_replies_with_jornada_count(self, fake_settings):
+        """cmd_recalcular replies with the number of recomputed jornadas."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        history = {
+            "2026-06-13": {"alice": {"pos": 1, "pts": 3.0}},
+            "2026-06-14": {"alice": {"pos": 1, "pts": 5.0}},
+            "2026-06-15": {"alice": {"pos": 1, "pts": 7.0}},
+        }
+
+        with patch("worldcup_bot.bot.handlers.pred_loader.load", return_value=_FAKE_PREDICTIONS):
+            with patch("worldcup_bot.bot.handlers.make_client"):
+                with patch("worldcup_bot.bot.handlers.ensure_history", return_value=history):
+                    await cmd_recalcular(update, context)
+
+        # First reply is the "working" message, second is the success message
+        calls = update.message.reply_text.call_args_list
+        assert len(calls) >= 2
+        success_text = calls[-1][0][0]
+        assert "3" in success_text
+        assert "✅" in success_text
+        assert "evolucion" in success_text.lower() or "evolución" in success_text.lower()
+
+    async def test_no_predictions_replies_error(self, fake_settings):
+        """No predictions → replies with informative message, does not call ensure_history."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.pred_loader.load", return_value={}):
+            with patch("worldcup_bot.bot.handlers.ensure_history") as mock_ensure:
+                await cmd_recalcular(update, context)
+
+        mock_ensure.assert_not_called()
+        update.message.reply_text.assert_called_once()
+
+    async def test_ensure_history_exception_replies_gracefully(self, fake_settings):
+        """If ensure_history raises, cmd_recalcular replies with a Spanish error."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.pred_loader.load", return_value=_FAKE_PREDICTIONS):
+            with patch("worldcup_bot.bot.handlers.make_client"):
+                with patch(
+                    "worldcup_bot.bot.handlers.ensure_history",
+                    side_effect=RuntimeError("boom"),
+                ):
+                    await cmd_recalcular(update, context)
+
+        calls = update.message.reply_text.call_args_list
+        error_text = calls[-1][0][0]
+        assert "❌" in error_text
+
+    async def test_recalcular_not_in_start_help(self, fake_settings):
+        """/recalcular must NOT appear in the public /start help text."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        await cmd_start(update, context)
+        text = update.message.reply_text.call_args[0][0]
+        assert "recalcular" not in text
+
+
+class TestCmdRecalcularRegistered:
+    def test_recalcular_handler_in_build_app(self, fake_settings):
+        """Verify CommandHandler('recalcular', cmd_recalcular) is in __main__.build_app."""
+        import worldcup_bot.__main__ as main_mod
+        import inspect
+        src = inspect.getsource(main_mod.build_app)
+        assert "recalcular" in src
+        assert "cmd_recalcular" in src
+

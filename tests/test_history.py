@@ -680,3 +680,139 @@ class TestEnsureHistoryLatestUsesLiveRanking:
         assert result["2026-06-13"]["alice"]["pts"] == 1.0
         # 06-14 is latest → live ranking used
         assert result["2026-06-14"]["alice"]["pts"] == 3.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ensure_history — force=True recomputes all jornadas from scratch
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestEnsureHistoryForce:
+    """ensure_history(force=True) discards the cache and recomputes every jornada."""
+
+    def _make_client(self, matches: list) -> MagicMock:
+        client = MagicMock()
+        client.get_all_matches.return_value = matches
+        return client
+
+    def test_force_true_ignores_cached_past_jornadas(self, tmp_path):
+        """With force=True, stale cached points for past jornadas are overwritten."""
+        path = str(tmp_path / "h.json")
+        settings = _fake_settings()
+
+        # Pre-fill with stale data (old incorrect points)
+        stale = {
+            "2026-06-13": {"alice": {"pos": 1, "pts": 2.0, "name": "Alice"}},
+        }
+        save_history(path, stale)
+
+        # Two matches: 06-13 (past), 06-14 (latest)
+        matches = [
+            _make_match("2026-06-13T18:00:00Z", "FINISHED"),
+            _make_match("2026-06-14T18:00:00Z", "FINISHED"),
+        ]
+        client = self._make_client(matches)
+        reconstruct_calls: list[str] = []
+
+        def fake_reconstruct(preds, mlist, jornada, tz, ah):
+            reconstruct_calls.append(jornada)
+            return [_make_ranking_entry("alice", "Alice", 9.0)]
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("worldcup_bot.porra.history.compute_ranking_at_jornada", fake_reconstruct)
+            mp.setattr(
+                "worldcup_bot.porra.engine.compute_general_ranking",
+                lambda preds, cli, official=False: [_make_ranking_entry("alice", "Alice", 10.0)],
+            )
+            result = ensure_history(client, {"participants": {}}, settings, path, force=True)
+
+        # Past jornada must have been recomputed (stale 2.0 replaced with 9.0)
+        assert "2026-06-13" in reconstruct_calls
+        assert result["2026-06-13"]["alice"]["pts"] == 9.0
+        # Latest uses live ranking
+        assert result["2026-06-14"]["alice"]["pts"] == 10.0
+
+    def test_force_false_preserves_cached_past_jornadas(self, tmp_path):
+        """With force=False (default), cached past jornadas are NOT recomputed."""
+        path = str(tmp_path / "h.json")
+        settings = _fake_settings()
+
+        stale = {
+            "2026-06-13": {"alice": {"pos": 1, "pts": 2.0, "name": "Alice"}},
+        }
+        save_history(path, stale)
+
+        matches = [
+            _make_match("2026-06-13T18:00:00Z", "FINISHED"),
+            _make_match("2026-06-14T18:00:00Z", "FINISHED"),
+        ]
+        client = self._make_client(matches)
+        reconstruct_calls: list[str] = []
+
+        def fake_reconstruct(preds, mlist, jornada, tz, ah):
+            reconstruct_calls.append(jornada)
+            return [_make_ranking_entry("alice", "Alice", 99.0)]
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("worldcup_bot.porra.history.compute_ranking_at_jornada", fake_reconstruct)
+            mp.setattr(
+                "worldcup_bot.porra.engine.compute_general_ranking",
+                lambda preds, cli, official=False: [_make_ranking_entry("alice", "Alice", 3.0)],
+            )
+            result = ensure_history(client, {"participants": {}}, settings, path, force=False)
+
+        # Past jornada (06-13) cached → NOT recomputed
+        assert "2026-06-13" not in reconstruct_calls
+        assert result["2026-06-13"]["alice"]["pts"] == 2.0  # original stale value preserved
+        # Latest always refreshed
+        assert result["2026-06-14"]["alice"]["pts"] == 3.0
+
+    def test_force_true_empty_history_when_no_existing_file(self, tmp_path):
+        """force=True starts from {} even when the file does not exist."""
+        path = str(tmp_path / "nonexistent.json")
+        settings = _fake_settings()
+        matches = [_make_match("2026-06-13T18:00:00Z", "FINISHED")]
+        client = self._make_client(matches)
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr(
+                "worldcup_bot.porra.engine.compute_general_ranking",
+                lambda preds, cli, official=False: [_make_ranking_entry("alice", "Alice", 5.0)],
+            )
+            result = ensure_history(client, {"participants": {}}, settings, path, force=True)
+
+        assert "2026-06-13" in result
+        assert result["2026-06-13"]["alice"]["pts"] == 5.0
+
+    def test_force_true_rewrites_all_jornadas(self, tmp_path):
+        """force=True recomputes every jornada; the result count matches the match days."""
+        path = str(tmp_path / "h.json")
+        settings = _fake_settings()
+
+        # Pre-fill with stale pts
+        save_history(path, {
+            "2026-06-13": {"alice": {"pos": 1, "pts": 0.5, "name": "Alice"}},
+            "2026-06-14": {"alice": {"pos": 1, "pts": 1.0, "name": "Alice"}},
+        })
+
+        matches = [
+            _make_match("2026-06-13T18:00:00Z", "FINISHED"),
+            _make_match("2026-06-14T18:00:00Z", "FINISHED"),
+        ]
+        client = self._make_client(matches)
+
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr(
+                "worldcup_bot.porra.history.compute_ranking_at_jornada",
+                lambda preds, mlist, jornada, tz, ah: [_make_ranking_entry("alice", "Alice", 7.0)],
+            )
+            mp.setattr(
+                "worldcup_bot.porra.engine.compute_general_ranking",
+                lambda preds, cli, official=False: [_make_ranking_entry("alice", "Alice", 8.0)],
+            )
+            result = ensure_history(client, {"participants": {}}, settings, path, force=True)
+
+        # Both jornadas recomputed; old stale values gone
+        assert result["2026-06-13"]["alice"]["pts"] == 7.0
+        assert result["2026-06-14"]["alice"]["pts"] == 8.0  # latest uses live
+
