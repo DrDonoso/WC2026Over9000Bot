@@ -1992,3 +1992,81 @@ logs or restart the bot.  Zero risk to production: it's read-only, hidden, admin
 | `tests/test_tongo_users.py` | Add `TestCheckTongoConfig` (7 tests) + `TestCmdTongocheck` (5 tests) |
 
 **Test count:** 1545 → 1565 (+20 net).
+
+---
+
+# Decision: TongoUsers.yml is REQUIRED for /tongo
+
+**Date:** 2026-06-22  
+**Author:** Kanté (Backend Developer)  
+**Requested by:** DrDonoso
+
+## Context
+
+`/tongo` previously shipped with a built-in `FRASES` list constant that acted as a
+fallback whenever `data/TongoUsers.yml` was missing, empty, or unparseable. This
+meant a silently misconfigured file went unnoticed — the bot kept firing the same
+stale phrases with no indication anything was wrong.
+
+## Decision
+
+`data/TongoUsers.yml` is now the **single, mandatory** source of truth for `/tongo`
+phrases. If it cannot be loaded for any reason (missing file, YAML parse error,
+unreadable, top-level-not-a-mapping), `/tongo` **fails visibly** with a Spanish error
+message and does nothing else. The rest of the bot keeps running.
+
+## What changed
+
+### `src/worldcup_bot/data/tongo.py`
+- Added `class TongoConfigError(Exception): pass`
+- `load_tongo_config(path)`: raises `TongoConfigError` on missing file, `yaml.YAMLError`,
+  OSError on stat/read, or top-level not-a-mapping. Per-field validation
+  (bad `sanchez_ratio`, `phrases_mode`, `phrases`) stays graceful (log + skip).
+  The mtime hot-reload cache is only written on a successful parse.
+- Removed `FRASES: list[str]` constant (16 built-in phrases)
+- Removed `frase_argentino(gender: str) -> str` function
+- `choose_tongo_response(...)`: removed `gender` parameter; removed
+  `if not sender: use FRASES` fallback; pool is now `sender + gifs`; guard:
+  `if not pool: return SANCHEZ_ENS_ROBA` (empty pool never crashes `random.choice`).
+
+### `src/worldcup_bot/bot/handlers.py` — `cmd_tongo`
+- Removed `FRASES` and `infer_gender` imports
+- Added `TongoConfigError`, `SANCHEZ_ENS_ROBA` to tongo imports
+- Config load wrapped in `try/except TongoConfigError`: on failure, logs warning
+  and replies `❌ No puedo cargar las frases de /tongo (TongoUsers.yml). Revísalo o
+  usa /tongocheck.` then returns.
+- `global_phrases = cfg.phrases` (no more `if cfg.phrases else FRASES`)
+- Removed `gender = infer_gender(...)` call
+- Removed `gender` arg from `choose_tongo_response(...)` call
+- GIF fallback: `fallback = random.choice(fb_pool) if fb_pool else SANCHEZ_ENS_ROBA`
+  (no FRASES dependency)
+
+### Dead code deleted
+- `src/worldcup_bot/data/gender.py` — `infer_gender` / `gender_guesser` wrapper
+- `tests/test_gender.py` — 8 tests
+- `gender-guesser>=0.4` removed from `pyproject.toml` dependencies
+
+### Tests
+- Removed `TestTongoData`, `TestFraseArgentino`, `TestInferGender`, argentino handler
+  tests, `test_female/male_gender_phrase_in_pool`
+- `load_tongo_config` error tests now assert `raises TongoConfigError` (not empty return)
+- `choose_tongo_response` calls updated to drop `gender` parameter
+- `test_empty_pool_returns_sanchez` replaces `test_empty_effective_phrases_falls_back_to_frases`
+- `TestCmdTongoConfigError` added: error message sent, `random.choice` not called
+- `TestCmdTongo` / `TestCmdTongoGifs` use autouse fixture to patch `load_tongo_config`
+
+## What is kept
+
+- `SANCHEZ_ENS_ROBA` and the 1/3 probability gate (unchanged)
+- Per-user `sanchez_ratio` overrides (unchanged)
+- Reply-targeted path (`{{reply_to_*}}` phrases) (unchanged)
+- `check_tongo_config` / `/tongocheck` (graceful, never raises)
+- `render_tongo`, `build_tongo_context`, `phrase_eligible`, `phrase_uses_reply`
+- Hot-reload mtime cache on the success path
+
+## Rationale
+
+A missing or broken YAML is a configuration error that the operator must fix. Silent
+fallback to built-in phrases hides this error and provides a bad UX (phrases the
+operator might have overridden). Failing loudly with `/tongocheck` guidance is
+strictly better. `SANCHEZ_ENS_ROBA` is a signature phrase, not a fallback — it stays.
