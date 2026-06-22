@@ -38,7 +38,8 @@ from worldcup_bot.ai.match_events import extract_match_events
 from worldcup_bot.config import Settings, ai_enabled
 from worldcup_bot.data.stages import GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
 from worldcup_bot.data.tongo import (
-    FRASES,
+    SANCHEZ_ENS_ROBA,
+    TongoConfigError,
     build_tongo_context,
     check_tongo_config,
     choose_tongo_response,
@@ -46,7 +47,6 @@ from worldcup_bot.data.tongo import (
     phrase_uses_reply,
     render_tongo,
 )
-from worldcup_bot.data.gender import infer_gender
 from worldcup_bot.data.gifs import list_tongo_gifs
 from worldcup_bot.porra import engine, predictions as pred_loader
 from worldcup_bot.porra.history import ensure_history
@@ -583,12 +583,19 @@ async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         gifs_dir = predictions_parent / "tongo_gifs"
 
     gifs = list_tongo_gifs(gifs_dir)
-    user = update.effective_user
-    gender = infer_gender(user.first_name if user else None)
     ctx = build_tongo_context(update)
 
-    cfg = load_tongo_config(str(path))
-    global_phrases = cfg.phrases if cfg.phrases else FRASES
+    try:
+        cfg = load_tongo_config(str(path))
+    except TongoConfigError as exc:
+        log.warning("cmd_tongo: %s", exc)
+        await update.message.reply_text(
+            "❌ No puedo cargar las frases de /tongo (TongoUsers.yml). "
+            "Revísalo o usa /tongocheck."
+        )
+        return
+
+    global_phrases = cfg.phrases
     users = cfg.users
 
     username = _caller_username(update)
@@ -607,7 +614,7 @@ async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # "append" OR "replace" with empty per-user pool — guard: never serve an empty pool
         effective_phrases = global_phrases + per_user_phrases
 
-    choice = choose_tongo_response(ctx, effective_phrases, sanchez_ratio, gender, gifs, rng=random)
+    choice = choose_tongo_response(ctx, effective_phrases, sanchez_ratio, gifs, rng=random)
 
     if isinstance(choice, Path):
         try:
@@ -618,9 +625,8 @@ async def cmd_tongo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as exc:
             log.warning("Could not send tongo GIF %s: %s", choice, exc)
             fb_pool = [render_tongo(p, ctx) for p in global_phrases if not phrase_uses_reply(p)]
-            if not fb_pool:
-                fb_pool = [render_tongo(p, ctx) for p in FRASES]
-            await update.message.reply_text(random.choice(fb_pool))
+            fallback = random.choice(fb_pool) if fb_pool else SANCHEZ_ENS_ROBA
+            await update.message.reply_text(fallback)
     else:
         await update.message.reply_text(choice)
 

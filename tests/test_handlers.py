@@ -38,6 +38,7 @@ from worldcup_bot.api.client import FootballAPIError
 from worldcup_bot.api.models import Match, Standing
 from worldcup_bot.bot.formatters import format_user_detail, participant_photo_url
 from worldcup_bot.config import Settings
+from worldcup_bot.data.tongo import TongoConfig, TongoConfigError
 from worldcup_bot.porra.engine import UserRankEntry
 
 
@@ -1753,6 +1754,13 @@ class TestPickRandomGoal:
 
 
 class TestCmdTongo:
+    @pytest.fixture(autouse=True)
+    def _patch_tongo_load(self):
+        """Provide a valid TongoConfig so tests don't fail on missing file."""
+        cfg = TongoConfig(phrases=["Aguacate?", "La culpa es de Suñé"])
+        with patch("worldcup_bot.bot.handlers.load_tongo_config", return_value=cfg):
+            yield
+
     async def test_sanchez_path_when_random_below_threshold(self, fake_settings):
         """random.random() < 1/3 → reply is exactly 'Sanchez ens roba'."""
         update = _make_update()
@@ -1765,8 +1773,8 @@ class TestCmdTongo:
         text = update.message.reply_text.call_args[0][0]
         assert text == "Sanchez ens roba"
 
-    async def test_frases_path_when_random_above_threshold(self, fake_settings):
-        """random.random() >= 1/3 → reply comes from FRASES (not Sanchez)."""
+    async def test_phrase_path_when_random_above_threshold(self, fake_settings):
+        """random.random() >= 1/3 → reply comes from the phrase pool (not Sanchez)."""
         update = _make_update()
         context = _make_context(fake_settings)
         known_phrase = "Aguacate?"
@@ -1780,7 +1788,7 @@ class TestCmdTongo:
         assert text == known_phrase
         assert text != "Sanchez ens roba"
 
-    async def test_frases_path_does_not_use_sanchez_constant(self, fake_settings):
+    async def test_phrase_path_does_not_use_sanchez_constant(self, fake_settings):
         """When above threshold, random.choice is called (not the Sanchez constant)."""
         update = _make_update()
         context = _make_context(fake_settings)
@@ -1792,43 +1800,38 @@ class TestCmdTongo:
 
         mock_random.choice.assert_called_once()
 
-    async def test_argentino_female_phrase_for_laura(self, fake_settings):
-        """Laura → female argentino phrase is in the candidate pool and sent."""
-        from worldcup_bot.data.tongo import frase_argentino
 
+class TestCmdTongoConfigError:
+    """Tests for the config-load-failure path of cmd_tongo."""
+
+    async def test_missing_yaml_replies_error_message(self, fake_settings):
+        """When TongoUsers.yml can't be loaded, a Spanish error is sent."""
         update = _make_update()
-        update.effective_user.first_name = "Laura"
         context = _make_context(fake_settings)
-        expected = frase_argentino("f")
 
-        with patch("worldcup_bot.bot.handlers.random") as mock_random:
-            mock_random.random.return_value = 0.9
-            mock_random.choice.return_value = expected
+        with patch(
+            "worldcup_bot.bot.handlers.load_tongo_config",
+            side_effect=TongoConfigError("fichero no encontrado"),
+        ):
             await cmd_tongo(update, context)
 
         text = update.message.reply_text.call_args[0][0]
-        assert text == expected
-        pool = mock_random.choice.call_args[0][0]
-        assert expected in pool
+        assert "❌" in text
+        assert "tongo" in text.lower()
+        assert "/tongocheck" in text
 
-    async def test_argentino_male_phrase_for_david(self, fake_settings):
-        """David → male argentino phrase is in the candidate pool and sent."""
-        from worldcup_bot.data.tongo import frase_argentino
-
+    async def test_config_error_does_not_call_random_choice(self, fake_settings):
+        """No phrase pool is consulted when config load fails."""
         update = _make_update()
-        update.effective_user.first_name = "David"
         context = _make_context(fake_settings)
-        expected = frase_argentino("m")
 
-        with patch("worldcup_bot.bot.handlers.random") as mock_random:
-            mock_random.random.return_value = 0.9
-            mock_random.choice.return_value = expected
+        with patch(
+            "worldcup_bot.bot.handlers.load_tongo_config",
+            side_effect=TongoConfigError("broken YAML"),
+        ), patch("worldcup_bot.bot.handlers.random") as mock_random:
             await cmd_tongo(update, context)
 
-        text = update.message.reply_text.call_args[0][0]
-        assert text == expected
-        pool = mock_random.choice.call_args[0][0]
-        assert expected in pool
+        mock_random.choice.assert_not_called()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1838,6 +1841,13 @@ class TestCmdTongo:
 
 class TestCmdTongoGifs:
     """Tests for the GIF branch of cmd_tongo."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_tongo_load(self):
+        """Provide a valid TongoConfig so tests don't fail on missing file."""
+        cfg = TongoConfig(phrases=["Aguacate?", "La culpa es de Suñé"])
+        with patch("worldcup_bot.bot.handlers.load_tongo_config", return_value=cfg):
+            yield
 
     def _gif_settings(self, gifs_dir: str) -> Settings:
         return Settings(

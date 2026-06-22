@@ -15,7 +15,7 @@ import pytest
 
 import worldcup_bot.data.tongo as _tongo_mod
 from worldcup_bot.data.tongo import (
-    FRASES,
+    TongoConfigError,
     TongoContext,
     build_tongo_context,
     phrase_eligible,
@@ -434,30 +434,25 @@ class TestCmdTongoTemplating:
         for phrase in captured_pool:
             assert "{{" not in phrase, f"Raw template found in pool: {phrase!r}"
 
-    async def test_missing_file_falls_back_to_builtin_frases(self):
-        """When TongoUsers.yml doesn't exist, built-in FRASES are used."""
+    async def test_missing_file_sends_error_message(self):
+        """When TongoUsers.yml doesn't exist, cmd_tongo replies with a Spanish error."""
         update = _make_update_mock("Alice", has_reply=False)
         context = _make_context(_yaml_settings("/nonexistent/TongoUsers.yml"))
 
-        captured_pool = []
+        await cmd_tongo(update, context)
 
-        def capture_choice(pool):
-            captured_pool.extend(p for p in pool if isinstance(p, str))
-            return pool[0] if pool else ""
+        text = update.message.reply_text.call_args[0][0]
+        assert "❌" in text
+        assert "tongo" in text.lower()
+        assert "/tongocheck" in text
 
-        with patch("worldcup_bot.bot.handlers.random") as mock_random:
-            mock_random.random.return_value = 0.9
-            mock_random.choice.side_effect = capture_choice
-            await cmd_tongo(update, context)
-
-        # All built-in FRASES should appear in the pool
-        for phrase in FRASES:
-            assert phrase in captured_pool
-
-    async def test_gif_fallback_on_reply_path_uses_rendered_phrase(self, tmp_path):
-        """GIF send error on reply path falls back to a rendered reply phrase."""
+    async def test_gif_fallback_on_reply_path_uses_non_reply_phrase(self, tmp_path):
+        """GIF send error falls back to a non-reply phrase (not the reply-targeted phrase)."""
         yaml_file = tmp_path / "TongoUsers.yml"
-        _write_yaml_phrases(yaml_file, ["Trampa de {{reply_to_first_name}}!"])
+        _write_yaml_phrases(
+            yaml_file,
+            ["Trampa de {{reply_to_first_name}}!", "Frase de respaldo."],
+        )
 
         gif_file = tmp_path / "funny.gif"
         gif_file.write_bytes(b"GIF89a")
@@ -474,7 +469,7 @@ class TestCmdTongoTemplating:
         context.bot.send_animation = AsyncMock(side_effect=Exception("Telegram error"))
 
         with patch("worldcup_bot.bot.handlers.random") as mock_random:
-            mock_random.choice.side_effect = [gif_file, "Trampa de Bob!"]
+            mock_random.choice.side_effect = [gif_file, "Frase de respaldo."]
             await cmd_tongo(update, context)
 
-        update.message.reply_text.assert_called_once_with("Trampa de Bob!")
+        update.message.reply_text.assert_called_once_with("Frase de respaldo.")

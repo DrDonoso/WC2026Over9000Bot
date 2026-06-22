@@ -4,12 +4,13 @@ Probability model:
 - "Sanchez ens roba" (SANCHEZ_ENS_ROBA) is returned with exactly 1/3 probability
   on the default (no-reply) path.
 - Otherwise a random phrase is chosen from the loaded phrase pool (2/3 probability).
-SANCHEZ_ENS_ROBA must NOT appear in FRASES or the 1/3 guarantee would be violated.
 
-Phrases and per-user config are loaded from a single YAML file (data/TongoUsers.yml)
-with top-level keys ``phrases:`` (global pool) and ``users:`` (per-user overrides),
-using mtime-based hot-reload.  FRASES is the built-in fallback when the file is
-absent, empty, or has no ``phrases:`` list.
+Phrases and per-user config are loaded from ``data/TongoUsers.yml`` — a REQUIRED
+single YAML file with top-level keys ``phrases:`` (global pool) and ``users:``
+(per-user overrides), using mtime-based hot-reload.  If the file cannot be loaded
+(missing, unreadable, or invalid YAML), ``load_tongo_config`` raises
+``TongoConfigError`` and /tongo replies with a user-visible error.  There is no
+built-in phrase fallback.
 """
 
 from __future__ import annotations
@@ -27,31 +28,9 @@ log = logging.getLogger(__name__)
 
 SANCHEZ_ENS_ROBA = "Sanchez ens roba"
 
-FRASES: list[str] = [
-    "Per robos el de Javi a Raona",
-    "Que si quiere la bolsa",
-    "La culpa es de Suñé",
-    "Ara envio a la buuuhhhambulancia",
-    "si, si, però vas palmant",
-    "Si, y Amalia y Suñé son mejores amigos ahora también",
-    "Y Rosamar para cuando?",
-    "Y Santvi para cuando?",
-    "Y Sant Celoni para cuando?",
-    "Aguacate?",
-    "Si, y Arbeloa es el jugador favorito de Laura. CAP17ÁN.",
-    "Tongo es que Joan García no fue convocado con el Espanyol y vaya con el Barça, asi que a callar.",
-    "Como va a ser tongo, si no te interesa ni el futbol.",
-    "Un conoooooo!! un cono!!!",
-    "Por lo menos no somos italia.",
-    "Ah, pero ChatGPT decia que si.",
-]
 
-
-def frase_argentino(gender: str) -> str:
-    """Return the gender-aware argentino phrase ('f' for female, anything else for male)."""
-    if gender == "f":
-        return "Que tongo ni que tongo, eres mas pesada que una argentina."
-    return "Que tongo ni que tongo, eres mas pesado que un argentino."
+class TongoConfigError(Exception):
+    """Raised when TongoUsers.yml cannot be loaded or parsed."""
 
 
 # ── context dataclass ─────────────────────────────────────────────────────────
@@ -215,21 +194,20 @@ def load_tongo_config(path: str) -> TongoConfig:
       - top-level ``phrases:`` list[str]  — global phrase pool
       - top-level ``users:`` mapping      — per-user overrides
 
-    Validation is graceful: invalid fields are logged and skipped; the function
-    never raises.  Returns an empty TongoConfig() on missing file, empty file,
-    YAML error, or OSError.
+    Raises ``TongoConfigError`` if the file is missing, unreadable, has a YAML
+    parse error, or the top-level structure is not a mapping.
+
+    Per-field validation is graceful: invalid field values are logged and skipped.
     """
     global _cached_config_path, _cached_config_mtime, _cached_config_data
 
     if not os.path.exists(path):
-        log.debug("TongoUsers.yml not found at %s — using built-in defaults", path)
-        return TongoConfig()
+        raise TongoConfigError(f"No se puede cargar {path}: fichero no encontrado")
 
     try:
         mtime = os.path.getmtime(path)
     except OSError as exc:
-        log.warning("Cannot stat tongo config file %s: %s", path, exc)
-        return TongoConfig()
+        raise TongoConfigError(f"No se puede cargar {path}: {exc}") from exc
 
     if (
         path == _cached_config_path
@@ -243,16 +221,14 @@ def load_tongo_config(path: str) -> TongoConfig:
         with open(path, encoding="utf-8") as fh:
             raw = yaml.safe_load(fh)
     except yaml.YAMLError as exc:
-        log.warning("YAML parse error in tongo config %s: %s", path, exc)
-        return TongoConfig()
+        raise TongoConfigError(f"No se puede cargar {path}: {exc}") from exc
     except OSError as exc:
-        log.warning("Cannot read tongo config %s: %s", path, exc)
-        return TongoConfig()
+        raise TongoConfigError(f"No se puede cargar {path}: {exc}") from exc
 
     if not isinstance(raw, dict):
-        if raw is not None:
-            log.warning("TongoUsers.yml at %s is not a mapping — ignored", path)
-        return TongoConfig()
+        raise TongoConfigError(
+            f"No se puede cargar {path}: el contenido no es un mapping YAML válido"
+        )
 
     # Parse top-level phrases
     raw_phrases = raw.get("phrases")
@@ -381,7 +357,6 @@ def choose_tongo_response(
     ctx: TongoContext,
     effective_phrases: list[str],
     sanchez_ratio: float,
-    gender: str,
     gifs: list[Path],
     *,
     rng: object = random,
@@ -392,12 +367,12 @@ def choose_tongo_response(
         ctx: TongoContext with sender and reply-target data.
         effective_phrases: Merged phrase pool (global + per-user, or per-user only).
         sanchez_ratio: Probability [0,1] for SANCHEZ_ENS_ROBA on the default path.
-        gender: "f" or anything else for frase_argentino.
         gifs: List of GIF/video Paths mixed into the pool.
         rng: Object with .random() and .choice() — defaults to the random module.
              Pass a fake rng in tests for deterministic results.
 
     Returns a rendered str or a Path (GIF/video file).
+    If the pool is empty (no eligible phrases and no gifs), returns SANCHEZ_ENS_ROBA.
     """
     eligible = [p for p in effective_phrases if phrase_eligible(p, ctx)]
 
@@ -417,8 +392,8 @@ def choose_tongo_response(
     sender = [render_tongo(p, ctx) for p in eligible if not phrase_uses_reply(p)]
     if not sender:
         sender = [render_tongo(p, ctx) for p in eligible]
-    if not sender:
-        sender = [render_tongo(p, ctx) for p in FRASES]
 
-    pool = sender + [frase_argentino(gender)] + gifs
+    pool = sender + gifs
+    if not pool:
+        return SANCHEZ_ENS_ROBA
     return rng.choice(pool)

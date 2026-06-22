@@ -18,9 +18,9 @@ import yaml
 
 import worldcup_bot.data.tongo as _tongo_mod
 from worldcup_bot.data.tongo import (
-    FRASES,
     SANCHEZ_ENS_ROBA,
     TongoConfig,
+    TongoConfigError,
     TongoContext,
     TongoUserConfig,
     choose_tongo_response,
@@ -28,6 +28,9 @@ from worldcup_bot.data.tongo import (
 )
 from worldcup_bot.bot.handlers import cmd_tongo
 from worldcup_bot.config import Settings
+
+# Generic phrases for tests that need a non-empty pool (no FRASES in prod anymore)
+_PHRASES = ["Una frase.", "Otra frase.", "Y otra más."]
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -243,34 +246,30 @@ class TestLoadTongoConfig:
         path = _write_yaml(tmp_path, {"users": {"alice": "not a dict"}})
         assert "alice" not in load_tongo_config(path).users
 
-    def test_missing_file_returns_empty(self):
-        result = load_tongo_config("/nonexistent/path/TongoUsers.yml")
-        assert result.phrases == []
-        assert result.users == {}
+    def test_missing_file_raises(self):
+        with pytest.raises(TongoConfigError, match="fichero no encontrado"):
+            load_tongo_config("/nonexistent/path/TongoUsers.yml")
 
-    def test_empty_file_returns_empty(self, tmp_path):
+    def test_empty_file_raises(self, tmp_path):
         f = tmp_path / "TongoUsers.yml"
         f.write_text("", encoding="utf-8")
-        result = load_tongo_config(str(f))
-        assert result.phrases == []
-        assert result.users == {}
+        with pytest.raises(TongoConfigError):
+            load_tongo_config(str(f))
 
-    def test_parse_error_returns_empty(self, tmp_path):
+    def test_parse_error_raises(self, tmp_path):
         f = tmp_path / "TongoUsers.yml"
         f.write_text("{ broken: [yaml: error", encoding="utf-8")
-        result = load_tongo_config(str(f))
-        assert result.phrases == []
-        assert result.users == {}
+        with pytest.raises(TongoConfigError):
+            load_tongo_config(str(f))
 
-    def test_never_raises_on_oserror(self, tmp_path, monkeypatch):
+    def test_oserror_on_stat_raises(self, tmp_path, monkeypatch):
         f = tmp_path / "TongoUsers.yml"
         f.write_text("phrases:\n  - Frase.\n", encoding="utf-8")
         monkeypatch.setattr(
             os.path, "getmtime", lambda _: (_ for _ in ()).throw(OSError("boom"))
         )
-        result = load_tongo_config(str(f))
-        assert result.phrases == []
-        assert result.users == {}
+        with pytest.raises(TongoConfigError):
+            load_tongo_config(str(f))
 
     def test_hot_reload_picks_up_edits(self, tmp_path):
         f = tmp_path / "TongoUsers.yml"
@@ -320,23 +319,23 @@ class TestChooseTongoResponse:
     def test_unconfigured_sanchez_when_random_below_one_third(self):
         ctx = _make_ctx(has_reply=False)
         rng = _FakeRNG(random_val=0.0)
-        assert choose_tongo_response(ctx, FRASES, 1 / 3, "m", [], rng=rng) == SANCHEZ_ENS_ROBA
+        assert choose_tongo_response(ctx, _PHRASES, 1 / 3, [], rng=rng) == SANCHEZ_ENS_ROBA
 
     def test_unconfigured_no_sanchez_when_random_above_one_third(self):
         ctx = _make_ctx(has_reply=False)
         rng = _FakeRNG(random_val=0.9)
-        result = choose_tongo_response(ctx, FRASES, 1 / 3, "m", [], rng=rng)
+        result = choose_tongo_response(ctx, _PHRASES, 1 / 3, [], rng=rng)
         assert result != SANCHEZ_ENS_ROBA
 
     def test_high_ratio_sanchez_fires_at_0_65(self):
         ctx = _make_ctx(has_reply=False)
         rng = _FakeRNG(random_val=0.65)
-        assert choose_tongo_response(ctx, FRASES, 0.66, "m", [], rng=rng) == SANCHEZ_ENS_ROBA
+        assert choose_tongo_response(ctx, _PHRASES, 0.66, [], rng=rng) == SANCHEZ_ENS_ROBA
 
     def test_high_ratio_no_sanchez_above_threshold(self):
         ctx = _make_ctx(has_reply=False)
         rng = _FakeRNG(random_val=0.67)
-        result = choose_tongo_response(ctx, FRASES, 0.66, "m", [], rng=rng)
+        result = choose_tongo_response(ctx, _PHRASES, 0.66, [], rng=rng)
         assert result != SANCHEZ_ENS_ROBA
 
     def test_zero_ratio_never_sanchez(self):
@@ -344,7 +343,7 @@ class TestChooseTongoResponse:
         phrases = ["Frase segura."]
         for rv in (0.0, 0.001, 0.33, 0.5, 0.99):
             rng = _FakeRNG(random_val=rv)
-            result = choose_tongo_response(ctx, phrases, 0.0, "m", [], rng=rng)
+            result = choose_tongo_response(ctx, phrases, 0.0, [], rng=rng)
             assert result != SANCHEZ_ENS_ROBA, f"SANCHEZ returned for rv={rv}"
 
     def test_replace_mode_only_user_phrases_in_pool(self):
@@ -357,10 +356,10 @@ class TestChooseTongoResponse:
             def choice(self, seq): self.pool = list(seq); return seq[0]
 
         cap = CaptureRNG()
-        choose_tongo_response(ctx, user_phrases, 0.0, "m", [], rng=cap)
+        choose_tongo_response(ctx, user_phrases, 0.0, [], rng=cap)
         assert "Exclusiva de Alice." in cap.pool
-        # Global phrases must NOT appear (the caller passes only user phrases in replace mode)
-        assert "Per robos el de Javi a Raona" not in cap.pool
+        # Global phrases must NOT appear when caller passes only user phrases
+        assert "Una frase." not in cap.pool
 
     def test_append_mode_both_global_and_user_in_pool(self):
         ctx = _make_ctx(has_reply=False)
@@ -372,7 +371,7 @@ class TestChooseTongoResponse:
             def choice(self, seq): self.pool = list(seq); return seq[0]
 
         cap = CaptureRNG()
-        choose_tongo_response(ctx, combined, 0.0, "m", [], rng=cap)
+        choose_tongo_response(ctx, combined, 0.0, [], rng=cap)
         assert "Global frase." in cap.pool
         assert "Usuario frase." in cap.pool
 
@@ -380,14 +379,14 @@ class TestChooseTongoResponse:
         ctx = _make_ctx(has_reply=True, reply_first="Carlos")
         phrases = ["Tongo de {{reply_to_first_name}}!"]
         rng = _FakeRNG(random_val=0.9)
-        result = choose_tongo_response(ctx, phrases, 1.0, "m", [], rng=rng)
+        result = choose_tongo_response(ctx, phrases, 1.0, [], rng=rng)
         assert result == "Tongo de Carlos!"
 
     def test_reply_targeted_path_skips_sanchez(self):
         ctx = _make_ctx(has_reply=True, reply_first="Carlos")
         phrases = ["Trampa de {{reply_to_first_name}}!"]
         rng = _FakeRNG(random_val=0.0)
-        result = choose_tongo_response(ctx, phrases, 1.0, "m", [], rng=rng)
+        result = choose_tongo_response(ctx, phrases, 1.0, [], rng=rng)
         assert result == "Trampa de Carlos!"
         assert result != SANCHEZ_ENS_ROBA
 
@@ -395,13 +394,13 @@ class TestChooseTongoResponse:
         ctx = _make_ctx(has_reply=True)
         phrases = ["Solo sender phrase."]
         rng = _FakeRNG(random_val=0.0)
-        assert choose_tongo_response(ctx, phrases, 1 / 3, "m", [], rng=rng) == SANCHEZ_ENS_ROBA
+        assert choose_tongo_response(ctx, phrases, 1 / 3, [], rng=rng) == SANCHEZ_ENS_ROBA
 
     def test_templating_applied_in_result(self):
         ctx = _make_ctx(first_name="Elena", has_reply=False)
         phrases = ["Hola {{first_name}}!"]
         rng = _FakeRNG(random_val=0.9)
-        result = choose_tongo_response(ctx, phrases, 0.0, "m", [], rng=rng)
+        result = choose_tongo_response(ctx, phrases, 0.0, [], rng=rng)
         assert result == "Hola Elena!"
         assert "{{" not in str(result)
 
@@ -410,48 +409,22 @@ class TestChooseTongoResponse:
         gif.write_bytes(b"GIF89a")
         ctx = _make_ctx(has_reply=False)
         rng = _FakeRNG(random_val=0.9, choices=[gif])
-        result = choose_tongo_response(ctx, ["Frase."], 0.0, "m", [gif], rng=rng)
+        result = choose_tongo_response(ctx, ["Frase."], 0.0, [gif], rng=rng)
         assert result == gif
         assert isinstance(result, Path)
 
-    def test_female_gender_phrase_in_pool(self):
-        ctx = _make_ctx(has_reply=False)
-        captured = []
-
-        class CaptureRNG:
-            def random(self): return 0.9
-            def choice(self, pool):
-                captured.extend(str(p) for p in pool if isinstance(p, str))
-                return pool[0]
-
-        choose_tongo_response(ctx, ["Frase."], 0.0, "f", [], rng=CaptureRNG())
-        assert any("pesada" in p for p in captured)
-
-    def test_male_gender_phrase_in_pool(self):
-        ctx = _make_ctx(has_reply=False)
-        captured = []
-
-        class CaptureRNG:
-            def random(self): return 0.9
-            def choice(self, pool):
-                captured.extend(str(p) for p in pool if isinstance(p, str))
-                return pool[0]
-
-        choose_tongo_response(ctx, ["Frase."], 0.0, "m", [], rng=CaptureRNG())
-        assert any("pesado" in p for p in captured)
-
-    def test_empty_effective_phrases_falls_back_to_frases(self):
+    def test_empty_pool_returns_sanchez(self):
+        """Empty phrases and no gifs → pool is empty → guard returns SANCHEZ_ENS_ROBA."""
         ctx = _make_ctx(has_reply=False)
         rng = _FakeRNG(random_val=0.9)
-        # Empty pool → should fall back to FRASES in the function
-        result = choose_tongo_response(ctx, [], 0.0, "m", [], rng=rng)
-        assert result != SANCHEZ_ENS_ROBA
+        result = choose_tongo_response(ctx, [], 0.0, [], rng=rng)
+        assert result == SANCHEZ_ENS_ROBA
 
     def test_sanchez_invariant_exactly_at_boundary(self):
         ctx = _make_ctx(has_reply=False)
         # Exactly 1/3 is NOT less than 1/3
         rng = _FakeRNG(random_val=1 / 3)
-        result = choose_tongo_response(ctx, FRASES, 1 / 3, "m", [], rng=rng)
+        result = choose_tongo_response(ctx, _PHRASES, 1 / 3, [], rng=rng)
         assert result != SANCHEZ_ENS_ROBA
 
 
