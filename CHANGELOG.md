@@ -5,6 +5,18 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260622.04] - 2026-06-22
+
+- Daily update (/updatediario): the 📺 + channel now appears on the match line right after the kickoff (e.g. 'Inglaterra vs Ghana — 22:00 📺 La 1'), exactly like /hoy — rendered deterministically by render_message. The AI no longer mentions TVE (removed from _SYSTEM and build_ai_user_message), so it is no longer redundant with the line marker.
+- New hidden admin command /tongocheck: validates data/TongoUsers.yml and replies '✅ N frases, M usuarios' or '❌ Error de YAML: línea X' — so a typo (e.g. a stray '.' after a closing quote) that silently drops all phrases is diagnosable from Telegram in seconds. Backed by check_tongo_config() in data/tongo.py.
+- kante-tve-broadcasts.md (TVE broadcast markers via RTVE API)
+- maldini-tve-enabled-env.md (TVE_ENABLED env toggle)
+- rtveapi (research agent, RTVE API verification)
+- kante (TVE module + 54 tests, 1491→1545)
+- maldini (docker-compose.yml/local + .env.example)
+- coordinator (live smoke test, TongoUsers.yml YAML-typo diagnosis)
+
+
 ## [20260622.03] - 2026-06-22
 
 - fetch + parse WC items (idPrograma=1030562, excluding 'resumen'), extract teams (Spanish->TLA) and kickoff (Madrid-local->UTC, DST-correct), 6h TTL cache, fully graceful (a flaky RTVE API never breaks a command).
