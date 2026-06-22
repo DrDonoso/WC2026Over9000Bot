@@ -306,3 +306,32 @@ Kanté history.md archived at 16,618 bytes (>= 15,360 threshold) on 2026-06-19T0
 **Test progression: 1463 → 1480 → 1491 → 1545 → 1565 (all green)**
 
 **Phases 26–31 now archived (2026-06-22 spawn complete).**
+
+---
+
+## Session 2026-06-22: TongoUsers Required + Kickoff Notifications (kante-tongo-required-and-kickoff)
+
+**Phase 1 — TongoUsers.yml is now REQUIRED:**
+- `load_tongo_config` raises `TongoConfigError` on missing file (was: graceful empty return)
+- Removed legacy fallback to `FRASES` constant and `infer_gender` (deprecated code path)
+- `/tongo` command wraps load in try/except; replies with actionable error message + `/tongocheck` hint
+- Deleted `src/worldcup_bot/data/gender.py` + `gender-guesser` dependency
+- **Tests:** 1565 → 1531 (net −34: removed 36 legacy tests; added 2 error-path tests)
+- **Key learning:** Explicit required files with clear error messages beat silent fallbacks
+
+**Phase 2 — Kickoff-start notice (`poll_kickoff_job`):**
+- New repeating job posts `🟢 ¡Empieza el partido! {flags+teams}` to group when `utc_date <= now_utc`
+- Time-based trigger, not waiting for API status flip → faster user notification
+- **Seed pass (restart-safe):** First run marks all past-kickoff + IN_PLAY/PAUSED/FINISHED matches as announced (no re-send after restart)
+- **Grace window:** Matches > 30 min past kickoff silently marked, no stale announcement
+- **Silent hour aware:** Uses existing `_is_silent_hour` (00:00–09:00 local = quiet, disable_notification=True)
+- **State reuse:** Leverages existing `load_finished`/`save_finished` helpers from `finished_state.py` (DRY, no new module)
+- **Formatter:** `format_match_start(match) → str` in `formatters.py` (pure, testable, returns HTML-safe text with flags)
+- **Job interval:** Hardcoded 30s (mirrors existing goal-job pattern; no new env var)
+- **Files:** `__main__.py` (job + state wiring), `formatters.py` (formatter), `tests/test_poll_kickoff_job.py` (21 tests)
+- **Tests:** 1531 → 1552 (+21: seed, normal, restart, grace window, silent hour, API error, formatter)
+- **Key learning:** Time-based deterministic firing (not waiting for status API lag) gives responsive user experience; restart-safe seed pass + grace window prevent stale announcements
+
+**Test progression: 1565 → 1531 → 1552**  
+**Spawned by:** kante (Claude Sonnet 4.6) + coordinator verification  
+**Decisions linked:** `.squad/decisions.md` (Kickoff-start notice at scheduled kickoff time)

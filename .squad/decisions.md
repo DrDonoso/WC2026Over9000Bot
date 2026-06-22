@@ -2070,3 +2070,62 @@ A missing or broken YAML is a configuration error that the operator must fix. Si
 fallback to built-in phrases hides this error and provides a bad UX (phrases the
 operator might have overridden). Failing loudly with `/tongocheck` guidance is
 strictly better. `SANCHEZ_ENS_ROBA` is a signature phrase, not a fallback — it stays.
+
+---
+
+# Decision: Kickoff-start notice at scheduled kickoff time
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-22  
+**Status:** Implemented
+
+---
+
+## Context
+
+The bot already notifies the group for goals (API + thread paths) and match-finish recaps.  Users asked for a notice when a match *starts*, so nobody misses the opening whistle while the bot is running.
+
+---
+
+## Decision
+
+Add `poll_kickoff_job` — a 30-second repeating job that posts a `🟢 ¡Empieza el partido!` HTML message to the group when a match's scheduled `utc_date` arrives.
+
+---
+
+## Key choices
+
+### Time-based, not status-based
+The job fires when `kickoff <= now_utc`, regardless of the football-data.org status field (which can lag by several minutes for IN_PLAY).  This gives the most responsive notice at the cost of occasionally firing for a match delayed at the stadium — acceptable for a porra group.
+
+### Reuse `load_finished` / `save_finished`
+The existing helpers in `reddit/finished_state.py` are already generic `set[int] ↔ JSON` utilities.  A new `kickoff_state.py` module would have been identical boilerplate; reusing the existing ones keeps the codebase DRY.
+
+### 30-minute grace window
+Any match not caught by the seed pass (edge case) and with a kickoff > 30 min in the past is silently marked in `announced` without sending.  Prevents stale announcements after an unexpected restart mid-game.
+
+### Seed pass mirrors `poll_finished_matches_job`
+On first run (`kickoff_seeded == False`), all currently live or past-kickoff matches are bulk-inserted into `announced` and the job returns immediately.  This is the same restart-safe pattern used for finished recaps and is well understood by the team.
+
+### Hardcoded 30-second interval
+No new env var was added.  A 30-second polling interval is sufficient (notice within ~30 s of kickoff), mirrors the existing goal jobs, and avoids config sprawl.
+
+### `format_match_start` in `formatters.py`
+Pure function with no external dependencies — testable in isolation.  Consistent with the existing `format_match`, `format_match_with_date`, etc.
+
+---
+
+## Files changed
+
+| File | Change |
+|---|---|
+| `src/worldcup_bot/bot/formatters.py` | Added `format_match_start(match) -> str` |
+| `src/worldcup_bot/__main__.py` | Added `poll_kickoff_job`, `_KICKOFF_GRACE` constant; wired `kickoff_announced` + `kickoff_seeded` in `build_app`; registered job; imported `format_match_start` + `timezone` |
+| `tests/test_poll_kickoff_job.py` | 21 new tests (seed, normal, restart safety, grace window, silent hour, API error, formatter) |
+| `README.md` | Added match-start notice bullet to Notes section |
+
+---
+
+## Test count
+
+1531 → 1552 (+21)
