@@ -5,6 +5,14 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260622.03] - 2026-06-22
+
+- fetch + parse WC items (idPrograma=1030562, excluding 'resumen'), extract teams (Spanish->TLA) and kickoff (Madrid-local->UTC, DST-correct), 6h TTL cache, fully graceful (a flaky RTVE API never breaks a command).
+- tve_channel_for() matches a fixture by kickoff (+/-20 min) + unordered TLA pair (time-only fallback only when unambiguous).
+- /hoy, /siguiente and the daily AI update append a TV emoji (+ channel) to matches on TVE. Toggle with TVE_ENABLED (default on).
+- kante-goal-notif-fixes.md: Four live goal-notification bugs + keyboard follow-up
+
+
 ## [20260622.02] - 2026-06-22
 
 - Duplicate goal (e.g. '5-0' sent twice): both jobs read a stale announced score and re-announced. Fixed with a shared asyncio goal_lock — each job now claims the new announced score atomically inside the lock BEFORE the slow enrichment/send, so the other job sees it and produces no delta. This also fixes goals being missed in the same race (NZ-Egypt).
