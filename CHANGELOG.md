@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260622] - 2026-06-22
+
+- pred & actual both in top-2 (positions 1-2) -> 1.0 (order irrelevant) - exact 3rd (pred=3, actual=3) -> 1.0 - boundary between top-2 and 3rd -> 0.5 - otherwise -> 0
+
+
 ## [20260621] - 2026-06-21
 
 - Update daily_update.py
