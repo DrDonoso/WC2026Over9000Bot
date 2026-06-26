@@ -1,3 +1,263 @@
+# Decision: Fix TVE 📺 label missing from 09:00 daily update
+
+**Date:** 2026-06-26  
+**Author:** Kanté (Backend Developer)  
+**Status:** Implemented (code changes UNCOMMITTED; pending owner decision on commit/push and DAILY_UPDATE_HOUR config)
+
+## Problem
+
+The 09:00 daily update (`daily_update_job`) never showed the `📺 La 1` (or Teledeporte) marker for fixtures airing on Spanish public TV. Running `/updateDiario` manually later in the day DID show it. Both paths call `generate_daily_update(client, ai, settings)` identically — the difference was in the TVE data available at each time.
+
+## Root Causes
+
+### RC1 — Failure-caching bug (confirmed code bug)
+
+`load_tve_broadcasts` (tve.py:402-431) cached the result **unconditionally** — even when every channel fetch returned `None` (network error, RTVE outage at 09:00). An empty `broadcasts = []` was stored in `_tve_cache["data"]` for 6 hours. Any call within that window — including `/updateDiario` — saw `tve_by_key = {}` → no label.
+
+The `/updateDiario` worked when the owner ran it either after the cache expired naturally (15:00+) or after a bot restart (clears the module-level dict).
+
+### RC2 — RTVE schedule published mid-morning
+
+Live API evidence: `diahoy = 20260626104143` (La 1), `20260626103942` (Teledeporte). The RTVE schedule is published around **10:40 CEST**, after the 09:00 job fires. At 09:00:
+- WC match items for today may be absent from the schedule (fetches succeed, `broadcasts = []`), or
+- Copa del Mundo items exist but description lacks `(HH:MM)`, so `_parse_kickoff_utc` falls back to `begintime` (pre-match show start), which can be >20 min before actual kickoff → `tve_channel_for`'s ±20 min window misses.
+
+RC1 then caches this wrong result for 6 hours, silencing RC2.
+
+## Decisions
+
+### 1. Don't cache when all fetches fail
+
+Track `any_fetch_ok`. Update `_tve_cache` only when at least one channel returned a non-None HTTP response. If all fail, return `[]` without caching → next call retries immediately.
+
+### 2. Short TTL for empty WC schedule
+
+When fetches succeed but `broadcasts = []` (no WC items found), store `_EMPTY_RESULT_TTL = 1800 s` (30 min) instead of the default 6 h. The bot will retry before the next live window and pick up the RTVE update that lands ~10:40.
+
+### 3. Same-day TLA-pair fallback in `tve_channel_for`
+
+After the primary ±20 min window and time-only fallback, add a third tier: if the broadcast is on the same UTC calendar date and TLA pair matches exactly, accept it regardless of time offset. This handles pre-show `begintime` values >20 min before actual kickoff without weakening the anti-misfire protection (teams never play twice on the same WC day).
+
+### 4. Cache `_ttl` key + conftest reset
+
+Store the effective TTL as `_tve_cache["_ttl"]` so subsequent cache-hit checks use the correct TTL for that result type. Update `conftest.py reset_tve_cache` fixture to also pop `_ttl`.
+
+## Files Changed
+
+- `src/worldcup_bot/tve.py` — `load_tve_broadcasts`, `tve_channel_for`, `_EMPTY_RESULT_TTL` constant
+- `tests/conftest.py` — `reset_tve_cache` fixture pops `_ttl`
+- `tests/test_tve.py` — 8 new tests
+- `tests/test_ai.py` — 1 new integration test (09:00 scenario with same-day fallback)
+
+## Test Delta
+
+1618 → 1629 (+11 total from Kanté +9, Buffon +2 edge cases, all green).
+
+## Session Status
+
+Both review gates (Pirlo, Buffon) passed. All tests green. No required code changes.
+
+**Recommendation from Pirlo to owner:** Move `DAILY_UPDATE_HOUR` to 11 (RTVE publishes ~10:40; 09:00 is pre-publication); no code change needed, env-configurable via `DAILY_UPDATE_HOUR=11`.
+
+---
+
+# Review: TVE 📺 label missing from 09:00 daily update
+
+**Date:** 2026-06-26  
+**Reviewer:** Pirlo (Lead / Tech Lead)  
+**Author:** Kanté  
+**Status:** APPROVED  
+
+## 1. Same-Day TLA-Pair Fallback Safety
+
+**SAFE — no regression risk.**
+
+The core question: can tier 3 attach the wrong channel to the wrong match?  **No.**
+
+- In a FIFA World Cup, a given team pairing plays at most once per tournament, let alone once per calendar day. The {home_tla, away_tla} set is unique per UTC date by tournament rules.
+- The fallback requires BOTH TLAs to be non-None (`b.home_tla is not None and b.away_tla is not None`), so it cannot fire for unparsed broadcasts — the "time-only ambiguity" that tier 2's `len(time_window_hits) == 1` guard protects against is structurally impossible in tier 3.
+- Same fixture on both La 1 and Teledeporte: both enter `candidates`, then `"La 1" in candidates` picks La 1. Correct. Test `test_same_day_tla_fallback_prefers_la1` verifies this.
+- The `if not candidates:` gate ensures tier 3 never competes with tier 1/2 — strictly lower priority. No regression to the "don't mismatch simultaneous games" property.
+- Re-broadcasts / summary items are already filtered upstream by `parse_wc_broadcasts` (idPrograma + resumen exclusion). A re-broadcast of the same game would have identical TLAs anyway — same match, not a mismatch.
+
+**Conclusion:** The combination of same-UTC-date + exact-TLA-pair is a strictly sound relaxation of the ±20-min window constraint for the scenario it targets (pre-show `begintime` >20 min before kickoff). No holes found.
+
+## 2. Cache Redesign
+
+**Sound. No state-leak or staleness concerns.**
+
+| Scenario | any_fetch_ok | broadcasts | Cached? | TTL |
+|---|---|---|---|---|
+| All fetches fail | False | [] | NO — retries immediately | — |
+| Fetches ok, no WC items | True | [] | YES | 30 min |
+| Fetches ok, WC items found | True | [items] | YES | 6 h |
+| Partial success (La 1 ok, dep fails) | True | La 1 items | YES | 6 h or 30 min |
+
+- Partial success is handled reasonably: La 1 is the primary WC channel, so caching its results even if Teledeporte failed is correct behaviour. If La 1 succeeds with no WC items and Teledeporte fails, we get 30-min TTL → Teledeporte retried soon. Acceptable.
+- `_tve_cache.get("_ttl", ttl_seconds)` defaults correctly on first call. TTL transitions (empty→populated) update `_ttl` on re-fetch. No stale-TTL bug.
+- `conftest.py` properly pops `_ttl` in both setup and teardown.
+- `min(ttl_seconds, _EMPTY_RESULT_TTL)` is a nice guard against callers passing `ttl_seconds < 1800` in tests.
+
+## 3. Residual Timing — Recommendation
+
+**The 09:00 message fundamentally cannot show TVE labels when RTVE hasn't published the schedule yet (~10:40).** The cache fixes ensure subsequent calls (manual `/updateDiario`, or future automatic retries) pick up data within 30 min, but the scheduled 09:00 job is a one-shot: it generates once and sends.
+
+### Recommendation for DrDonoso
+
+**Move `daily_update_hour` to 11:00** (or configure via env `DAILY_UPDATE_HOUR=11`).
+
+Rationale:
+- RTVE publishes by ~10:40 consistently. An 11:00 send gives a 20-min margin.
+- The daily update is informational, not time-critical — users check their phone during their morning, not at 09:00:00 sharp.
+- No code change needed: `settings.daily_update_hour` is already env-configurable.
+- The alternative (retry-and-edit-message loop at 11:00) adds complexity for marginal gain. Not worth it — just send later.
+
+If you strongly prefer 09:00 for non-TVE content freshness, a simple compromise: keep 09:00 for the main update, add a second lightweight job at ~11:00 that only re-sends if TVE labels were absent in the first send. But honestly, 11:00 is cleaner.
+
+## Test Coverage
+
+1629 tests green (verified locally). +11 new tests covering:
+- Same-day fallback: positive, negative (wrong TLAs), cross-day rejection, La 1 preference
+- Cache: all-fail retry, empty-result short TTL, non-empty full TTL
+- Integration: 09:00 scenario end-to-end in test_ai.py
+
+Good coverage. The former `test_outside_window_returns_none` was correctly updated to `test_outside_window_matching_tlas_uses_same_day_fallback` (behaviour changed by design), and a new `test_outside_window_wrong_tlas_returns_none` preserves the negative case.
+
+---
+
+## VERDICT: APPROVE
+
+No required changes. Code is correct, safe, well-tested. Recommendation to move daily update to 11:00 is advice for the owner — not a merge gate.
+
+---
+
+# Gate Verdict: TVE 09:00 Daily-Update Fix
+
+**Date:** 2026-06-26  
+**Reviewer:** Buffon (Tester / QA)  
+**Author:** Kanté (Backend Developer)  
+**Branch/change:** TVE failure-caching bug fix + same-day TLA-pair fallback  
+**Baseline:** 1618 → Kanté claimed 1627 → Buffon final: **1629 passed, 5 warnings**
+
+---
+
+## VERDICT: PASS WITH ADDED TESTS (+2)
+
+All hazards resolved. No failures. Two missing edge-case tests added by Buffon.
+
+---
+
+## STEP 1 — Suite run
+
+```
+1629 passed, 5 warnings in 75s
+```
+
+Kanté's claimed count **1627** confirmed ✅. Buffon added +2 tests → 1629.
+
+---
+
+## STEP 2 — New test audit (Kanté's +9)
+
+### test_tve.py (+8 net: -1 old, +9 new)
+
+The removed test `test_outside_window_returns_none` previously asserted that a broadcast 25 min off with matching TLAs returned None. That assertion is now wrong (same-day fallback catches it). Correct replacement with a two-test split. ✅
+
+| Test | Meaningful? | Would fail without fix? |
+|------|-------------|------------------------|
+| `test_failed_fetch_not_cached_allows_retry` | ✅ | ✅ — Without fix: second call returns cached `[]`, `call_count` stays 2 not 4 |
+| `test_empty_broadcasts_use_short_ttl` | ✅ | ✅ — Without fix: no `_ttl` key or wrong value (6h) |
+| `test_non_empty_broadcasts_use_full_ttl` | ✅ | ✅ — Without fix: wrong `_ttl` value |
+| `test_same_day_tla_fallback_beyond_20min_window` | ✅ | ✅ — Without fallback: returns None |
+| `test_outside_window_matching_tlas_uses_same_day_fallback` | ✅ | ✅ — Without fallback: returns None |
+| `test_same_day_tla_fallback_wrong_tlas_no_match` | ✅ | N/A (negative test — guards against over-matching) |
+| `test_same_day_tla_fallback_different_utc_date_no_match` | ✅ | N/A (negative test — guards against over-matching) |
+| `test_same_day_tla_fallback_prefers_la1` | ✅ | ✅ — Without La-1-wins logic: random channel returned |
+
+**RC1 retry specifically:** `call_count == 4` (2 channels × 2 invocations) directly verifies the second call refetches — not just the return value. ✅
+
+**TTL selection:** Both `test_empty_broadcasts_use_short_ttl` (`_ttl == 1800`) and `test_non_empty_broadcasts_use_full_ttl` (`_ttl == 21600`) assert the actual cache dict value. ✅
+
+### test_ai.py (+1)
+
+`test_tve_label_via_same_day_fallback_simulates_0900_scenario`:
+- Uses the **real** `tve_channel_for` (not mocked).
+- `load_tve_broadcasts` mocked to return a `TveBroadcast` with `kickoff_utc` 45 min before match kickoff.
+- Full `generate_daily_update` pipeline executes.
+- Asserts `"📺 La 1" in result`.
+- This is a genuine end-to-end RC2 regression test. ✅
+
+### conftest.py
+
+`reset_tve_cache` now pops `_ttl` before AND after each test. Confirmed: even if `_ttl` were to leak (it can't, since fixture runs), `data` is also reset to None so no false cache hit is possible. TVE tests run clean in isolation (61 passed, 1.68s). ✅
+
+---
+
+## STEP 3 — Edge cases
+
+### Found missing — tests added by Buffon
+
+#### 1. Cross-match prevention: two different games on same day
+
+**Gap:** All Kanté same-day tests use a *single* broadcast in the list. No test verified that when there are two broadcasts on the same UTC day for two different matches, each match correctly claims its own broadcast and not the other's.
+
+**Added:** `TestTveChannelFor.test_same_day_tla_fallback_no_cross_match_two_simultaneous_games`
+
+```python
+match_arg_aut = _make_match("ARG", "AUT", "2026-06-22T19:00:00Z")
+match_bra_ger = _make_match("BRA", "GER", "2026-06-22T19:00:00Z")
+broadcasts = [
+    _bcast(_dt("2026-06-22T17:30:00Z"), "ARG", "AUT", "La 1"),
+    _bcast(_dt("2026-06-22T17:30:00Z"), "BRA", "GER", "Teledeporte"),
+]
+assert tve_channel_for(match_arg_aut, broadcasts) == "La 1"
+assert tve_channel_for(match_bra_ger, broadcasts) == "Teledeporte"
+```
+
+This WOULD fail if the TLA-pair guard (`{b.home_tla, b.away_tla} == match_tlas`) were weakened or removed — both broadcasts would qualify for each match.
+
+#### 2. Partial fetch success (La 1 ok, Teledeporte None)
+
+**Gap:** `test_returns_parsed_broadcasts` has Teledeporte returning `{"items": []}` (empty schedule, fetch succeeded). No test had Teledeporte returning `None` (fetch failed). This is a distinct code path: `any_fetch_ok` is set by La 1 but Teledeporte's `None` is skipped without setting it to False.
+
+**Added:** `TestLoadTveBroadcasts.test_partial_fetch_la1_ok_teledeporte_none_cached_with_full_ttl`
+
+```python
+def side_effect(slug, **_):
+    if slug == "tv1": return {"items": [_ITEM_LA1_ARG_AUT]}
+    return None  # Teledeporte fails
+result = load_tve_broadcasts(ttl_seconds=21600)
+assert len(result) == 1
+assert tve_module._tve_cache["data"] is not None
+assert tve_module._tve_cache.get("_ttl") == 21600  # full TTL, not short
+```
+
+### Already covered
+
+| Edge case | Coverage |
+|-----------|----------|
+| `tve_enabled=False` short-circuit | `test_disabled_returns_empty_without_fetching` (existing) ✅ |
+| `_ttl` key lifecycle / fixture reset | conftest autouse fixture: pop before + after ✅ |
+| All fetches fail → no cache | `test_failed_fetch_not_cached_allows_retry` ✅ |
+| Wrong TLAs on same day | `test_same_day_tla_fallback_wrong_tlas_no_match` ✅ |
+| Different UTC date | `test_same_day_tla_fallback_different_utc_date_no_match` ✅ |
+
+---
+
+## Hazards / concerns
+
+**None blocking.** No source-code issues found. The two missing tests close the remaining coverage gaps.
+
+One cosmetic note: `_make_match` hard-codes `id=1`; when two Match objects are created in `test_same_day_tla_fallback_no_cross_match_two_simultaneous_games`, both have `id=1`. This does not affect `tve_channel_for` correctness (it only reads `utc_date`, `home_tla`, `away_tla`).
+
+---
+
+## Final test count
+
+**1629 passed, 5 warnings** (Kanté +9, Buffon +2 = net +11 from baseline 1618).
+
+---
+
 # Decision: Live goal notification bugs — root causes and fixes
 
 **Author:** Kanté (Backend Developer)  

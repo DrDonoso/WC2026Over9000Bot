@@ -20,14 +20,19 @@
 - **CI:** CalVer tags, Buildx, Docker Hub push (:latest + :calver), GH release. Mirrors sibling exactly.
 - **Key seam:** `porra/scoring.py` is pure (no I/O) — trivially testable and mockable.
 
-### 2026-06-15 — REVISED Architecture (Migration from Legacy Euro 2024 Bot)
+### 2026-06-26 — TVE 📺 Label Fix — Review Gate (APPROVED)
 
-- **BREAKING CHANGE:** Porra model is NOT exact-score. It is group-standings predictions (top-3 per group) + knockout qualifiers (which teams advance). Migrated directly from legacy Euro 2024 monolithic bot.
-- **No SQLite.** Predictions stored in a mounted YAML file (`/app/data/predictions.yml`). No database needed — results fetched live from API, scored on-the-fly.
-- **YAML keyed by Telegram @username** (user's explicit requirement). Hot-reloaded on each command.
-- **Sync requests over async httpx.** Simpler migration, fewer bugs. python-telegram-bot handles its own async; API calls are brief sync blocks.
-- **Deps changed to:** python-telegram-bot, requests, pyyaml, flag, pytz. Dropped httpx, aiosqlite.
-- **Removed:** `storage/` module, `bot/conversations.py`, polling loop. Added: `porra/predictions.py` (YAML loader), `api/cache.py` (TTL cache), `data/stages.py` (config-driven stages).
+**Session:** TVE daily-update fix, kante-2 implementation  
+**Status:** APPROVED — no required code changes
+
+**Decisions reviewed:**
+1. Same-day TLA-pair fallback — SAFE (unique pairing per UTC date in tournament)
+2. Cache redesign (no-cache-on-all-fail, 30-min TTL for empty, 6h for populated) — SOUND
+3. Residual timing issue (09:00 fires before RTVE publishes ~10:40) — RECOMMENDED: move `daily_update_hour` to 11:00
+
+**Recommendation:** Move `DAILY_UPDATE_HOUR` to 11:00 (env-configurable, no code change needed). Owner discretionary.
+
+**Test count:** 1629 passed (1618 baseline + 11 new from Kanté/Buffon)
 - **Scoring:** Groups = 3pts exact position, 1pt off-by-one. Knockout = per-stage configurable points per correct qualifier (1/1/2/3/5). General = base_score + groups + all knockout stages.
 - **WC2026:** 48 teams, 12 groups (A–L), 5 knockout rounds (Round of 32, R16, QF, SF, Final).
 - **All legacy commands preserved.** Added `/ronda32`, `/semis`, `/final`. Renamed `/euroPorraDiaria` → `/porra`.

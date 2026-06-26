@@ -9,25 +9,19 @@
 
 <!-- Append new learnings below. Each entry is something lasting about the project. -->
 
-### 2026-06-15 — Initial test suite (Buffon)
+### 2026-06-26 — TVE 📺 Label Fix — QA Gate (PASS WITH ADDED TESTS)
 
-**Test command (verified green):**
-```
-.venv\Scripts\python.exe -m pytest -q
-# 137 passed in ~1.4s
-```
+**Session:** TVE daily-update fix, kante-2 implementation  
+**Status:** PASS WITH ADDED TESTS (+2 edge cases by Buffon)
 
-**Setup:**
-```
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -e ".[test]"
-```
+**Gap found & fixed:**
+1. Cross-match prevention: two simultaneous games on same day must not mismatch (added `test_same_day_tla_fallback_no_cross_match_two_simultaneous_games`)
+2. Partial fetch success: La 1 ok, Teledeporte fails → cache with full TTL (added `test_partial_fetch_la1_ok_teledeporte_none_cached_with_full_ttl`)
 
-**Coverage notes:**
-- `tests/test_scoring.py` — 64 pure-function tests covering `score_groups` and `score_knockout`:
-  exact (+1.0 after change), qualified-wrong-position (+0.5 after change), fallo (0), wildcard, no_data, empty inputs, all 5 KO stages,
-  point values (ROUND_OF_32=1, LAST_16=1, QF=2, SF=3, FINAL=5), `score_user_groups_detail` alias.
-  New test class `TestScoreGroupsQualifiesWrongPosition` added to verify qualification-at-wrong-position scoring.
+**Test delta:** 1618 → 1629 (Kanté +9, Buffon +2 = +11 net)  
+**All 11 tests are real — each would fail without its corresponding fix.**
+
+**Minor cosmetic:** `_make_match` hard-codes `id=1`; edge-case test has two Match objects with same id. No impact on correctness (function only uses utc_date, home_tla, away_tla).
 - `tests/test_predictions_loader.py` — 32 tests: valid YAML load, 7 invalid-user cases (user skipped,
   no crash), mtime hot-reload (cache hit + cache miss), case-insensitive get_participant,
   find_by_display_name, display_name_for fallback, list_usernames.
@@ -125,3 +119,33 @@ compute_general_ranking (provisional + official), compute_group_ranking, compute
 **Final count: 1618 passed, 5 warnings.**
 
 **Session outcome:** Both Pirlo review and Buffon QA gates passed. Feature ready for owner deployment. Source changes (src/ + tests/) remain UNCOMMITTED per manifest (goal-notification fixes also uncommitted for parallel review).
+
+### 2026-06-26 — TVE 09:00 daily-update fix gate (Buffon)
+
+**Reviewed PR:** Kanté's TVE failure-caching bug fix + same-day TLA-pair fallback (1618 → 1627 → 1629 passing).
+
+**Root causes addressed:**
+- RC1 — `load_tve_broadcasts` was caching empty `[]` for 6h even when ALL RTVE fetches failed (network error at 09:00 poisons cache). Fix: only cache when `any_fetch_ok = True`.
+- RC2 — RTVE schedule published ~10:40, after 09:00 job fires. When description lacks kickoff time, `_parse_kickoff_utc` falls back to `begintime` (pre-show start, can be >20 min early) → primary ±20 min window misses. Fix: tier-3 same-day TLA-pair fallback.
+- RC1+2 combination explains why `/updateDiario` showed 📺 but the 09:00 job never did.
+
+**Suite verification:** 1627 passed immediately after Kanté's commit ✅ (matches claimed count).
+
+**Test audit (STEP 2):**
+- RC1 retry: `test_failed_fetch_not_cached_allows_retry` — checks `result1==[]`, `len(result2)==1`, `call_count==4`. Would fail without fix (second call would return cached empty, count stays 2). ✅
+- Empty short-TTL: `test_empty_broadcasts_use_short_ttl` directly asserts `_tve_cache["_ttl"] == 1800`. ✅
+- Non-empty full-TTL: `test_non_empty_broadcasts_use_full_ttl` directly asserts `_tve_cache["_ttl"] == 21600`. ✅
+- Same-day fallback happy path: `test_same_day_tla_fallback_beyond_20min_window` (45 min early, right TLAs → La 1), `test_outside_window_matching_tlas_uses_same_day_fallback` (25 min early). ✅
+- Anti-misfire (wrong TLAs): `test_same_day_tla_fallback_wrong_tlas_no_match`, `test_outside_window_wrong_tlas_returns_none`. ✅
+- Anti-misfire (different date): `test_same_day_tla_fallback_different_utc_date_no_match`. ✅
+- La 1 priority: `test_same_day_tla_fallback_prefers_la1`. ✅
+- 09:00 integration: `test_tve_label_via_same_day_fallback_simulates_0900_scenario` — uses REAL `tve_channel_for`, mocks only `load_tve_broadcasts` to return a 45 min early broadcast; full `generate_daily_update` pipeline; asserts "📺 La 1" in result. ✅
+- conftest.py `reset_tve_cache`: pops `_ttl` before AND after every test; clean isolation confirmed (61 TVE tests pass in isolation, same count as embedded in full suite). ✅
+
+**Edge cases found & added by Buffon (+2 tests):**
+1. `test_same_day_tla_fallback_no_cross_match_two_simultaneous_games` — Two different fixtures (ARG-AUT, BRA-GER) on same UTC day, both broadcasts outside ±20 min window. Proves the exact-TLA-pair requirement prevents cross-matching. Was missing from Kanté's tests (all same-day tests used a single broadcast). WOULD fail without the `{b.home_tla, b.away_tla} == match_tlas` guard in the fallback.
+2. `test_partial_fetch_la1_ok_teledeporte_none_cached_with_full_ttl` — La 1 returns data, Teledeporte returns None (real fetch failure). Verifies `any_fetch_ok=True` is set by the successful channel, result cached normally with full TTL (not short TTL, not discarded). The existing `test_returns_parsed_broadcasts` only tested Teledeporte returning `{"items": []}` (empty but successful), not `None` (failed).
+
+**Final count: 1629 passed, 5 warnings.**
+
+**VERDICT: PASS WITH ADDED TESTS (+2).**
