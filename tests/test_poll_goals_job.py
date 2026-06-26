@@ -79,12 +79,12 @@ from worldcup_bot.__main__ import poll_goals_job
 
 class TestSeedingBehaviour:
     @pytest.mark.asyncio
-    async def test_seed_on_first_sight_no_sends(self, tmp_path):
-        """First time a match is seen: store state, send nothing."""
+    async def test_seed_at_zero_score_no_sends(self, tmp_path):
+        """First time a match is seen at 0-0: store state, send nothing."""
         settings = _make_settings(tmp_path)
         ctx = _make_context(settings, _no_enrichment_scanner())
 
-        match = _make_match(1, "IN_PLAY", home_score=1, away_score=0)
+        match = _make_match(1, "IN_PLAY", home_score=0, away_score=0)
 
         with (
             patch("worldcup_bot.__main__.make_client") as mock_client,
@@ -94,14 +94,139 @@ class TestSeedingBehaviour:
             mock_client.return_value.get_all_matches.return_value = [match]
             await poll_goals_job(ctx)
 
-        # No notification sent for first-seen match
         ctx.bot.send_message.assert_not_called()
-        # State persisted with seeded score
         mock_save.assert_called_once()
         saved = mock_save.call_args[0][1]
         assert "1" in saved
-        assert saved["1"]["home"] == 1
+        assert saved["1"]["home"] == 0
         assert saved["1"]["away"] == 0
+
+    @pytest.mark.asyncio
+    async def test_seed_nonzero_first_sight_announces_catchup_goals(self, tmp_path):
+        """API first reports IN_PLAY at 2-0 (status-flip delay) → ONE neutral catch-up notification."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx.bot_data["clip_store"] = {}
+
+        fake_sent = MagicMock()
+        fake_sent.message_id = 99
+        ctx.bot.send_message = AsyncMock(return_value=fake_sent)
+
+        match = _make_match(1, "IN_PLAY", home_score=2, away_score=0)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        # ONE catch-up notification (not 2 per-goal messages)
+        assert ctx.bot.send_message.await_count == 1
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "⚠️" in text
+        assert "perdí" in text
+        assert "2" in text  # goals_missed count
+
+    @pytest.mark.asyncio
+    async def test_seed_nonzero_clips_store_entries_created(self, tmp_path):
+        """Catch-up for first-seen non-zero score creates ONE clip-store entry."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx.bot_data["clip_store"] = {}
+
+        fake_sent = MagicMock()
+        fake_sent.message_id = 77
+        ctx.bot.send_message = AsyncMock(return_value=fake_sent)
+
+        match = _make_match(1, "IN_PLAY", home_score=1, away_score=1)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        # ONE catchup → ONE clip-store entry (keyed by {id}:catchup:{H}-{A})
+        assert len(ctx.bot_data["clip_store"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_restart_mid_match_missed_goal_announced(self, tmp_path):
+        """Bot restarted with live_scores at 1-1, API returns 2-1 → neutral catch-up announced."""
+        settings = _make_settings(tmp_path)
+        # seen_api is empty (restart reset in-memory seen)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={})
+        ctx.bot_data["clip_store"] = {}
+
+        fake_sent = MagicMock()
+        fake_sent.message_id = 55
+        ctx.bot.send_message = AsyncMock(return_value=fake_sent)
+
+        # live_scores.json had 1-1 from before crash
+        stored_state = {"1": {"home": 1, "away": 1, "status": "IN_PLAY"}}
+        # API now reports 2-1
+        match = _make_match(1, "IN_PLAY", home_score=2, away_score=1)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        # The 1-1 → 2-1 goal must be announced even though seen was reset
+        ctx.bot.send_message.assert_called_once()
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        # Must be the neutral catch-up format, not a per-goal attribution
+        assert "⚠️" in text
+        assert "perdí" in text
+        assert "⚽" not in text  # no per-goal goal emoji
+
+    @pytest.mark.asyncio
+    async def test_catchup_message_no_scorer_attribution_no_keyboard(self, tmp_path):
+        """Neutral catch-up: message must not attribute scorer/team; initial send has no keyboard."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx.bot_data["clip_store"] = {}
+
+        fake_sent = MagicMock()
+        fake_sent.message_id = 11
+        ctx.bot.send_message = AsyncMock(return_value=fake_sent)
+
+        match = _make_match(
+            42, "IN_PLAY",
+            home_name="Ecuador", away_name="Germany",
+            home_tla="ECU", away_tla="GER",
+            home_score=2, away_score=1,
+        )
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_called_once()
+        call_kwargs = ctx.bot.send_message.call_args.kwargs
+        text = call_kwargs["text"]
+
+        # Must NOT attribute goals to a team (no "¡GOOOL!" style content)
+        assert "GOOOL" not in text
+        assert "⚽" not in text
+        # Must NOT carry a keyboard on the initial send
+        assert "reply_markup" not in call_kwargs
+        # Must show the current score
+        assert "2-1" in text or ("2" in text and "1" in text)
 
     @pytest.mark.asyncio
     async def test_no_relevant_matches_returns_early(self, tmp_path):

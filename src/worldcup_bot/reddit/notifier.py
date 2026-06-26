@@ -161,6 +161,46 @@ def format_new_goal_message(
     return "\n".join(lines)
 
 
+def format_catchup_message(
+    home_name: str,
+    away_name: str,
+    home_score: int,
+    away_score: int,
+    home_tla: str = "",
+    away_tla: str = "",
+    goals_missed: int = 1,
+) -> str:
+    """Build the HTML catch-up notification for goals missed due to status-flip delay or restart.
+
+    Never attributes a goal to a specific team or shows a fabricated intermediate score.
+
+    Format::
+
+        ⚠️ Me perdí 2 goles
+        🇪🇨 Ecuador 1-1 Germany 🇩🇪
+    """
+    from worldcup_bot.bot.formatters import team_flag  # avoid circular import
+
+    home_flag = team_flag(home_tla) if home_tla else ""
+    away_flag = team_flag(away_tla) if away_tla else ""
+
+    home_esc = html.escape(home_name, quote=False)
+    away_esc = html.escape(away_name, quote=False)
+
+    gol_word = "gol" if goals_missed == 1 else "goles"
+    line1 = f"⚠️ Me perdí {goals_missed} {gol_word}"
+
+    score_parts = []
+    if home_flag:
+        score_parts.append(home_flag)
+    score_parts.append(f"{home_esc} {home_score}-{away_score} {away_esc}")
+    if away_flag:
+        score_parts.append(away_flag)
+    line2 = " ".join(score_parts)
+
+    return f"{line1}\n{line2}"
+
+
 def format_disallowed_message(
     home_name: str,
     away_name: str,

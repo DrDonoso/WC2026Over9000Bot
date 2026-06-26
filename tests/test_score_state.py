@@ -174,8 +174,8 @@ class TestReconcile:
         assert new_seen == _s(2, 2)
         assert new_ann == _s(2, 2)
 
-    def test_first_seen_with_announced_seeds_seen_keeps_announced(self):
-        """First-seen for this source while announced already exists → no deltas, announced unchanged."""
+    def test_first_seen_with_announced_same_score_no_delta(self):
+        """Restart: source first tick equals announced → no delta, announced unchanged."""
         deltas, new_seen, new_ann = reconcile(None, _s(3, 2), 3, 2)
         assert deltas == []
         assert new_seen == _s(3, 2)
@@ -187,6 +187,75 @@ class TestReconcile:
         assert deltas == []
         assert new_seen == _s(3, 2)
         assert new_ann == _s(4, 2)  # announced unchanged
+
+    # ── restart: missed goals ─────────────────────────────────────────────────
+
+    def test_restart_new_ahead_of_announced_emits_home_delta(self):
+        """Restart: source re-seeds with score ahead of announced → ONE catchup delta."""
+        deltas, new_seen, new_ann = reconcile(None, _s(1, 1), 2, 1)
+        assert len(deltas) == 1
+        assert deltas[0].kind == "catchup"
+        assert deltas[0].goals_missed == 1
+        assert deltas[0].new_home == 2
+        assert deltas[0].new_away == 1
+        assert new_seen == _s(2, 1)
+        assert new_ann == _s(2, 1)
+
+    def test_restart_new_ahead_multiple_goals_emits_all(self):
+        """Restart: score jumped 0-0 → 2-1 while down → ONE catchup delta with goals_missed=3."""
+        deltas, new_seen, new_ann = reconcile(None, _s(0, 0), 2, 1)
+        assert len(deltas) == 1
+        assert deltas[0].kind == "catchup"
+        assert deltas[0].goals_missed == 3
+        assert deltas[0].new_home == 2
+        assert deltas[0].new_away == 1
+        assert new_seen == _s(2, 1)
+        assert new_ann == _s(2, 1)
+
+    def test_restart_new_equal_announced_no_delta(self):
+        """Restart at same score as announced → no delta, no double-announce."""
+        deltas, new_seen, new_ann = reconcile(None, _s(2, 1), 2, 1)
+        assert deltas == []
+        assert new_seen == _s(2, 1)
+        assert new_ann == _s(2, 1)
+
+    def test_restart_new_below_announced_no_delta_keeps_announced(self):
+        """Restart: source lags behind announced → no delta, announced preserved."""
+        deltas, new_seen, new_ann = reconcile(None, _s(4, 2), 3, 2)
+        assert deltas == []
+        assert new_seen == _s(3, 2)
+        assert new_ann == _s(4, 2)
+
+    def test_restart_away_goal_missed_emits_away_delta(self):
+        """Restart: away goal missed → ONE catchup delta."""
+        deltas, new_seen, new_ann = reconcile(None, _s(1, 0), 1, 1)
+        assert len(deltas) == 1
+        assert deltas[0].kind == "catchup"
+        assert deltas[0].goals_missed == 1
+        assert new_ann == _s(1, 1)
+
+    def test_restart_catchup_delta_has_no_scoring_team(self):
+        """Catchup delta from restart path has scoring_team='' — no team attribution."""
+        deltas, _, _ = reconcile(None, _s(0, 0), 1, 0)
+        assert len(deltas) == 1
+        assert deltas[0].kind == "catchup"
+        assert deltas[0].scoring_team == ""
+        assert deltas[0].side == ""
+
+    def test_restart_catchup_single_delta_no_token_collision(self):
+        """Restart catch-up emits ONE delta regardless of how many goals were missed.
+
+        The old multi-delta design caused token collisions for same-team goals.
+        With a single catchup delta (kind='catchup') there is exactly one clip-store
+        slot keyed by '{match_id}:catchup:{H}-{A}' — no collision possible.
+        """
+        # 0-0 → 2-1 missed while down: must produce exactly 1 catchup delta
+        deltas, _, _ = reconcile(None, _s(0, 0), 2, 1)
+        assert len(deltas) == 1
+        assert deltas[0].kind == "catchup"
+        assert deltas[0].goals_missed == 3
+        assert deltas[0].new_home == 2
+        assert deltas[0].new_away == 1
 
     # ── no change ─────────────────────────────────────────────────────────────
 

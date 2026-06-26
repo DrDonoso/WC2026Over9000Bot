@@ -852,6 +852,25 @@ async def cmd_ver_gol_callback(
             clips_path = f"{settings.state_dir}/goal_clips.json"
             _cs_save_clips(clips_path, clip_store)
 
+            # Delete the local file now that Telegram has it cached via file_id.
+            # Future taps use the file_id fast path so the file is no longer needed.
+            # If file_id ever expires, the missing-file path handles it gracefully.
+            clip_path_str = entry.get("clip_path")
+            if clip_path_str:
+                try:
+                    _local = Path(clip_path_str)
+                    if _local.is_file():
+                        _local.unlink(missing_ok=True)
+                        log.info(
+                            "cmd_ver_gol_callback: deleted local clip %s (file_id cached)",
+                            _local,
+                        )
+                except Exception as _del_exc:
+                    log.warning(
+                        "cmd_ver_gol_callback: could not delete clip %s: %s",
+                        clip_path_str, _del_exc,
+                    )
+
     except Exception as exc:
         log.exception("cmd_ver_gol_callback: unexpected error: %s", exc)
         try:

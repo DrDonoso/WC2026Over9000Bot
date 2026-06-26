@@ -1019,8 +1019,9 @@ class TestScorerBackfill:
     @pytest.mark.asyncio
     async def test_backfill_no_keyboard_when_clip_not_ready(self, tmp_path):
         """When the clip-store entry is still 'searching' (no clip yet, no keyboard),
-        the backfill must NOT pass a keyboard — reply_markup should be None so we
-        don't add a stale/broken button before the clip is ready.
+        the backfill must NOT include reply_markup in the edit kwargs — omitting the key
+        entirely preserves any existing Telegram markup and avoids accidentally clearing it
+        with reply_markup=null.
         """
         from worldcup_bot.reddit.clip_store import goal_token, add_entry
 
@@ -1072,9 +1073,11 @@ class TestScorerBackfill:
         ctx.bot.edit_message_text.assert_called_once()
         edit_kwargs = ctx.bot.edit_message_text.call_args.kwargs
         assert edit_kwargs["message_id"] == 88
-        # reply_markup must be None — no clip yet, no keyboard to attach
-        assert edit_kwargs.get("reply_markup") is None, (
-            "Backfill must NOT add a keyboard when clip is not yet ready"
+        # reply_markup must be ABSENT (not passed at all) — passing None would send
+        # reply_markup=null to Telegram which removes any existing keyboard.
+        assert "reply_markup" not in edit_kwargs, (
+            "Backfill must NOT include reply_markup when clip is not yet ready "
+            "(omitting the key preserves existing Telegram markup)"
         )
 
 

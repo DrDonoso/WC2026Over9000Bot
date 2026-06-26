@@ -57,6 +57,7 @@ from worldcup_bot.porra.live import build_state, diff_live, load_live, render_po
 from worldcup_bot.reddit.notifier import (
     _is_silent_hour,
     build_goal_keyboard,
+    format_catchup_message,
     format_disallowed_message,
     format_new_goal_message,
 )
@@ -288,6 +289,65 @@ async def _notify_goal(
     log.debug("Clip-store entry created: token=%s key=%s", tok, token_key)
 
 
+async def _notify_catchup(
+    match,
+    new_home: int,
+    new_away: int,
+    goals_missed: int,
+    settings: Settings,
+    context: ContextTypes.DEFAULT_TYPE,
+    silent: bool,
+) -> None:
+    """Send a neutral catch-up notification for goals missed during status-flip delay or restart.
+
+    Sends ONE message that shows the current score and the number of missed goals,
+    without attributing any goal to a specific team or showing fabricated scorelines.
+    Registers a single clip-store entry keyed on the final score so the clip finder
+    can locate any recent goal from this match and attach a "Ver gol" button later.
+    """
+    text = format_catchup_message(
+        home_name=match.home_name,
+        away_name=match.away_name,
+        home_score=new_home,
+        away_score=new_away,
+        home_tla=match.home_tla,
+        away_tla=match.away_tla,
+        goals_missed=goals_missed,
+    )
+    sent = await context.bot.send_message(
+        chat_id=settings.telegram_group_id,
+        text=text,
+        parse_mode="HTML",
+        disable_notification=silent,
+    )
+    log.info(
+        "Catch-up notification sent: %s vs %s (%d-%d) missed=%d",
+        match.home_name, match.away_name, new_home, new_away, goals_missed,
+    )
+
+    clips_path = f"{settings.state_dir}/goal_clips.json"
+    clip_data: dict = context.bot_data.setdefault("clip_store", {})
+    token_key = f"{match.id}:catchup:{new_home}-{new_away}"
+    tok = _cs_goal_token(token_key)
+    _cs_add_entry(
+        clip_data,
+        token=tok,
+        chat_id=settings.telegram_group_id,
+        message_id=sent.message_id,
+        home_name=match.home_name,
+        away_name=match.away_name,
+        home_tla=match.home_tla,
+        away_tla=match.away_tla,
+        home_score=new_home,
+        away_score=new_away,
+        scoring_team="",
+        scorer=None,
+        minute=None,
+    )
+    save_clips(clips_path, clip_data)
+    log.debug("Clip-store catchup entry created: token=%s key=%s", tok, token_key)
+
+
 async def _backfill_scorer_in_clip_store(
     match,
     events: list,
@@ -348,24 +408,26 @@ async def _backfill_scorer_in_clip_store(
                 scorer=event.scorer,
                 minute=entry["minute"],
             )
-            # Re-attach the "Ver gol" keyboard when the clip is already ready;
-            # omitting reply_markup would clear it from the message.
-            keyboard = build_goal_keyboard(tok) if entry.get("status") == "ready" else None
+            # Re-attach the "Ver gol" keyboard when the clip is already ready.
+            # IMPORTANT: omit reply_markup entirely when not ready — passing None would
+            # send reply_markup=null to Telegram which removes any existing keyboard.
+            edit_kwargs: dict = {
+                "chat_id": entry["chat_id"],
+                "message_id": entry["message_id"],
+                "text": new_text,
+                "parse_mode": "HTML",
+            }
+            if entry.get("status") == "ready":
+                edit_kwargs["reply_markup"] = build_goal_keyboard(tok)
             try:
-                await context.bot.edit_message_text(
-                    chat_id=entry["chat_id"],
-                    message_id=entry["message_id"],
-                    text=new_text,
-                    parse_mode="HTML",
-                    reply_markup=keyboard,
-                )
+                await context.bot.edit_message_text(**edit_kwargs)
                 log.info(
                     "_backfill_scorer: edited message %d for %s vs %s (%d-%d) → scorer=%s%s",
                     entry["message_id"],
                     match.home_name, match.away_name,
                     entry["home_score"], entry["away_score"],
                     event.scorer,
-                    " (keyboard preserved)" if keyboard else "",
+                    " (keyboard preserved)" if entry.get("status") == "ready" else "",
                 )
             except Exception as exc:
                 log.warning(
@@ -399,6 +461,17 @@ async def _process_goal_delta(
     silent: bool,
 ) -> None:
     """Send a goal or disallowed notification for a single score-change delta."""
+    if delta.kind == "catchup":
+        await _notify_catchup(
+            match=match,
+            new_home=delta.new_home,
+            new_away=delta.new_away,
+            goals_missed=delta.goals_missed,
+            settings=settings,
+            context=context,
+            silent=silent,
+        )
+        return
     if delta.kind == "disallowed":
         text = format_disallowed_message(
             home_name=match.home_name,
@@ -529,7 +602,24 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         "status": match.status,
                     }
                     changed = True
-                    # reconcile rule 1 always returns [] for first-seen; nothing to send.
+                    # If the API first reported IN_PLAY/PAUSED with a non-zero score
+                    # (status-flip delay), earlier goals were never seen.  Emit ONE
+                    # neutral catch-up notification — we don't know the actual goal
+                    # sequence so we must not fabricate per-team attributions.
+                    if curr_home > 0 or curr_away > 0:
+                        log.info(
+                            "poll_goals_job: match %d first seen at %d-%d — "
+                            "emitting ONE catch-up notification for %d missed goal(s)",
+                            match.id, curr_home, curr_away, curr_home + curr_away,
+                        )
+                        deltas_to_process.append(GoalDelta(
+                            side="",
+                            scoring_team="",
+                            new_home=curr_home,
+                            new_away=curr_away,
+                            kind="catchup",
+                            goals_missed=curr_home + curr_away,
+                        ))
 
                 elif deltas:
                     for delta in deltas:
@@ -950,6 +1040,12 @@ async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         persistent_path.unlink()
                     shutil.move(str(send_path), str(persistent_path))
 
+                    # Mark ready BEFORE the Telegram edit so that any concurrent
+                    # _backfill_scorer_in_clip_store call sees status="ready" and
+                    # preserves the keyboard when editing the message text.
+                    entry["status"] = "ready"
+                    entry["clip_path"] = str(persistent_path)
+
                     # Edit the original goal message to add the 'Ver gol' keyboard
                     try:
                         await context.bot.edit_message_reply_markup(
@@ -964,8 +1060,6 @@ async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                             edit_exc,
                         )
 
-                    entry["status"] = "ready"
-                    entry["clip_path"] = str(persistent_path)
                     log.info(
                         "poll_goal_clips_job: clip ready for token %s → %s",
                         token,

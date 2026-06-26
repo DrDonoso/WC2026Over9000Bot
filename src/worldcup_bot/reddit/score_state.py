@@ -26,11 +26,12 @@ log = logging.getLogger(__name__)
 class GoalDelta:
     """Describes a single score-change event for one side of a match."""
 
-    side: str           # "home" or "away"
-    scoring_team: str   # team name for this side
+    side: str           # "home", "away", or "" (catchup)
+    scoring_team: str   # team name for this side; "" for catchup
     new_home: int       # current home score after the change
     new_away: int       # current away score after the change
-    kind: str           # "goal" (score increase) or "disallowed" (score decrease)
+    kind: str           # "goal", "disallowed", or "catchup"
+    goals_missed: int = 0  # number of goals missed (catchup only)
 
 
 def load_scores(path: str) -> dict:
@@ -156,8 +157,14 @@ def reconcile(
 
     Rules
     -----
-    1. First-seen (seen is None): seed this source's baseline to new; if announced is
-       not yet set, also seed it; announce NOTHING.
+    1. First-seen (seen is None):
+       - announced is None (match truly first-seen by any source): seed both baselines
+         to new, announce NOTHING.
+       - announced is not None (restart — per-source seen was reset, announced persisted):
+         if new > announced, goals were scored while the bot was down — emit ONE neutral
+         catch-up GoalDelta(kind="catchup", goals_missed=N) so users are informed without
+         fabricating per-goal attributions.  If new <= announced (source lagging or
+         unchanged), announce NOTHING and keep announced.
     2. No change (new == seen): nothing to do.
     3. Source changed and new is AHEAD of announced: emit goal deltas for each extra
        goal (home then away), set new_announced = new.
@@ -173,10 +180,28 @@ def reconcile(
     """
     new = {"home": new_home, "away": new_away}
 
-    # Step 1: first-seen for this source — seed, announce nothing.
+    # Step 1: first-seen for this source.
     if seen is None:
-        ann = announced if announced is not None else new
-        return ([], new, ann)
+        if announced is None:
+            # Truly first-seen for this match: seed both baselines, announce nothing.
+            return ([], new, new)
+        # Restart case: per-source in-memory seen was reset but announced is persisted.
+        # If new is ahead of announced, goals were scored during downtime — emit ONE
+        # neutral catch-up notification instead of N fabricated per-goal deltas.
+        if _ahead(new, announced):
+            home_diff = new_home - announced["home"]
+            away_diff = new_away - announced["away"]
+            catchup = GoalDelta(
+                side="",
+                scoring_team="",
+                new_home=new_home,
+                new_away=new_away,
+                kind="catchup",
+                goals_missed=home_diff + away_diff,
+            )
+            return ([catchup], new, new)
+        # new <= announced: source is lagging or at the same level — no delta.
+        return ([], new, announced)
 
     # Step 2: source didn't change — nothing to do.
     if new == seen:

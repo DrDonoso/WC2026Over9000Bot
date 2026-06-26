@@ -1384,10 +1384,159 @@ class TestCmdVerGolCallback:
         assert "❌" in text
         context.bot.send_video.assert_not_called()
 
+    # ── delete after send ─────────────────────────────────────────────────────
 
-# ══════════════════════════════════════════════════════════════════════════════
-# cmd_simula_gol
-# ══════════════════════════════════════════════════════════════════════════════
+    async def test_clip_deleted_from_disk_after_successful_send(
+        self, fake_settings, tmp_path
+    ):
+        """After a fresh send, the local clip file is deleted once file_id is saved."""
+        token = "deltok1234"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"real data")
+        entry = _sample_clip_entry(status="ready", clip_path=str(clip_file))
+        update = _make_vergol_update(token)
+        context = _make_vergol_context(fake_settings, token, entry)
+
+        fake_sent = MagicMock()
+        fake_sent.video = MagicMock()
+        fake_sent.video.file_id = "FID_SAVED"
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
+
+        with (
+            patch("worldcup_bot.bot.handlers.probe_video", new=AsyncMock(return_value={})),
+            patch("worldcup_bot.bot.handlers._cs_save_clips"),
+        ):
+            await cmd_ver_gol_callback(update, context)
+
+        assert not clip_file.exists(), "local clip file must be deleted after send"
+
+    async def test_clip_delete_not_called_when_send_video_raises(
+        self, fake_settings, tmp_path
+    ):
+        """If send_video raises, the local clip file must NOT be deleted."""
+        token = "nodelete"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"data")
+        entry = _sample_clip_entry(status="ready", clip_path=str(clip_file))
+        update = _make_vergol_update(token)
+        context = _make_vergol_context(fake_settings, token, entry)
+        context.bot.send_video = AsyncMock(side_effect=Exception("network error"))
+
+        with (
+            patch("worldcup_bot.bot.handlers.probe_video", new=AsyncMock(return_value={})),
+        ):
+            await cmd_ver_gol_callback(update, context)
+
+        assert clip_file.exists(), "clip file must not be deleted when send fails"
+
+    async def test_clip_delete_not_called_when_no_file_id_returned(
+        self, fake_settings, tmp_path
+    ):
+        """If send_video succeeds but returns no video attribute, file is not deleted."""
+        token = "nofid"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"data")
+        entry = _sample_clip_entry(status="ready", clip_path=str(clip_file))
+        update = _make_vergol_update(token)
+        context = _make_vergol_context(fake_settings, token, entry)
+
+        # send_video returns a message with no .video attribute
+        fake_sent = MagicMock()
+        fake_sent.video = None
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
+
+        with (
+            patch("worldcup_bot.bot.handlers.probe_video", new=AsyncMock(return_value={})),
+            patch("worldcup_bot.bot.handlers._cs_save_clips"),
+        ):
+            await cmd_ver_gol_callback(update, context)
+
+        assert clip_file.exists(), "clip file must not be deleted when no file_id available"
+
+    async def test_stale_file_id_with_deleted_file_sends_error_message(
+        self, fake_settings, tmp_path
+    ):
+        """Stale file_id raises AND the local file is already gone → graceful error, no crash.
+
+        This is the post-delete-after-send state: the clip was sent, the file was
+        deleted, and later Telegram evicts the file_id cache.  The handler must
+        recover gracefully with an error message rather than raising.
+        """
+        token = "stalefid_nofile"
+        # No actual file on disk — simulates post-delete-after-send state
+        entry = _sample_clip_entry(
+            status="ready",
+            clip_path=str(tmp_path / f"{token}.mp4"),
+            file_id="STALE_AND_GONE",
+        )
+        update = _make_vergol_update(token)
+        context = _make_vergol_context(fake_settings, token, entry)
+
+        # Stale file_id fails; no file to fall back to
+        context.bot.send_video = AsyncMock(side_effect=Exception("Bad file id"))
+
+        await cmd_ver_gol_callback(update, context)
+
+        # Must send one error message and never a video
+        context.bot.send_message.assert_called_once()
+        text = context.bot.send_message.call_args[1]["text"]
+        assert "❌" in text
+        context.bot.send_video.assert_called_once()  # one failed stale attempt
+
+    async def test_clip_delete_does_not_crash_if_file_already_gone(
+        self, fake_settings, tmp_path
+    ):
+        """If the clip file is already gone when delete runs, no exception is raised."""
+        token = "alreadygone"
+        # clip_path points to a non-existent file
+        entry = _sample_clip_entry(
+            status="ready", clip_path=str(tmp_path / "gone.mp4")
+        )
+        update = _make_vergol_update(token)
+        context = _make_vergol_context(fake_settings, token, entry)
+
+        fake_sent = MagicMock()
+        fake_sent.video = MagicMock()
+        fake_sent.video.file_id = "FID2"
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
+
+        with (
+            patch("worldcup_bot.bot.handlers.probe_video", new=AsyncMock(return_value={})),
+            patch("worldcup_bot.bot.handlers._cs_save_clips"),
+        ):
+            await cmd_ver_gol_callback(update, context)  # must not raise
+
+    async def test_file_id_cached_before_delete(self, fake_settings, tmp_path):
+        """file_id is persisted to disk before the local file is deleted."""
+        token = "ordercheck"
+        clip_file = tmp_path / f"{token}.mp4"
+        clip_file.write_bytes(b"data")
+        entry = _sample_clip_entry(status="ready", clip_path=str(clip_file))
+        update = _make_vergol_update(token)
+        context = _make_vergol_context(fake_settings, token, entry)
+
+        save_called_before_delete: list[bool] = []
+
+        def _track_save(*args, **kwargs):
+            # When save is called, check if file still exists
+            save_called_before_delete.append(clip_file.exists())
+
+        fake_sent = MagicMock()
+        fake_sent.video = MagicMock()
+        fake_sent.video.file_id = "FID3"
+        context.bot.send_video = AsyncMock(return_value=fake_sent)
+
+        with (
+            patch("worldcup_bot.bot.handlers.probe_video", new=AsyncMock(return_value={})),
+            patch("worldcup_bot.bot.handlers._cs_save_clips", side_effect=_track_save),
+        ):
+            await cmd_ver_gol_callback(update, context)
+
+        # Save was called while the file still existed (delete happens after save)
+        assert save_called_before_delete == [True]
+
+
+
 
 
 def _no_pick() -> AsyncMock:

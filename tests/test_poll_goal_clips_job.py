@@ -400,3 +400,83 @@ class TestPersistence:
 
         # The dict in bot_data IS the clip_data dict (mutated in-place)
         assert ctx.bot_data["clip_store"][token]["attempts"] == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Keyboard race-condition fix (Fix B1)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestKeyboardRaceConditionFix:
+    @pytest.mark.asyncio
+    async def test_status_set_ready_before_edit_message_called(self, tmp_path):
+        """entry['status'] must be 'ready' BEFORE edit_message_reply_markup is awaited.
+
+        Ensures that any concurrent _backfill_scorer_in_clip_store call that runs
+        during the network round-trip sees status='ready' and preserves the keyboard.
+        """
+        settings = _make_settings(tmp_path)
+        token = "racetok1234"
+        entry = _searching_entry()
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+
+        status_at_edit_time: list[str] = []
+
+        async def _capture_status_then_edit(**kwargs):
+            # Record what status was when edit was called
+            status_at_edit_time.append(entry.get("status", "?"))
+
+        ctx.bot.edit_message_reply_markup = AsyncMock(side_effect=_capture_status_then_edit)
+
+        fake_video = tmp_path / "clip.mp4"
+        fake_video.write_bytes(b"data")
+        fake_downloader = MagicMock()
+        fake_downloader.download = AsyncMock(return_value=fake_video)
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value="https://x.com/v"),
+            patch("worldcup_bot.__main__.MediaDownloader", return_value=fake_downloader),
+            patch("worldcup_bot.__main__.compress_if_needed", new=AsyncMock(return_value=fake_video)),
+            patch("worldcup_bot.__main__.shutil.move"),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        assert status_at_edit_time == ["ready"], (
+            f"expected status='ready' when edit was called, got {status_at_edit_time}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_clip_path_set_before_edit_message_called(self, tmp_path):
+        """entry['clip_path'] is set before edit_message_reply_markup so the entry is complete."""
+        settings = _make_settings(tmp_path)
+        token = "racetok5678"
+        entry = _searching_entry()
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+
+        clip_path_at_edit: list = []
+
+        async def _capture(**kwargs):
+            clip_path_at_edit.append(entry.get("clip_path"))
+
+        ctx.bot.edit_message_reply_markup = AsyncMock(side_effect=_capture)
+
+        fake_video = tmp_path / "clip.mp4"
+        fake_video.write_bytes(b"data")
+        fake_downloader = MagicMock()
+        fake_downloader.download = AsyncMock(return_value=fake_video)
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value="https://x.com/v"),
+            patch("worldcup_bot.__main__.MediaDownloader", return_value=fake_downloader),
+            patch("worldcup_bot.__main__.compress_if_needed", new=AsyncMock(return_value=fake_video)),
+            patch("worldcup_bot.__main__.shutil.move"),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        assert clip_path_at_edit[0] is not None, "clip_path must be set before keyboard edit"
