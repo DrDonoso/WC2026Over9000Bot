@@ -283,10 +283,20 @@ class TestTveChannelFor:
         broadcasts = [_bcast(_dt("2026-06-22T17:00:00Z"), "ESP", "FRA", "La 1")]
         assert tve_channel_for(match, broadcasts) is None
 
-    def test_outside_window_returns_none(self):
+    def test_outside_window_matching_tlas_uses_same_day_fallback(self):
+        """Broadcast >20 min off but matching TLAs on same UTC day matches via same-day fallback.
+
+        This is the RC2 scenario: RTVE begintime is the pre-match show start, which
+        can be more than 20 min before the actual kickoff when the description lacks (HH:MM).
+        """
         match = _make_match("ARG", "AUT", "2026-06-22T17:00:00Z")
-        # Broadcast is 25 min off — outside ±20 min window
         broadcasts = [_bcast(_dt("2026-06-22T17:25:00Z"), "ARG", "AUT", "La 1")]
+        assert tve_channel_for(match, broadcasts) == "La 1"
+
+    def test_outside_window_wrong_tlas_returns_none(self):
+        """Broadcast outside ±20 min window with wrong TLAs returns None (no fallback)."""
+        match = _make_match("ARG", "AUT", "2026-06-22T17:00:00Z")
+        broadcasts = [_bcast(_dt("2026-06-22T17:25:00Z"), "ESP", "FRA", "La 1")]
         assert tve_channel_for(match, broadcasts) is None
 
     def test_both_channels_returns_la1(self):
@@ -327,6 +337,50 @@ class TestTveChannelFor:
         match = _make_match("AUT", "ARG", "2026-06-22T17:00:00Z")
         broadcasts = [_bcast(_dt("2026-06-22T17:00:00Z"), "ARG", "AUT", "La 1")]
         assert tve_channel_for(match, broadcasts) == "La 1"
+
+    def test_same_day_tla_fallback_beyond_20min_window(self):
+        """Fallback: broadcast 45 min before kickoff still matches via same-day + TLA."""
+        match = _make_match("ARG", "AUT", "2026-06-22T19:00:00Z")
+        # RTVE description not yet updated → begintime used → 45 min before kickoff
+        broadcasts = [_bcast(_dt("2026-06-22T18:15:00Z"), "ARG", "AUT", "La 1")]
+        assert tve_channel_for(match, broadcasts) == "La 1"
+
+    def test_same_day_tla_fallback_wrong_tlas_no_match(self):
+        """Same-day fallback does NOT fire when TLA pair differs."""
+        match = _make_match("ARG", "AUT", "2026-06-22T19:00:00Z")
+        broadcasts = [_bcast(_dt("2026-06-22T17:00:00Z"), "ESP", "FRA", "La 1")]
+        assert tve_channel_for(match, broadcasts) is None
+
+    def test_same_day_tla_fallback_different_utc_date_no_match(self):
+        """Same-day fallback requires matching UTC date — different days don't match."""
+        # Match on June 22 UTC; broadcast on June 21 UTC (same TLAs, different day)
+        match = _make_match("ARG", "AUT", "2026-06-22T01:00:00Z")
+        broadcasts = [_bcast(_dt("2026-06-21T23:30:00Z"), "ARG", "AUT", "La 1")]
+        assert tve_channel_for(match, broadcasts) is None
+
+    def test_same_day_tla_fallback_prefers_la1(self):
+        """Same-day fallback: when both channels qualify, La 1 wins."""
+        match = _make_match("ARG", "AUT", "2026-06-22T19:00:00Z")
+        broadcasts = [
+            _bcast(_dt("2026-06-22T17:00:00Z"), "ARG", "AUT", "Teledeporte"),
+            _bcast(_dt("2026-06-22T17:05:00Z"), "ARG", "AUT", "La 1"),
+        ]
+        assert tve_channel_for(match, broadcasts) == "La 1"
+
+    def test_same_day_tla_fallback_no_cross_match_two_simultaneous_games(self):
+        """Two different fixtures on same day: exact TLA-pair prevents cross-matching.
+
+        Broadcast for ARG-AUT must not attach to BRA-GER and vice versa, even when
+        both broadcasts are on the same UTC day and outside the ±20 min window.
+        """
+        match_arg_aut = _make_match("ARG", "AUT", "2026-06-22T19:00:00Z")
+        match_bra_ger = _make_match("BRA", "GER", "2026-06-22T19:00:00Z")
+        broadcasts = [
+            _bcast(_dt("2026-06-22T17:30:00Z"), "ARG", "AUT", "La 1"),
+            _bcast(_dt("2026-06-22T17:30:00Z"), "BRA", "GER", "Teledeporte"),
+        ]
+        assert tve_channel_for(match_arg_aut, broadcasts) == "La 1"
+        assert tve_channel_for(match_bra_ger, broadcasts) == "Teledeporte"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -384,6 +438,70 @@ class TestLoadTveBroadcasts:
             result = load_tve_broadcasts()
         assert len(result) == 1
         assert result[0].home_tla == "ARG"
+
+    def test_failed_fetch_not_cached_allows_retry(self):
+        """All-None fetch must NOT cache so the very next call retries."""
+        call_count = 0
+
+        def side_effect(slug, **_):
+            nonlocal call_count
+            call_count += 1
+            # First two calls (first load_tve_broadcasts invocation) fail
+            if call_count <= 2:
+                return None
+            # Second invocation: tv1 has data, dep is empty
+            return {"items": [_ITEM_LA1_ARG_AUT]} if slug == "tv1" else {"items": []}
+
+        with patch("worldcup_bot.tve.fetch_rtve_schedule", side_effect=side_effect):
+            result1 = load_tve_broadcasts()  # all-None → not cached
+            result2 = load_tve_broadcasts()  # fresh fetch → data returned
+
+        assert result1 == []
+        assert len(result2) == 1
+        assert call_count == 4  # 2 channels × 2 invocations
+
+    def test_empty_broadcasts_use_short_ttl(self):
+        """Successful fetches with no WC matches store _EMPTY_RESULT_TTL (30 min)."""
+        from worldcup_bot import tve as tve_module
+
+        with patch("worldcup_bot.tve.fetch_rtve_schedule", return_value={"items": []}):
+            load_tve_broadcasts(ttl_seconds=21600)
+
+        assert tve_module._tve_cache["data"] == []
+        assert tve_module._tve_cache.get("_ttl") == 1800  # 30 min, not 6 h
+
+    def test_non_empty_broadcasts_use_full_ttl(self):
+        """Successful fetches with WC matches store the full ttl_seconds."""
+        from worldcup_bot import tve as tve_module
+
+        with patch("worldcup_bot.tve.fetch_rtve_schedule") as mock_fetch:
+            mock_fetch.side_effect = (
+                lambda slug, **_: {"items": [_ITEM_LA1_ARG_AUT]} if slug == "tv1" else {"items": []}
+            )
+            load_tve_broadcasts(ttl_seconds=21600)
+
+        assert tve_module._tve_cache.get("_ttl") == 21600  # full 6 h
+
+    def test_partial_fetch_la1_ok_teledeporte_none_cached_with_full_ttl(self):
+        """La 1 returns data, Teledeporte returns None: any_fetch_ok=True, cached with full TTL.
+
+        Partial fetch failure is NOT equivalent to all-fetches-failed; the successful
+        channel's result is cached normally (not short-TTL, not skipped).
+        """
+        from worldcup_bot import tve as tve_module
+
+        def side_effect(slug, **_):
+            if slug == "tv1":
+                return {"items": [_ITEM_LA1_ARG_AUT]}
+            return None  # Teledeporte fetch fails
+
+        with patch("worldcup_bot.tve.fetch_rtve_schedule", side_effect=side_effect):
+            result = load_tve_broadcasts(ttl_seconds=21600)
+
+        assert len(result) == 1
+        assert result[0].home_tla == "ARG"
+        assert tve_module._tve_cache["data"] is not None  # cached, not discarded
+        assert tve_module._tve_cache.get("_ttl") == 21600  # full TTL, not empty-result TTL
 
 
 # ══════════════════════════════════════════════════════════════════════════════

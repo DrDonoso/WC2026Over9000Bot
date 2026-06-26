@@ -47,6 +47,11 @@ _WC_EPISODE_PREFIX = re.compile(r"^futbol\s+copa\s+mundo\s+fifa\s*", re.IGNORECA
 _KICKOFF_RE = re.compile(r"\((\d{2}:\d{2})\)")
 _MATCH_WINDOW = timedelta(minutes=20)
 
+# Short TTL used when fetches succeed but no WC matches are returned — the RTVE
+# schedule is typically published mid-morning (~10:40), AFTER the 09:00 daily
+# update runs, so an empty result here may just mean "not yet updated".
+_EMPTY_RESULT_TTL = 1800  # 30 minutes
+
 
 # ── normalisation ─────────────────────────────────────────────────────────────
 
@@ -358,11 +363,16 @@ def tve_channel_for(
 ) -> str | None:
     """Return the TVE channel label for *match*, or None if not on TVE.
 
-    Matching rules:
-    - Primary: kickoff within ±20 min of match.utc_date AND unordered TLA pair matches.
-    - Time-only fallback (when broadcast TLAs are None): only when exactly one
-      broadcast falls within the time window (avoids mismatching simultaneous games).
-    - If both La 1 and Teledeporte match, La 1 wins.
+    Matching rules (in priority order):
+    1. Primary: kickoff within ±20 min of match.utc_date AND unordered TLA pair matches.
+    2. Time-only fallback (when broadcast TLAs are None): only when exactly one
+       broadcast falls within the time window (avoids mismatching simultaneous games).
+    3. Same-day TLA-pair fallback: same UTC calendar date AND exact TLA pair, regardless
+       of time offset.  Handles the case where RTVE's description hasn't been updated
+       with the actual kickoff time yet at 09:00, so _parse_kickoff_utc falls back to
+       begintime (the pre-match show start), which can be >20 min before real kickoff.
+       Requires both TLAs to be known to avoid mismatching simultaneous same-day games.
+    - If both La 1 and Teledeporte qualify, La 1 wins.
     """
     try:
         match_utc = datetime.strptime(
@@ -372,6 +382,7 @@ def tve_channel_for(
         return None
 
     match_tlas = {match.home_tla, match.away_tla}
+    match_date = match_utc.date()
 
     # All broadcasts within the time window (used for time-only fallback check)
     time_window_hits = [
@@ -387,6 +398,17 @@ def tve_channel_for(
         else:
             # Time-only fallback: safe only when this is the sole broadcast in window
             if len(time_window_hits) == 1:
+                candidates.append(b.channel)
+
+    # Same-day TLA-pair fallback — only when primary window matched nothing
+    if not candidates:
+        for b in broadcasts:
+            if (
+                b.home_tla is not None
+                and b.away_tla is not None
+                and {b.home_tla, b.away_tla} == match_tlas
+                and b.kickoff_utc.date() == match_date
+            ):
                 candidates.append(b.channel)
 
     if not candidates:
@@ -407,8 +429,12 @@ def load_tve_broadcasts(
     """Fetch TVE schedule for both channels, parse WC matches, TTL-cache the result.
 
     - If *tve_enabled* is False, returns [] immediately without any HTTP request.
-    - On total failure returns [] (degrade gracefully — never raises).
-    - Cache is module-level; repeated calls within *ttl_seconds* return cached data.
+    - If ALL channel fetches fail (all return None), returns [] WITHOUT caching so
+      the next call retries immediately (transient RTVE errors don't poison 6 h).
+    - If fetches succeed but no WC matches are found, caches with _EMPTY_RESULT_TTL
+      (30 min) so the bot retries well before the next match window.  RTVE publishes
+      today's schedule mid-morning (~10:40), after the 09:00 daily update runs.
+    - Cache is module-level; repeated calls within the effective TTL return cached data.
     """
     if not tve_enabled:
         return []
@@ -416,16 +442,24 @@ def load_tve_broadcasts(
     now = time.monotonic()
     if (
         _tve_cache["data"] is not None
-        and now - _tve_cache["fetched_at"] < ttl_seconds
+        and now - _tve_cache["fetched_at"] < _tve_cache.get("_ttl", ttl_seconds)
     ):
         return _tve_cache["data"]
 
     broadcasts: list[TveBroadcast] = []
+    any_fetch_ok = False
     for slug, label in _CHANNELS.items():
         sched = fetch_rtve_schedule(slug)
         if sched is not None:
+            any_fetch_ok = True
             broadcasts.extend(parse_wc_broadcasts(sched, label))
 
-    _tve_cache["data"] = broadcasts
-    _tve_cache["fetched_at"] = now
+    if any_fetch_ok:
+        # Full TTL when we found WC matches; short TTL when empty (may not be updated yet)
+        effective_ttl = ttl_seconds if broadcasts else min(ttl_seconds, _EMPTY_RESULT_TTL)
+        _tve_cache["data"] = broadcasts
+        _tve_cache["fetched_at"] = now
+        _tve_cache["_ttl"] = effective_ttl
+    # else: all fetches failed → don't update cache → retry on next call
+
     return broadcasts

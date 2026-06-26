@@ -34,9 +34,11 @@ def reset_tve_cache():
     from worldcup_bot import tve as tve_module
     tve_module._tve_cache["data"] = None
     tve_module._tve_cache["fetched_at"] = 0.0
+    tve_module._tve_cache.pop("_ttl", None)
     yield
     tve_module._tve_cache["data"] = None
     tve_module._tve_cache["fetched_at"] = 0.0
+    tve_module._tve_cache.pop("_ttl", None)
 
 
 @pytest.fixture(autouse=True)

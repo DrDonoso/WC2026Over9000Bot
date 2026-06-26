@@ -11,6 +11,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from datetime import datetime
 
 from worldcup_bot.ai.client import AIClient, AIError
 from worldcup_bot.ai.daily_update import (
@@ -25,6 +26,7 @@ from worldcup_bot.api.models import Match
 from worldcup_bot.bot.handlers import cmd_update_diario
 from worldcup_bot.config import Settings, ai_enabled, load_settings
 from worldcup_bot.porra.engine import UserRankEntry
+from worldcup_bot.tve import TveBroadcast
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -1301,3 +1303,45 @@ class TestGenerateDailyUpdateTVE:
 
         assert result is not None
         assert "📺" not in result
+
+    async def test_tve_label_via_same_day_fallback_simulates_0900_scenario(self):
+        """09:00 scenario: RTVE description missing kickoff time → begintime used (45 min early).
+
+        The same-day TLA-pair fallback in tve_channel_for must still produce the
+        📺 label even when the stored kickoff_utc is more than 20 min before the
+        actual match kickoff (RC2 robustness fix).
+        """
+        from datetime import timezone
+        today_m = _make_match(
+            "Argentina", "Austria",
+            status="SCHEDULED", utc_date="2026-06-22T19:00:00Z",
+            home_tla="ARG", away_tla="AUT",
+        )
+        # Broadcast with begintime-based kickoff: 45 min BEFORE actual kickoff
+        # (RTVE description not yet updated → _parse_kickoff_utc fell back to begintime)
+        broadcast_with_early_time = TveBroadcast(
+            kickoff_utc=datetime(2026, 6, 22, 18, 15, tzinfo=timezone.utc),
+            home_tla="ARG",
+            away_tla="AUT",
+            channel="La 1",
+        )
+
+        mock_client = MagicMock()
+        mock_client.get_football_day_matches.side_effect = [[], [today_m]]
+
+        mock_ai = MagicMock()
+        mock_ai.complete = AsyncMock(return_value='{"today_notes": {}, "standings_comment": ""}')
+
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            timezone="Europe/Madrid",
+            football_day_start_hour=9,
+        )
+        # load_tve_broadcasts returns the broadcast with wrong time; tve_channel_for is real
+        with _make_generate_patches():
+            with patch("worldcup_bot.tve.load_tve_broadcasts", return_value=[broadcast_with_early_time]):
+                result = await generate_daily_update(mock_client, mock_ai, settings)
+
+        assert result is not None
+        assert "📺 La 1" in result, "same-day TLA fallback must produce TVE label at 09:00"
