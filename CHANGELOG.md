@@ -5,6 +5,34 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260626] - 2026-06-26
+
+- Compute the 8 best third-placed teams from group standings using FIFA tiebreakers (points -> goal difference -> goals for)
+- Strict policy: a third that does not qualify scores 0 (no exact-3rd or boundary credit)
+- Extend Standing with goal_difference/goals_for and thread the qualifying-thirds set through every scoring path (/clasificacion, /hoy, /ayer, /evolucion, /recalcular)
+- Emit a single neutral catch-up message when goals are missed (API status-flip delay or restart) instead of fabricating per-goal scores
+- Fix the race that stripped the "Ver gol" inline keyboard; the backfill now never clears an existing keyboard
+- Delete the clip file from the volume after a successful send (the Telegram file_id is cached so re-taps still work)
+- Merged 3 inbox files (kante, pirlo, buffon) into decisions.md
+- Created orchestration logs for kante-1, pirlo-1, buffon-1
+- Created session log for best-thirds scoring outcome
+- Updated pirlo and buffon agent history files with session note
+- Feature: WC2026 third-place qualification scoring (strict policy: non-qualifying 3rd = 0.0)
+- Test delta: 1571 → 1618 (+47 tests, all passing)
+- Both gates passed (Pirlo review, Buffon QA); source changes uncommitted for owner review
+- Date: 2026-06-26
+- Team: Kanté (fixes), Maldini (infra investigation), Pirlo (design review), Buffon (QA gate)
+- Outcome: 4 bugs fixed (A1/A2: missed goals, B1/B2: missing keyboards, D: delete-after-send)
+- Test count: 1571 passing (+19 new tests)
+- Status: Ready for owner review and deployment
+- .squad/decisions.md (merged 4 inbox entries from today's team)
+- .squad/orchestration-log/2026-06-26T09-54-02Z-*.md (4 agent logs)
+- .squad/log/2026-06-26T09-54-02Z-goal-notification-bugfix.md (session summary)
+- Merged .squad/decisions/inbox/kante-kickoff-notice.md into decisions.md (no older entries to archive)
+- Summarized kante's history.md (18.9KB → 2.8KB); archived detailed sessions to history-archive.md
+- Updated test count: 1552 (kickoff notifications feature complete)
+
+
 ## [20260622.06] - 2026-06-22
 
 - feat(kickoff): announce when a match starts at its scheduled kickoff
