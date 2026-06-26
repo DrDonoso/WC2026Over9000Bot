@@ -340,3 +340,389 @@ All hazards covered by existing tests.  Double-announce analysis confirmed no ra
 
 **Final pytest count: 1570 passed, 5 warnings**
 
+
+
+# Decision: WC2026 Best-Thirds Qualifying Scoring
+
+**Date:** 2026-06-26  
+**Author:** Kanté  
+**Status:** Pending Pirlo architecture review  
+**Requested by:** drdonoso
+
+---
+
+## Context
+
+WC2026 group stage: 48 teams, 12 groups of 4. Top-2 of each group qualify directly.
+The 8 best third-placed teams (ranked by FIFA tiebreakers) also qualify. The remaining
+4 thirds and all 4th-placed teams are eliminated.
+
+The porra `score_groups` previously awarded a 1.0 hit for any exact 3rd-place prediction
+without checking whether that team was among the 8 qualifying thirds. Owner requested
+that a 3rd-place pick only counts if the team actually advances.
+
+---
+
+## PART 1 — API vs Compute Finding
+
+**Finding: We must compute qualifying thirds ourselves.**
+
+football-data.org's `/competitions/WC/standings` endpoint returns per-group tables with
+position, points, goalDifference, goalsFor, goalsAgainst, played. It does NOT provide:
+- A "qualified" flag for 3rd-placed teams
+- Any cross-group third-place ranking
+- Knockout-bracket fixtures that would reveal which thirds advanced (those are created
+  only when the knockout round pairings are confirmed by FIFA)
+
+We cannot rely on the API to tell us which thirds qualify. We must rank them ourselves.
+
+---
+
+## PART 2 — Scoring Model
+
+### Constants / Knobs (all in `src/worldcup_bot/porra/scoring.py`)
+
+| Constant | Default | Purpose |
+|----------|---------|---------|
+| `NUM_QUALIFYING_THIRDS` | `8` | How many thirds qualify in WC2026 format |
+| `NON_QUALIFYING_THIRD_SCORE` | `0.0` | Score for a non-qualifying exact 3rd; owner may set to `0.5` for partial credit |
+| `DIRECT_QUALIFY` | `2` | Positions that auto-qualify (unchanged) |
+
+### STRICT Scoring Policy
+
+`score_groups(user_groups, actual_standings, qualifying_thirds=None)`
+
+| pred position | actual position | 3rd qualifies? | Score | Label |
+|--------------|----------------|----------------|-------|-------|
+| 1 or 2 | 1 or 2 | — | 1.0 | exacto |
+| 3 | 3 | **yes** | 1.0 | exacto |
+| 3 | 3 | **no** | `NON_QUALIFYING_THIRD_SCORE` (0.0) | fallo |
+| 1 or 2 | 3 | yes | 0.5 | clasifica |
+| 1 or 2 | 3 | no | `NON_QUALIFYING_THIRD_SCORE` (0.0) | fallo |
+| 3 | 1 or 2 | — (advanced) | 0.5 | clasifica |
+| any | 4 | — | 0.0 | fallo |
+
+**Backward compatibility:** `qualifying_thirds=None` → all 3rds treated as qualifying
+(identical to old behavior). This is the safe default when the caller has no data.
+
+### `best_qualifying_thirds()` Algorithm
+
+Pure function. Input: `{GROUP_X: [{"tla","points","goal_difference","goals_for"},…]}`.
+
+1. Extract the 3rd-place entry (index 2) from each group.
+2. Sort by `(-points, -goal_difference, -goals_for, group_key, tla)`.
+   - Stable tiebreak: group letter alphabetically, then TLA alphabetically.
+   - Disciplinary points and drawing of lots are not available from the API and are NOT
+     implemented. If a true tie exists at the 8/9 boundary, the algorithm logs a WARNING
+     and deterministically resolves via group/TLA order.
+3. If fewer than `NUM_QUALIFYING_THIRDS` thirds are present: return all (provisional).
+4. Otherwise return top 8 as a `frozenset[str]` of TLAs.
+
+FIFA tiebreaker order implemented: (1) points, (2) goal difference, (3) goals scored.
+Not implemented (not available): (4) disciplinary, (5) drawing of lots.
+
+---
+
+## PART 3 — Provisional Handling
+
+Mid-tournament, not all 12 groups have finished. The qualifying thirds set is provisional:
+
+- `_build_qualifying_thirds(client, only_groups)` in `engine.py` mirrors the same
+  `only_groups` filter as `_build_actual_standings` — only the groups with started/finished
+  matches are considered.
+- `best_qualifying_thirds` with fewer than 8 thirds available returns ALL of them, meaning
+  all provisional 3rds are treated as qualifying.
+- This is intentionally optimistic and consistent with the existing provisional scoring
+  behavior (partial standings used without penalty to users).
+- Once all 12 groups are complete, exactly 8 thirds are selected.
+
+This means provisional scores may change once the full 12-group picture is known —
+the same is already true for provisional standings generally.
+
+---
+
+## PART 4 — Standing Model Extension
+
+### `api/models.py`
+Added `goal_difference: int = 0` and `goals_for: int = 0` to the `Standing` dataclass
+as optional fields with defaults. Backward compatible.
+
+### `api/client.py`
+`get_standings()` now parses `goalDifference` and `goalsFor` from the API response payload.
+
+### `history.py`
+Added `reconstruct_full_group_standings(matches)` returning
+`{GROUP_X: [{"tla","points","goal_difference","goals_for"},…]}` for the match-reconstruction
+path (used by `/evolucion`, `/recalcular`). The existing `reconstruct_group_standings`
+(returns TLA lists only) is unchanged.
+
+---
+
+## PART 5 — Files Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/api/models.py` | Added `goal_difference`, `goals_for` to `Standing` |
+| `src/worldcup_bot/api/client.py` | Parse `goalDifference`, `goalsFor` in `get_standings()` |
+| `src/worldcup_bot/porra/scoring.py` | New constants, `best_qualifying_thirds()`, `_team_advances()`, updated `score_groups()` and `score_user_groups_detail()` |
+| `src/worldcup_bot/porra/engine.py` | `_build_qualifying_thirds()` helper; updated `compute_general_ranking_from`, `compute_group_ranking`, `compute_general_ranking`, `compute_user_detail` |
+| `src/worldcup_bot/porra/history.py` | `_compute_group_stats()`, `_sort_order()`, `reconstruct_full_group_standings()`; updated `compute_ranking_at_jornada()` |
+| `tests/test_best_qualifying_thirds.py` | **New** — ~40 tests for the algorithm |
+| `tests/test_scoring.py` | 17 new tests for STRICT scoring policy |
+| `tests/test_history.py` | 9 new tests for reconstruct and history paths |
+| `tests/test_api_client.py` | 2 new tests for `goal_difference`/`goals_for` parsing |
+
+**Test counts:** 1571 (baseline) → 1613 (+42 tests, all green).
+
+---
+
+## Items for Owner / Pirlo Decision
+
+1. **`NON_QUALIFYING_THIRD_SCORE = 0.0`** — Owner requested STRICT (0.0 for non-qualifying
+   3rds). Implemented as a named constant. Change to `0.5` in `scoring.py` for partial credit.
+
+2. **Tiebreaker limitation** — FIFA uses disciplinary points and drawing of lots as final
+   tiebreakers 4 and 5. We cannot access these from football-data.org. In the extremely rare
+   case of a true 3-way GF tie at position 8/9, the algorithm falls back to alphabetical
+   group+TLA order and logs a WARNING. Pirlo/owner: is this acceptable, or should we surface
+   the uncertainty to users differently?
+
+3. **Provisional optimism** — All currently-known 3rds are treated as qualifying until 12
+   groups are complete. This means a user who predicted a 3rd correctly may see 1.0 mid-
+   tournament but could drop to 0.0 if that team is knocked out of the 8 best thirds once
+   all groups finish. This matches existing provisional behavior. Confirm this is acceptable.
+
+
+# Review: WC2026 Best-Thirds Qualifying Scoring
+
+**Reviewer:** Pirlo (Lead / Tech Lead)  
+**Date:** 2026-06-26  
+**Changeset Author:** Kanté  
+**Requested by:** drdonoso  
+**Status:** APPROVE
+
+---
+
+## 1. Scoring Model Coherence — CORRECT
+
+All rows verified against the code (`scoring.py`). The model is internally consistent under the rule "advances = pos 1, 2, or qualifying-3rd":
+
+| pred | actual | 3rd qualifies? | Score | Code path verified |
+|------|--------|---------------|-------|--------------------|
+| top-2 | top-2 | — | 1.0 | `pred_pos <= 2 and actual_pos <= 2` → "exacto" |
+| 3 | 3 | yes | 1.0 | `pred==actual`, `_team_advances` True → "exacto" |
+| 3 | 3 | no | 0.0 | `pred==actual`, `_team_advances` False → NON_QUALIFYING_THIRD_SCORE |
+| top-2 | 3 | yes | 0.5 | `actual_pos <= 3`, `_team_advances` True → "clasifica" |
+| top-2 | 3 | no | 0.0 | `actual_pos <= 3`, `_team_advances` False → NON_QUALIFYING_THIRD_SCORE |
+| 3 | top-2 | — | 0.5 | `actual_pos <= 3`, `_team_advances` True (top-2 always) → "clasifica" |
+| any | 4 | — | 0.0 | else → "fallo" |
+
+**The boundary-with-non-qualifying-third → 0.0 row:** This is the correct reading of the owner's strict intent. The old 0.5 "clasifica" credit meant "you predicted the team advances, and it did (but at a different position)." If the team finishes 3rd but doesn't qualify, it is *eliminated* — awarding 0.5 for "you predicted top-2, team was eliminated" contradicts the strict policy. Logically consistent; not an overreach.
+
+The `_team_advances()` helper correctly gates on `actual_pos`, so top-2 teams always advance regardless of `qualifying_thirds`, and 3rds are checked against the set. Clean separation.
+
+---
+
+## 2. Provisional Handling — CORRECT AS-IS (Directive: KEEP)
+
+**The implementation is better than the doc describes.**
+
+The doc says "all available 3rds qualify until 12 groups complete." The code actually does:
+
+```
+len(thirds) <= NUM_QUALIFYING_THIRDS (8)  →  return all  (no cutoff data)
+len(thirds) > 8                            →  sort and return best 8
+```
+
+This means:
+- **7 groups done → 7 thirds → all qualify** — correct, no basis to exclude any
+- **8 groups done → 8 thirds → all 8 qualify** — correct, trivially all-8-of-8
+- **9 groups done → 9 thirds → best 8 of 9** — already computing best-8-of-available
+- **10-11 groups done → best 8 of N** — already correct
+- **12 groups done → best 8 of 12** — final, authoritative
+
+The "provisional optimism" concern only affects the ≤8 case, where there is literally not enough data to determine a cutoff. Once ≥9 thirds exist, the code already computes best-8-of-N. This is the optimal design.
+
+**Directive:** Keep as-is. No change needed. The volatility concern (a 3rd showing as qualifying then dropping out) is inherent to any provisional scoring and is no worse here than for provisional group positions generally.
+
+---
+
+## 3. Tiebreaker Fallback — ACCEPTABLE
+
+FIFA tiebreakers 4-5 (disciplinary points, drawing of lots) are not available from football-data.org. The stable `(group_key, tla)` alphabetical fallback with a logged WARNING is the right tradeoff for a porra:
+
+- The probability of a true 3-stat tie (pts, GD, GF) at the 8/9 boundary is extremely low.
+- If it happens in real life, FIFA resolves it with information we don't have.
+- Alphabetical order is deterministic, reproducible, and auditable.
+- The WARNING ensures manual intervention is possible if the rare case occurs.
+
+No better deterministic approach exists given the API constraints. Acceptable.
+
+---
+
+## 4. Backward-Compat Seam — LOW RISK
+
+All production callers in `engine.py` explicitly compute and pass `qualifying_thirds`:
+- `compute_general_ranking_from()` — receives as parameter (line 93)
+- `compute_group_ranking()` — computes via `_build_qualifying_thirds` (line 143)
+- `compute_general_ranking()` — computes via `_build_qualifying_thirds` (lines 183/187)
+- `compute_user_detail()` — computes via `_build_qualifying_thirds` (lines 214/227)
+
+The `history.py` path also computes and passes it (line 214).
+
+The `None` default is a safety net, not a trap. A new caller that omits it gets the pre-2026-06-26 behavior (all 3rds score), which is non-breaking. The pattern is well-established in all existing callers.
+
+**Architectural note for Buffon:** Verify no handler or command in `__main__.py` or `handlers.py` calls `score_groups()` directly (bypassing `engine.py`). The grep confirms all production calls go through `engine.py`, so this is clean.
+
+---
+
+## Minor Observations (informational, not blocking)
+
+1. **Doc vs code:** Kanté's decision doc says "fewer than 8 thirds" triggers all-qualify, but the code uses `<=` (includes exactly 8). Both are correct behavior — the doc could say "8 or fewer" for precision. Not blocking.
+
+2. **`NON_QUALIFYING_THIRD_SCORE` as constant:** Clean knob. If the owner later wants partial credit for exact-3rd-but-eliminated, changing this single constant to 0.5 adjusts the exact-match case. The boundary case would need a separate knob if partial credit is wanted there too — but the owner said STRICT, so 0.0 is correct.
+
+---
+
+## VERDICT: APPROVE
+
+No required changes. The scoring model is correct and internally consistent. The provisional handling is already computing best-8-of-available once ≥9 thirds exist (better than described). All callers pass qualifying_thirds explicitly. Tiebreaker fallback is acceptable for a porra.
+
+Kanté: ship it.
+
+
+# Gate Verdict — WC2026 Best-Thirds Scoring (Kanté, 2026-06-26)
+
+**Author:** Buffon (Tester / QA)  
+**Date:** 2026-06-26  
+**Reviewed:** Kanté's best-thirds qualifying scoring change  
+**Baseline (pre-change):** 1571 passed  
+**Kanté claimed:** 1613 passed (+42)  
+**Final pytest count: 1618 passed, 5 warnings** (+5 added by Buffon)
+
+---
+
+## Step 1 — Suite Verification
+
+Ran `.venv\Scripts\python.exe -m pytest -q` independently.  
+**Result: 1613 passed, 5 warnings** — matches Kanté's claim. ✅
+
+---
+
+## Step 2 — Caller Check
+
+Traced all 7 production paths that reach `score_groups`:
+
+| Caller | Builds qualifying_thirds? | Passes it? |
+|--------|--------------------------|-----------|
+| `compute_general_ranking` (provisional) | `_build_qualifying_thirds(client, started)` | `compute_general_ranking_from(…, qualifying_thirds)` ✅ |
+| `compute_general_ranking` (official) | `_build_qualifying_thirds(client, finished)` | `compute_general_ranking_from(…, qualifying_thirds)` ✅ |
+| `compute_general_ranking_from` | accepts as param | `score_groups(…, qualifying_thirds)` ✅ |
+| `compute_group_ranking` | `_build_qualifying_thirds(client)` | `score_groups(…, qualifying_thirds)` ✅ |
+| `compute_user_detail` (provisional) | `_build_qualifying_thirds(client, started)` | `score_groups(…, qualifying_thirds)` ✅ |
+| `compute_user_detail` (official) | `_build_qualifying_thirds(client, finished)` | `score_groups(…, qualifying_thirds)` ✅ |
+| `compute_ranking_at_jornada` | `best_qualifying_thirds(full_standings)` | `compute_general_ranking_from(…, qualifying_thirds)` ✅ |
+| `ensure_history` (latest) | via `compute_general_ranking` (above) | internal ✅ |
+| `ensure_history` (past) | via `compute_ranking_at_jornada` (above) | internal ✅ |
+
+All callers correct. ✅
+
+### ⚠️ Coverage Gap Found
+
+No test in `test_engine.py` would have caught a caller dropping `qualifying_thirds`. All existing engine tests use `points=0` standings with only 1 started group, so `best_qualifying_thirds` returns BRA provisionally (< 8 thirds → all qualify). The backward-compat `None` path also qualifies all thirds. No observable difference. **A caller bug could ship silently.**
+
+The history path had one end-to-end guard (`test_non_qualifying_3rd_scores_zero_in_history_path`), but the direct engine paths (`compute_general_ranking`, `compute_group_ranking`, `compute_user_detail`) had zero guards.
+
+**Resolved:** Buffon added `TestQualifyingThirdsCallerRegression` (5 tests) to `test_engine.py` — see Step 4.
+
+---
+
+## Step 3 — Test Quality Audit
+
+### `test_best_qualifying_thirds.py` (~14 tests)
+
+| Coverage area | Test | Real? |
+|---|---|---|
+| Empty input | `test_empty_standings_returns_empty` | ✅ |
+| Group with <3 entries skipped | `test_group_with_fewer_than_3_entries_skipped` | ✅ |
+| Exactly 3 entries → third included | `test_group_with_exactly_3_entries_yields_third` | ✅ |
+| <8 thirds → all qualify | `test_fewer_than_8_thirds_all_qualify` | ✅ |
+| Exactly 8 selected from 12 | `test_exactly_8_selected_from_12` | ✅ |
+| Top 8 in, bottom 4 out | `test_top_8_qualify_bottom_4_do_not` | ✅ |
+| Returns frozenset | `test_returns_frozenset` | ✅ |
+| GD breaks points tie | `test_goal_difference_breaks_points_tie` | ✅ |
+| GF breaks GD tie | `test_goals_for_breaks_gd_tie` | ✅ |
+| Points dominate over GD | `test_points_dominate_over_gd` | ✅ |
+| Points dominate over GF | `test_points_dominate_over_goals_for` | ✅ |
+| Full tie → deterministic | `test_full_tie_selects_deterministically` | ✅ |
+| Full tie → group/TLA order | `test_full_tie_uses_group_letter_then_tla_order` | ✅ |
+| Logs WARNING on tie | `test_full_tie_at_boundary_logs_warning` | ✅ |
+| No WARNING when no tie | `test_no_warning_when_no_tie` | ✅ |
+
+All 15 tests would fail if `best_qualifying_thirds` were reverted or removed. ✅
+
+### `test_scoring.py` — `TestScoreGroupsQualifyingThirds` (17 tests)
+
+| Policy row | Test | Real? |
+|---|---|---|
+| Qualifying exact 3rd → 1.0 | `test_qualifying_3rd_exact_match_scores_1` | ✅ |
+| Non-qualifying exact 3rd → 0.0 | `test_non_qualifying_exact_3rd_scores_0` | ✅ |
+| `NON_QUALIFYING_THIRD_SCORE` is 0.0 | `test_non_qualifying_exact_3rd_score_constant_is_zero` | ✅ |
+| boundary pred1/actual3 qualifying → 0.5 | `test_boundary_pred1_actual3_qualifying_scores_0_5` | ✅ |
+| boundary pred1/actual3 non-qualifying → 0.0 | `test_boundary_pred1_actual3_non_qualifying_scores_0` | ✅ |
+| boundary pred2/actual3 non-qualifying → 0.0 | `test_boundary_pred2_actual3_non_qualifying_scores_0` | ✅ |
+| pred3/actual1 (top-2) always → 0.5 | `test_boundary_pred3_actual1_always_scores_0_5` | ✅ |
+| pred3/actual2 (top-2) always → 0.5 | `test_boundary_pred3_actual2_always_scores_0_5` | ✅ |
+| top-2 swap unaffected | `test_top2_swap_unaffected_by_qualifying_set` | ✅ |
+| top-2 exact unaffected by empty set | `test_top2_exact_unaffected_by_empty_qualifying_set` | ✅ |
+| None → all 3rds qualify | `test_backward_compat_none_all_3rds_qualify` | ✅ |
+| None boundary → clasifica | `test_backward_compat_boundary_none_all_3rds_qualify` | ✅ |
+| Default == None | `test_default_call_no_qualifying_set_is_same_as_none` | ✅ |
+| Total with non-qualifying 3rd | `test_total_with_non_qualifying_3rd` | ✅ |
+| Total with qualifying 3rd | `test_total_with_qualifying_3rd` | ✅ |
+| Alias passes qualifying_thirds | `test_alias_passes_qualifying_thirds` | ✅ |
+
+All would fail if scoring fix were reverted. ✅
+
+### `test_history.py` — `TestReconstructFullGroupStandings` (6 tests) + `TestComputeRankingAtJornadaQualifyingThirds` (3 tests)
+
+All 9 tests meaningful. `test_non_qualifying_3rd_scores_zero_in_history_path` is the key end-to-end regression guard for the history path. ✅
+
+### `test_api_client.py` (2 tests)
+
+`test_parse_goal_difference_and_goals_for` and `test_goal_difference_goals_for_default_zero_when_absent` both real. ✅
+
+---
+
+## Step 4 — Edge Cases
+
+| Edge case | Status |
+|---|---|
+| 3-way tie at 8/9 boundary: deterministic? | ✅ Covered — stable group+TLA sort, WARNING logged |
+| All 12 thirds identical pts/GD/GF | ✅ Covered — `test_full_tie_*` tests |
+| Group not yet started (no 3rd) | ✅ Covered — `test_group_with_fewer_than_3_entries_skipped` |
+| Provisional <8 thirds → all qualify | ✅ Covered — `test_fewer_than_8_thirds_all_qualify` + `test_provisional_third_qualifies_when_fewer_than_8_groups` |
+| **Engine callers drop qualifying_thirds (no guard)** | ⚠️ **GAP FOUND → Fixed by Buffon** |
+
+### Tests Added by Buffon (+5) in `test_engine.py` — `TestQualifyingThirdsCallerRegression`
+
+Setup: 9 groups (A-I) in started/finished; GROUP_A's BRA has 0pts (9th best third, doesn't qualify); groups B-I each have a 3rd with 1pt (all 8 qualify). Alice predicts ESP/GER/BRA exactly. Expected group_score = 2.0 (not 3.0).
+
+| Test | Would fail if fix reverted? |
+|---|---|
+| `test_compute_general_ranking_provisional_non_qualifying_3rd_scores_zero` | ✅ Yes |
+| `test_compute_general_ranking_official_non_qualifying_3rd_scores_zero` | ✅ Yes |
+| `test_compute_user_detail_provisional_non_qualifying_3rd_scores_zero` | ✅ Yes |
+| `test_compute_user_detail_official_non_qualifying_3rd_scores_zero` | ✅ Yes |
+| `test_compute_group_ranking_non_qualifying_3rd_scores_zero` | ✅ Yes (also first test ever for `compute_group_ranking`) |
+
+---
+
+## VERDICT
+
+**PASS WITH ADDED TESTS**
+
+Kanté's implementation is correct and complete. All 42 new tests are real. One coverage gap found: engine callers had no regression guard against dropping `qualifying_thirds`. Fixed by Buffon with 5 tests in `TestQualifyingThirdsCallerRegression`.
+
+**Final pytest count: 1618 passed, 5 warnings**  
+(1571 baseline → +42 Kanté → +5 Buffon = 1618)

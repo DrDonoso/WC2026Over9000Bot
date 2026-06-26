@@ -67,3 +67,61 @@ See `.squad/decisions.md` §7 for details.
 - **Regression tests are insurance:** The group normalization fix included a regression test (real API format "Group A" → normalize → "GROUP_A"). This prevents future refactoring from reintroducing the bug.
 - **Test suite as contract:** 131 passing tests serve as executable specification of the API and behavior. They're the most up-to-date documentation.
 - **Lesson for future sessions:** When a bug requires API integration to manifest, it will probably escape unit testing. Plan for end-to-end testing early.
+
+### 2026-06-26 — Live goal bug gate (Buffon)
+
+**Reviewed PR:** Kanté's live-match goal-bug fixes (1552 → 1568 → 1570 passing).
+
+**Fixes audited:**
+- Fix A1 — `reconcile()` restart path (score_state.py): emit catch-up deltas when restarting mid-match.
+- Fix A2 — `poll_goals_job` first-seen at non-zero score: emit incremental catch-up deltas.
+- Fix B1 — `poll_goal_clips_job` keyboard race: set `entry["status"]="ready"` BEFORE `edit_message_reply_markup`.
+- Fix D — `handlers.py` delete-after-send: delete local clip after file_id is persisted.
+
+**Test audit results (all 17 new tests are real — none tautological):**
+- Race-fix tests capture `entry["status"]` AT the moment `edit_message_reply_markup` is called; they WOULD FAIL without the fix.
+- Delete-after-send tests use real temp files; file existence assertions confirm disk operations.
+- Ordering test (`test_file_id_cached_before_delete`) uses a side-effect tracker to prove save precedes delete.
+- Score-state restart tests correctly cover all branches: ahead, equal, below announced.
+
+**Uncovered hazard flagged:**
+- `reconcile()` restart catch-up emits all deltas with the FINAL score (not incremental). For 2+ same-team goals missed on restart, two deltas produce the same clip-store token key (`{id}:{team}:{H}-{A}`), and the second `add_entry` overwrites the first. The 3 goal notifications ARE still sent; only the clip association is wrong (first two buttons link to the same clip slot). Documented in gate verdict. No crash. Production fix needed from Kanté for the extreme multi-goal restart case.
+
+**Tests added by Buffon (+2):**
+1. `test_stale_file_id_with_deleted_file_sends_error_message` (test_handlers.py) — stale file_id + file deleted → graceful error message, no crash.
+2. `test_restart_catchup_deltas_carry_final_score` (test_score_state.py) — regression guard documenting that reconcile restart deltas all carry the final score; includes the multi-goal-collision note as a comment.
+
+**Final count: 1570 passed.**
+
+### 2026-06-26 — Best-thirds qualifying scoring gate (Buffon)
+
+**Reviewed PR:** Kanté's WC2026 best-thirds scoring change (1571 → 1613 passing).
+
+**Fixes audited:**
+- New `best_qualifying_thirds()` pure function — FIFA tiebreakers pts→GD→GF with stable group/TLA fallback.
+- `score_groups` gained optional `qualifying_thirds` param; non-qualifying exact-3rd → 0.0; boundary+non-qualifying → 0.0; qualifying-3rd exact → 1.0; boundary+qualifying → 0.5. None = backward compat.
+- `_build_qualifying_thirds()` helper in engine.py; wired into all engine public functions.
+- `reconstruct_full_group_standings()` added to history.py; used by `compute_ranking_at_jornada`.
+- `Standing` model gained `goal_difference` and `goals_for`; client parses them.
+
+**Suite verification:** 1613 passed ✅ (matches Kanté's claim).
+
+**Caller check (STEP 2):** All 7 production scoring paths correctly build and pass `qualifying_thirds`:
+compute_general_ranking (provisional + official), compute_group_ranking, compute_user_detail (provisional + official), compute_ranking_at_jornada, ensure_history (latest uses compute_general_ranking which builds it internally; past jornadas use compute_ranking_at_jornada). ✅
+
+**Coverage gap found and fixed:** No test in `test_engine.py` would have caught a caller forgetting to pass `qualifying_thirds` to `score_groups`. All existing engine tests use `points=0` standings with <8 groups, so provisional behavior (all thirds qualify) masked the bug. The history path had one good integration test (`test_non_qualifying_3rd_scores_zero_in_history_path`) but the direct engine paths were unguarded.
+
+**Test quality audit (STEP 3):** All 42 new Kanté tests are real and non-tautological. Each would fail if the fix were reverted. Coverage confirmed for: empty/partial inputs, exactly-8-selected-from-12, ordering by pts/GD/GF, stable tie fallback, boundary/non-boundary scoring for qualifying and non-qualifying thirds, top-2 zone unaffected, backward-compat None, api client parsing.
+
+**Edge cases (STEP 4):** 3-way tie at 8/9 boundary: deterministic via group+TLA stable sort, logged WARNING ✅. All 12 tied: covered ✅. Group with <3 entries: skipped ✅. Provisional (<8 thirds): all qualify ✅.
+
+**Tests added by Buffon (+5):** Class `TestQualifyingThirdsCallerRegression` in `test_engine.py`:
+1. `test_compute_general_ranking_provisional_non_qualifying_3rd_scores_zero`
+2. `test_compute_general_ranking_official_non_qualifying_3rd_scores_zero`
+3. `test_compute_user_detail_provisional_non_qualifying_3rd_scores_zero`
+4. `test_compute_user_detail_official_non_qualifying_3rd_scores_zero`
+5. `test_compute_group_ranking_non_qualifying_3rd_scores_zero` (first test ever for this function)
+
+**Final count: 1618 passed, 5 warnings.**
+
+**Session outcome:** Both Pirlo review and Buffon QA gates passed. Feature ready for owner deployment. Source changes (src/ + tests/) remain UNCOMMITTED per manifest (goal-notification fixes also uncommitted for parallel review).

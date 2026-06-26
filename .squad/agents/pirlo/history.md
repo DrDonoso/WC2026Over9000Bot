@@ -50,3 +50,17 @@
 - **Key design choice:** Extract selection logic into a pure `choose_tongo_response()` function — keeps handler thin, enables comprehensive unit testing.
 - **Backward compat:** Unconfigured users must get exact current 1/3 SANCHEZ behavior. Missing config file = all global.
 - **Learning:** Easter-egg config should not couple with core porra data. Separate files allow independent versioning decisions.
+
+### 2026-06-26 — Architecture Review: WC2026 Best-Thirds Qualifying Scoring
+
+**Role:** Lead reviewer for Kanté's best-thirds implementation.
+
+**Key decisions locked:**
+1. Scoring model coherence — all 7 cases correctly implement STRICT policy (non-qualifying exact-3rd → 0.0).
+2. Provisional handling KEEP AS-IS — code already computes best-8-of-available once ≥9 thirds exist (better than doc describes).
+3. Tiebreaker fallback acceptable — stable alphabetical (group+TLA) with WARNING for FIFA disciplinary/drawing-of-lots unavailability.
+4. Backward-compat seam low-risk — all callers explicitly build and pass `qualifying_thirds`.
+
+**Outcome:** APPROVE. Ready for Buffon QA gate.
+
+**Buffon added 5 regression tests** (TestQualifyingThirdsCallerRegression) to guard against callers dropping `qualifying_thirds` param. Coverage gap closed.
