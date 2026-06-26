@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from worldcup_bot.api.client import FootballDataClient
 from worldcup_bot.data.stages import GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
 from worldcup_bot.porra import predictions as pred_loader
-from worldcup_bot.porra.scoring import score_groups, score_knockout
+from worldcup_bot.porra.scoring import best_qualifying_thirds, score_groups, score_knockout
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +52,32 @@ def _build_actual_standings(
     return result
 
 
+def _build_qualifying_thirds(
+    client: FootballDataClient,
+    only_groups: set[str] | None = None,
+) -> frozenset[str]:
+    """Compute TLAs of the best 8 third-placed teams from live standings.
+
+    Uses the same only_groups filter as _build_actual_standings so the
+    qualifying computation is consistent with the standings that score_groups
+    sees.  get_standings() is cached so calling both functions is cheap.
+    """
+    standings = client.get_standings()
+    full: dict[str, list[dict]] = {}
+    for s in sorted(standings, key=lambda x: (x.group, x.position)):
+        if only_groups is not None and s.group not in only_groups:
+            continue
+        full.setdefault(s.group, []).append(
+            {
+                "tla": s.tla,
+                "points": s.points,
+                "goal_difference": s.goal_difference,
+                "goals_for": s.goals_for,
+            }
+        )
+    return best_qualifying_thirds(full)
+
+
 def _build_actual_winners(client: FootballDataClient) -> dict[str, list[str]]:
     """Return {ROUND_OF_32: ["ESP", ...]} for all knockout stages."""
     return client.get_knockout_results()
@@ -64,18 +90,22 @@ def compute_general_ranking_from(
     predictions: dict,
     actual_standings: dict[str, list[str]],
     actual_winners: dict[str, list[str]],
+    qualifying_thirds: frozenset[str] | None = None,
 ) -> list[UserRankEntry]:
     """Score all participants given pre-built standings and winners dicts.
 
     Enables dependency injection so historical / date-scoped paths can pass
     their own data without changing the default live-data behaviour.
+
+    qualifying_thirds: TLAs of the 8 best qualifying third-placed teams.
+    None (default): backward-compatible -- all 3rds treated as qualifying.
     """
     participants = predictions.get("participants", {})
     rows: list[UserRankEntry] = []
 
     for uname, udata in participants.items():
         base = udata.get("base_score", 0.0)
-        grp_pts, detail = score_groups(udata.get("groups", {}), actual_standings)
+        grp_pts, detail = score_groups(udata.get("groups", {}), actual_standings, qualifying_thirds)
         exact_hits = sum(1 for d in detail if d.get("note") == "exacto")
 
         ko_scores: dict[str, float] = {}
@@ -110,12 +140,13 @@ def compute_group_ranking(
 ) -> list[UserRankEntry]:
     """Rank all participants by group-phase score only."""
     actual_standings = _build_actual_standings(client)
+    qualifying_thirds = _build_qualifying_thirds(client)
     participants = predictions.get("participants", {})
     rows: list[UserRankEntry] = []
 
     for uname, udata in participants.items():
         base = udata.get("base_score", 0.0)
-        grp_pts, detail = score_groups(udata.get("groups", {}), actual_standings)
+        grp_pts, detail = score_groups(udata.get("groups", {}), actual_standings, qualifying_thirds)
         exact_hits = sum(1 for d in detail if d.get("note") == "exacto")
         dname = udata.get("display_name") or f"@{uname}"
         rows.append(
@@ -149,11 +180,13 @@ def compute_general_ranking(
     if official:
         finished = client.get_finished_groups()
         actual_standings = _build_actual_standings(client, only_groups=finished)
+        qualifying_thirds = _build_qualifying_thirds(client, only_groups=finished)
     else:
         started = client.get_started_groups()
         actual_standings = _build_actual_standings(client, only_groups=started)
+        qualifying_thirds = _build_qualifying_thirds(client, only_groups=started)
     actual_winners = _build_actual_winners(client)
-    return compute_general_ranking_from(predictions, actual_standings, actual_winners)
+    return compute_general_ranking_from(predictions, actual_standings, actual_winners, qualifying_thirds)
 
 
 def compute_user_detail(
@@ -178,6 +211,7 @@ def compute_user_detail(
         finished_groups = client.get_finished_groups()
         finished_stages = client.get_finished_stages()
         actual_standings = _build_actual_standings(client, only_groups=finished_groups)
+        qualifying_thirds = _build_qualifying_thirds(client, only_groups=finished_groups)
         full_winners = _build_actual_winners(client)
         actual_winners = {api: full_winners.get(api, []) for api in finished_stages}
         user_ko = {
@@ -190,10 +224,11 @@ def compute_user_detail(
         finished_groups = None
         started_groups = client.get_started_groups()
         actual_standings = _build_actual_standings(client, only_groups=started_groups)
+        qualifying_thirds = _build_qualifying_thirds(client, only_groups=started_groups)
         actual_winners = _build_actual_winners(client)
         ko_pts, ko_detail = score_knockout(udata.get("knockout", {}), actual_winners)
 
-    grp_pts, grp_detail = score_groups(udata.get("groups", {}), actual_standings)
+    grp_pts, grp_detail = score_groups(udata.get("groups", {}), actual_standings, qualifying_thirds)
     base = udata.get("base_score", 0.0)
 
     return {

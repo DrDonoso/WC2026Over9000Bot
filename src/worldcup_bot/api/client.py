@@ -93,6 +93,8 @@ class FootballDataClient:
                         team_name=entry["team"]["name"],
                         points=entry["points"],
                         played=int(entry.get("playedGames", 0)),
+                        goal_difference=int(entry.get("goalDifference", 0)),
+                        goals_for=int(entry.get("goalsFor", 0)),
                     )
                 )
         return result

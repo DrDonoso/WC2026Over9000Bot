@@ -8,7 +8,12 @@ from __future__ import annotations
 import pytest
 
 from worldcup_bot.data.stages import GROUP_SCORING, KNOCKOUT_STAGES, STAGE_YAML_KEYS
-from worldcup_bot.porra.scoring import score_groups, score_knockout, score_user_groups_detail
+from worldcup_bot.porra.scoring import (
+    NON_QUALIFYING_THIRD_SCORE,
+    score_groups,
+    score_knockout,
+    score_user_groups_detail,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -647,3 +652,166 @@ class TestScoreGroupsRegressionDrDonoso:
             # pred1 earns 1.0, pred2 earns 1.0, "**" wildcard → 0
             total += pts
         assert total == 10.0
+
+
+# ==============================================================================
+# score_groups — qualifying-thirds aware (2026-06-26)
+# ==============================================================================
+
+
+class TestScoreGroupsQualifyingThirds:
+    """Tests for the new qualifying_thirds parameter in score_groups."""
+
+    # -- exact 3rd with qualifying set ------------------------------------------
+
+    def test_qualifying_3rd_exact_match_scores_1(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        qualifying = frozenset({"BRA"})
+        pts, detail = score_groups(user, actual, qualifying)
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["points"] == pytest.approx(1.0)
+        assert bra["note"] == "exacto"
+
+    def test_non_qualifying_exact_3rd_scores_0(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        qualifying = frozenset()  # BRA not in qualifying
+        pts, detail = score_groups(user, actual, qualifying)
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["points"] == pytest.approx(NON_QUALIFYING_THIRD_SCORE)
+        assert bra["note"] == "fallo"
+
+    def test_non_qualifying_exact_3rd_score_constant_is_zero(self):
+        assert NON_QUALIFYING_THIRD_SCORE == 0.0
+
+    # -- boundary cases (one top-2, one 3rd) ------------------------------------
+
+    def test_boundary_pred1_actual3_qualifying_scores_0_5(self):
+        # pred=1, actual=3 (BRA qualifies) -> 0.5
+        user = {"A": ["BRA", "ESP", "GER"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        qualifying = frozenset({"BRA"})
+        pts, detail = score_groups(user, actual, qualifying)
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["points"] == pytest.approx(0.5)
+        assert bra["note"] == "clasifica"
+
+    def test_boundary_pred1_actual3_non_qualifying_scores_0(self):
+        # pred=1, actual=3 (BRA does NOT qualify) -> 0.0
+        user = {"A": ["BRA", "ESP", "GER"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        qualifying = frozenset()  # empty
+        pts, detail = score_groups(user, actual, qualifying)
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["points"] == pytest.approx(NON_QUALIFYING_THIRD_SCORE)
+        assert bra["note"] == "fallo"
+
+    def test_boundary_pred2_actual3_non_qualifying_scores_0(self):
+        user = {"A": ["GER", "BRA", "ESP"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        qualifying = frozenset()  # BRA not qualifying
+        _, detail = score_groups(user, actual, qualifying)
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["points"] == pytest.approx(0.0)
+        assert bra["note"] == "fallo"
+
+    def test_boundary_pred3_actual1_always_scores_0_5(self):
+        # pred=3, actual=1 -- team is top-2, definitely advances, qualifying set irrelevant
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["BRA", "ESP", "GER", "USA"]}  # BRA is 1st
+        qualifying = frozenset()  # empty set but BRA is actual 1st -> always advances
+        _, detail = score_groups(user, actual, qualifying)
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["points"] == pytest.approx(0.5)
+        assert bra["note"] == "clasifica"
+
+    def test_boundary_pred3_actual2_always_scores_0_5(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "BRA", "USA", "FRA"]}  # BRA is 2nd
+        qualifying = frozenset()  # empty, but BRA actual 2nd -> always advances
+        _, detail = score_groups(user, actual, qualifying)
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["points"] == pytest.approx(0.5)
+        assert bra["note"] == "clasifica"
+
+    # -- top-2 zone unaffected by qualifying set ---------------------------------
+
+    def test_top2_swap_unaffected_by_qualifying_set(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["ESP", "GER", "BRA", "USA"]}  # GER/ESP swapped
+        qualifying = frozenset({"BRA"})
+        _, detail = score_groups(user, actual, qualifying)
+        ger = next(d for d in detail if d["team"] == "GER")
+        esp = next(d for d in detail if d["team"] == "ESP")
+        assert ger["points"] == pytest.approx(1.0)
+        assert ger["note"] == "exacto"
+        assert esp["points"] == pytest.approx(1.0)
+        assert esp["note"] == "exacto"
+
+    def test_top2_exact_unaffected_by_empty_qualifying_set(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "USA", "BRA"]}  # GER/ESP exact top-2
+        qualifying = frozenset()
+        _, detail = score_groups(user, actual, qualifying)
+        ger = next(d for d in detail if d["team"] == "GER")
+        assert ger["points"] == pytest.approx(1.0)
+        assert ger["note"] == "exacto"
+
+    # -- backward compat (qualifying_thirds=None) --------------------------------
+
+    def test_backward_compat_none_all_3rds_qualify(self):
+        # qualifying_thirds=None -> treat all 3rds as qualifying (original behavior)
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        pts, detail = score_groups(user, actual, None)
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["points"] == pytest.approx(1.0)
+        assert bra["note"] == "exacto"
+
+    def test_backward_compat_boundary_none_all_3rds_qualify(self):
+        # pred=1, actual=3; qualifying=None -> clasifica (unchanged from old behavior)
+        user = {"A": ["BRA", "ESP", "GER"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        _, detail = score_groups(user, actual, None)
+        bra = next(d for d in detail if d["team"] == "BRA")
+        assert bra["points"] == pytest.approx(0.5)
+        assert bra["note"] == "clasifica"
+
+    def test_default_call_no_qualifying_set_is_same_as_none(self):
+        # Calling score_groups without qualifying_thirds == passing None
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        pts_default, _ = score_groups(user, actual)
+        pts_none, _ = score_groups(user, actual, None)
+        assert pts_default == pts_none
+
+    # -- total points computation ------------------------------------------------
+
+    def test_total_with_non_qualifying_3rd(self):
+        # GER exact 1st (1.0) + ESP exact 2nd (1.0) + BRA exact 3rd not qualifying (0.0)
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        qualifying = frozenset()  # BRA not qualifying
+        pts, _ = score_groups(user, actual, qualifying)
+        assert pts == pytest.approx(2.0)
+
+    def test_total_with_qualifying_3rd(self):
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        qualifying = frozenset({"BRA"})
+        pts, _ = score_groups(user, actual, qualifying)
+        assert pts == pytest.approx(3.0)
+
+    # -- alias passes qualifying_thirds through ----------------------------------
+
+    def test_alias_passes_qualifying_thirds(self):
+        from worldcup_bot.porra.scoring import score_user_groups_detail
+
+        user = {"A": ["GER", "ESP", "BRA"]}
+        actual = {"GROUP_A": ["GER", "ESP", "BRA", "USA"]}
+        qualifying = frozenset()  # BRA not qualifying
+        r1 = score_groups(user, actual, qualifying)
+        r2 = score_user_groups_detail(user, actual, qualifying)
+        assert r1 == r2
+

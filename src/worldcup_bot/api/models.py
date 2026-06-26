@@ -29,6 +29,8 @@ class Standing:
     team_name: str
     points: int
     played: int
+    goal_difference: int = 0
+    goals_for: int = 0
 
 
 @dataclass

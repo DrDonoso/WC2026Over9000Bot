@@ -18,6 +18,7 @@ import pytz
 
 from worldcup_bot.api.models import Match
 from worldcup_bot.data.stages import KNOCKOUT_STAGES
+from worldcup_bot.porra.scoring import best_qualifying_thirds
 
 log = logging.getLogger(__name__)
 
@@ -84,17 +85,12 @@ def build_jornadas(matches: list[Match], tz: str, anchor_hour: int) -> list[str]
     return sorted(jornadas)
 
 
-def reconstruct_group_standings(
+def _compute_group_stats(
     finished_group_matches: list[Match],
-) -> dict[str, list[str]]:
-    """Reconstruct group standings from finished group-stage matches.
+) -> dict[str, dict[str, dict[str, int]]]:
+    """Build per-team stats per group from finished matches.
 
-    For each group computes per-team: points (W=3/D=1/L=0), goal difference
-    (GD), goals for (GF). Teams ordered: points DESC, GD DESC, GF DESC, TLA asc.
-    Head-to-head is NOT used — a sufficient approximation for a trend chart.
-
-    Returns {GROUP_A: ["TLA1", "TLA2", ...]} for groups with finished matches.
-    Matches with missing scores or group are silently skipped.
+    Returns {GROUP_X: {TLA: {"pts": int, "gd": int, "gf": int}}}.
     """
     group_stats: dict[str, dict[str, dict[str, int]]] = {}
 
@@ -131,19 +127,54 @@ def reconstruct_group_standings(
             home_stats["pts"] += 1
             away_stats["pts"] += 1
 
-    result: dict[str, list[str]] = {}
-    for g, teams in sorted(group_stats.items()):
-        ordered = sorted(
-            teams.keys(),
-            key=lambda tla: (
-                -teams[tla]["pts"],
-                -teams[tla]["gd"],
-                -teams[tla]["gf"],
-                tla,
-            ),
-        )
-        result[g] = ordered
+    return group_stats
 
+
+def _sort_order(teams: dict[str, dict[str, int]]) -> list[str]:
+    """Return TLAs sorted by pts DESC, gd DESC, gf DESC, TLA ASC."""
+    return sorted(
+        teams.keys(),
+        key=lambda tla: (-teams[tla]["pts"], -teams[tla]["gd"], -teams[tla]["gf"], tla),
+    )
+
+
+def reconstruct_group_standings(
+    finished_group_matches: list[Match],
+) -> dict[str, list[str]]:
+    """Reconstruct group standings from finished group-stage matches.
+
+    For each group computes per-team: points (W=3/D=1/L=0), goal difference
+    (GD), goals for (GF). Teams ordered: points DESC, GD DESC, GF DESC, TLA asc.
+    Head-to-head is NOT used -- a sufficient approximation for a trend chart.
+
+    Returns {GROUP_A: ["TLA1", "TLA2", ...]} for groups with finished matches.
+    Matches with missing scores or group are silently skipped.
+    """
+    group_stats = _compute_group_stats(finished_group_matches)
+    return {g: _sort_order(teams) for g, teams in sorted(group_stats.items())}
+
+
+def reconstruct_full_group_standings(
+    finished_group_matches: list[Match],
+) -> dict[str, list[dict]]:
+    """Like reconstruct_group_standings but returns full stats per team.
+
+    Returns {GROUP_X: [{"tla", "points", "goal_difference", "goals_for"}, ...]}
+    ordered by position (1st->last).  Compatible with best_qualifying_thirds().
+    """
+    group_stats = _compute_group_stats(finished_group_matches)
+    result: dict[str, list[dict]] = {}
+    for g, teams in sorted(group_stats.items()):
+        ordered = _sort_order(teams)
+        result[g] = [
+            {
+                "tla": tla,
+                "points": teams[tla]["pts"],
+                "goal_difference": teams[tla]["gd"],
+                "goals_for": teams[tla]["gf"],
+            }
+            for tla in ordered
+        ]
     return result
 
 
@@ -179,6 +210,8 @@ def compute_ranking_at_jornada(
 
     group_stage_matches = [m for m in cutoff if m.stage == "GROUP_STAGE"]
     actual_standings = reconstruct_group_standings(group_stage_matches)
+    full_standings = reconstruct_full_group_standings(group_stage_matches)
+    qualifying_thirds = best_qualifying_thirds(full_standings)
 
     actual_winners: dict[str, list[str]] = {api: [] for api, _, _ in KNOCKOUT_STAGES}
     for m in cutoff:
@@ -192,7 +225,7 @@ def compute_ranking_at_jornada(
         if winner_tla:
             actual_winners[m.stage].append(winner_tla)
 
-    return engine.compute_general_ranking_from(predictions, actual_standings, actual_winners)
+    return engine.compute_general_ranking_from(predictions, actual_standings, actual_winners, qualifying_thirds)
 
 
 def ensure_history(client, predictions: dict, settings, path: str, force: bool = False) -> dict:

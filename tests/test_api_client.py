@@ -112,6 +112,63 @@ class TestGetStandings:
         assert s.played == 3
 
     @resp_lib.activate
+    def test_parse_goal_difference_and_goals_for(self):
+        resp_lib.add(
+            resp_lib.GET,
+            WC_STANDINGS,
+            json={
+                "standings": [
+                    {
+                        "group": "GROUP_A",
+                        "table": [
+                            {
+                                "position": 1,
+                                "team": {"tla": "GER", "name": "Germany"},
+                                "points": 6,
+                                "playedGames": 3,
+                                "goalDifference": 4,
+                                "goalsFor": 7,
+                            }
+                        ],
+                    }
+                ]
+            },
+            status=200,
+        )
+        client = _fresh_client()
+        s = client.get_standings()[0]
+        assert s.goal_difference == 4
+        assert s.goals_for == 7
+
+    @resp_lib.activate
+    def test_goal_difference_goals_for_default_zero_when_absent(self):
+        resp_lib.add(
+            resp_lib.GET,
+            WC_STANDINGS,
+            json={
+                "standings": [
+                    {
+                        "group": "GROUP_A",
+                        "table": [
+                            {
+                                "position": 1,
+                                "team": {"tla": "GER", "name": "Germany"},
+                                "points": 6,
+                                "playedGames": 3,
+                                # goalDifference and goalsFor absent
+                            }
+                        ],
+                    }
+                ]
+            },
+            status=200,
+        )
+        client = _fresh_client()
+        s = client.get_standings()[0]
+        assert s.goal_difference == 0
+        assert s.goals_for == 0
+
+    @resp_lib.activate
     def test_multiple_groups_and_teams(self):
         resp_lib.add(
             resp_lib.GET,

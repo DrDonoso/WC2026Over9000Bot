@@ -9,7 +9,9 @@ from unittest.mock import MagicMock
 
 from worldcup_bot.api.models import Standing
 from worldcup_bot.data.stages import KNOCKOUT_STAGES
-from worldcup_bot.porra.engine import compute_general_ranking, compute_user_detail
+import pytest
+
+from worldcup_bot.porra.engine import compute_general_ranking, compute_group_ranking, compute_user_detail
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -462,3 +464,107 @@ class TestComputeUserDetailOfficial:
         result = compute_user_detail("carol", predictions, client, official=True)
         assert result["knockout_detail"] == []
         assert result["knockout_score"] == 0.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Regression guard: engine callers must pass qualifying_thirds
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# These tests would FAIL if any of compute_general_ranking, compute_group_ranking,
+# or compute_user_detail dropped the qualifying_thirds argument to score_groups.
+# The backward-compat default (None → all 3rds qualify) would give BRA 1.0
+# instead of 0.0, producing group_score=3.0 instead of 2.0.
+#
+# Setup: 9 groups (A-I) in started/finished_groups.
+#   - GROUP_A 3rd = BRA with 0 pts  (worst third, does NOT qualify)
+#   - GROUP_B..I 3rds each have 1 pt (outrank BRA → all 8 of them qualify)
+# Alice's prediction: ESP 1st, GER 2nd, BRA 3rd (exact for all three).
+# Expected group_score = 2.0 (ESP+GER exact @ 1.0 each; BRA non-qualifying @ 0.0).
+
+
+def _make_standing_pts(
+    group: str, pos: int, tla: str, pts: int = 0
+) -> Standing:
+    return Standing(
+        group=group, position=pos, tla=tla, team_name=tla,
+        points=pts, played=3, goal_difference=0, goals_for=0,
+    )
+
+
+def _nine_groups_standings() -> list[Standing]:
+    s = [
+        _make_standing_pts("GROUP_A", 1, "ESP", 9),
+        _make_standing_pts("GROUP_A", 2, "GER", 6),
+        _make_standing_pts("GROUP_A", 3, "BRA", 0),  # worst third
+    ]
+    for letter in "BCDEFGHI":
+        s += [
+            _make_standing_pts(f"GROUP_{letter}", 1, f"{letter}1", 9),
+            _make_standing_pts(f"GROUP_{letter}", 2, f"{letter}2", 6),
+            _make_standing_pts(f"GROUP_{letter}", 3, f"{letter}3", 1),  # qualifies
+        ]
+    return s
+
+
+_NINE_GROUPS_STARTED: set[str] = {f"GROUP_{c}" for c in "ABCDEFGHI"}
+
+_ALICE_PREDS_9_GROUPS = {
+    "participants": {
+        "alice": {
+            "display_name": "Alice",
+            "base_score": 0.0,
+            "groups": {"A": ["ESP", "GER", "BRA"]},
+            "knockout": {k: [] for k, _, _ in KNOCKOUT_STAGES},
+        }
+    }
+}
+
+
+class TestQualifyingThirdsCallerRegression:
+    """Regression guards: engine callers must propagate qualifying_thirds to score_groups.
+
+    With qualifying_thirds=None (backward-compat), BRA would score 1.0 → group_score
+    would be 3.0.  With the fix, BRA (9th best third, 0pts) scores 0.0 → 2.0.
+    """
+
+    def test_compute_general_ranking_provisional_non_qualifying_3rd_scores_zero(self):
+        client = _make_client(
+            standings=_nine_groups_standings(),
+            started_groups=_NINE_GROUPS_STARTED,
+        )
+        rows = compute_general_ranking(_ALICE_PREDS_9_GROUPS, client, official=False)
+        assert rows[0].group_score == pytest.approx(2.0)
+
+    def test_compute_general_ranking_official_non_qualifying_3rd_scores_zero(self):
+        client = _make_client(
+            standings=_nine_groups_standings(),
+            finished_groups=_NINE_GROUPS_STARTED,
+        )
+        rows = compute_general_ranking(_ALICE_PREDS_9_GROUPS, client, official=True)
+        assert rows[0].group_score == pytest.approx(2.0)
+
+    def test_compute_user_detail_provisional_non_qualifying_3rd_scores_zero(self):
+        client = _make_client(
+            standings=_nine_groups_standings(),
+            started_groups=_NINE_GROUPS_STARTED,
+        )
+        result = compute_user_detail("alice", _ALICE_PREDS_9_GROUPS, client, official=False)
+        assert result["group_score"] == pytest.approx(2.0)
+        bra = next(d for d in result["group_detail"] if d["team"] == "BRA")
+        assert bra["note"] == "fallo"
+        assert bra["points"] == pytest.approx(0.0)
+
+    def test_compute_user_detail_official_non_qualifying_3rd_scores_zero(self):
+        client = _make_client(
+            standings=_nine_groups_standings(),
+            finished_groups=_NINE_GROUPS_STARTED,
+            finished_stages=set(),
+        )
+        result = compute_user_detail("alice", _ALICE_PREDS_9_GROUPS, client, official=True)
+        assert result["group_score"] == pytest.approx(2.0)
+
+    def test_compute_group_ranking_non_qualifying_3rd_scores_zero(self):
+        """compute_group_ranking (no only_groups filter) must also pass qualifying_thirds."""
+        client = _make_client(standings=_nine_groups_standings())
+        rows = compute_group_ranking(_ALICE_PREDS_9_GROUPS, client)
+        assert rows[0].group_score == pytest.approx(2.0)

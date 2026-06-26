@@ -816,3 +816,189 @@ class TestEnsureHistoryForce:
         assert result["2026-06-13"]["alice"]["pts"] == 7.0
         assert result["2026-06-14"]["alice"]["pts"] == 8.0  # latest uses live
 
+
+# ==============================================================================
+# reconstruct_full_group_standings
+# ==============================================================================
+
+from worldcup_bot.porra.history import reconstruct_full_group_standings  # noqa: E402
+
+
+class TestReconstructFullGroupStandings:
+    def test_returns_dicts_with_required_keys(self):
+        m = _make_match(
+            "2026-06-13T18:00:00Z", "FINISHED",
+            home_tla="GER", away_tla="ESP", home_score=2, away_score=1, winner="HOME_TEAM",
+        )
+        result = reconstruct_full_group_standings([m])
+        entries = result["GROUP_A"]
+        assert len(entries) == 2
+        for e in entries:
+            assert {"tla", "points", "goal_difference", "goals_for"} <= e.keys()
+
+    def test_winner_has_3_points(self):
+        m = _make_match(
+            "2026-06-13T18:00:00Z", "FINISHED",
+            home_tla="GER", away_tla="ESP", home_score=2, away_score=0, winner="HOME_TEAM",
+        )
+        result = reconstruct_full_group_standings([m])
+        ger = result["GROUP_A"][0]
+        assert ger["tla"] == "GER"
+        assert ger["points"] == 3
+        assert ger["goal_difference"] == 2
+        assert ger["goals_for"] == 2
+
+    def test_loser_has_0_points_negative_gd(self):
+        m = _make_match(
+            "2026-06-13T18:00:00Z", "FINISHED",
+            home_tla="GER", away_tla="ESP", home_score=2, away_score=0, winner="HOME_TEAM",
+        )
+        result = reconstruct_full_group_standings([m])
+        esp = result["GROUP_A"][1]
+        assert esp["tla"] == "ESP"
+        assert esp["points"] == 0
+        assert esp["goal_difference"] == -2
+        assert esp["goals_for"] == 0
+
+    def test_draw_each_team_gets_1_point(self):
+        m = _make_match(
+            "2026-06-13T18:00:00Z", "FINISHED",
+            home_tla="GER", away_tla="ESP", home_score=1, away_score=1, winner="DRAW",
+        )
+        result = reconstruct_full_group_standings([m])
+        for e in result["GROUP_A"]:
+            assert e["points"] == 1
+            assert e["goal_difference"] == 0
+            assert e["goals_for"] == 1
+
+    def test_order_matches_reconstruct_group_standings(self):
+        """The TLA order in full standings must equal the TLA order in plain standings."""
+        matches = [
+            _make_match("2026-06-13T15:00:00Z", "FINISHED",
+                        home_tla="GER", away_tla="ESP", home_score=3, away_score=0, winner="HOME_TEAM"),
+            _make_match("2026-06-13T18:00:00Z", "FINISHED",
+                        home_tla="BRA", away_tla="USA", home_score=2, away_score=0, winner="HOME_TEAM"),
+            _make_match("2026-06-14T15:00:00Z", "FINISHED",
+                        home_tla="GER", away_tla="BRA", home_score=1, away_score=0, winner="HOME_TEAM"),
+            _make_match("2026-06-14T18:00:00Z", "FINISHED",
+                        home_tla="ESP", away_tla="USA", home_score=1, away_score=0, winner="HOME_TEAM"),
+        ]
+        plain = reconstruct_group_standings(matches)
+        full = reconstruct_full_group_standings(matches)
+        assert plain["GROUP_A"] == [e["tla"] for e in full["GROUP_A"]]
+
+    def test_empty_matches_returns_empty(self):
+        assert reconstruct_full_group_standings([]) == {}
+
+
+# ==============================================================================
+# compute_ranking_at_jornada — qualifying thirds integration
+# ==============================================================================
+
+
+def _build_group_matches(
+    group: str, first: str, second: str, third: str, utc_date: str
+) -> list[Match]:
+    """Three matches giving first 6pts, second 3pts, third 0pts."""
+    return [
+        _make_match(utc_date, "FINISHED", group=group, home_tla=first, away_tla=second,
+                    home_score=2, away_score=0, winner="HOME_TEAM"),
+        _make_match(utc_date, "FINISHED", group=group, home_tla=first, away_tla=third,
+                    home_score=2, away_score=0, winner="HOME_TEAM"),
+        _make_match(utc_date, "FINISHED", group=group, home_tla=second, away_tla=third,
+                    home_score=1, away_score=0, winner="HOME_TEAM"),
+    ]
+
+
+def _build_group_matches_draw_third(
+    group: str, first: str, second: str, third: str, utc_date: str
+) -> list[Match]:
+    """Three matches giving third 1pt via a draw (so third ranks above 0-pt teams)."""
+    return [
+        _make_match(utc_date, "FINISHED", group=group, home_tla=first, away_tla=second,
+                    home_score=2, away_score=0, winner="HOME_TEAM"),
+        _make_match(utc_date, "FINISHED", group=group, home_tla=first, away_tla=third,
+                    home_score=2, away_score=0, winner="HOME_TEAM"),
+        _make_match(utc_date, "FINISHED", group=group, home_tla=second, away_tla=third,
+                    home_score=1, away_score=1, winner="DRAW"),
+    ]
+
+
+_PREDICTIONS_ALICE_GROUP_A = {
+    "participants": {
+        "alice": {
+            "display_name": "Alice",
+            "base_score": 0.0,
+            "groups": {"A": ["ESP", "GER", "BRA"]},  # exact pred: ESP 1st, GER 2nd, BRA 3rd
+            "knockout": {k: [] for k, _, _ in KNOCKOUT_STAGES},
+        }
+    }
+}
+
+
+class TestComputeRankingAtJornadaQualifyingThirds:
+    """Verify that qualifying thirds are propagated through the history path."""
+
+    def test_provisional_third_qualifies_when_fewer_than_8_groups(self):
+        """With only 1 group (< 8 thirds), all thirds qualify provisionally -> BRA scores 1.0."""
+        date = "2026-06-14T12:00:00Z"
+        matches = _build_group_matches("GROUP_A", "ESP", "GER", "BRA", date)
+        rows = compute_ranking_at_jornada(
+            _PREDICTIONS_ALICE_GROUP_A, matches, "2026-06-14", "Europe/Madrid", 9
+        )
+        alice = rows[0]
+        # ESP exact 1st (+1.0), GER exact 2nd (+1.0), BRA exact 3rd -> qualifies provisionally (+1.0)
+        assert alice.group_score == pytest.approx(3.0)
+
+    def test_non_qualifying_3rd_scores_zero_in_history_path(self):
+        """With 9 groups: BRA (0pts) is 9th third and does NOT qualify -> scores 0 not 1."""
+        date = "2026-06-14T12:00:00Z"
+        jornada = "2026-06-14"
+
+        # GROUP_A: ESP wins all, GER beats BRA, BRA loses all -> BRA=0pts (worst third)
+        matches = _build_group_matches("GROUP_A", "ESP", "GER", "BRA", date)
+
+        # GROUP_B to GROUP_I: each 3rd gets 1pt via a draw (better than BRA's 0pts)
+        for letter in "BCDEFGHI":
+            matches += _build_group_matches_draw_third(
+                f"GROUP_{letter}",
+                f"{letter}1", f"{letter}2", f"{letter}3",
+                date,
+            )
+
+        # 9 thirds total: BRA(0pts) ranks 9th; the 8 with 1pt qualify
+        rows = compute_ranking_at_jornada(
+            _PREDICTIONS_ALICE_GROUP_A, matches, jornada, "Europe/Madrid", 9
+        )
+        alice = rows[0]
+        # ESP exact 1st (+1.0), GER exact 2nd (+1.0), BRA exact 3rd NOT qualifying (+0.0)
+        assert alice.group_score == pytest.approx(2.0)
+
+    def test_qualifying_3rd_scores_one_in_history_path(self):
+        """When BRA ranks in the top 8 thirds, exact 3rd prediction scores 1.0."""
+        date = "2026-06-14T12:00:00Z"
+        jornada = "2026-06-14"
+
+        # GROUP_A: ESP 4pts (W+D), GER 3pts (W), BRA 1pt (D) -> BRA is 3rd with 1pt.
+        # This gives BRA 1pt, better than all other groups' thirds (0pts).
+        matches = [
+            _make_match(date, "FINISHED", group="GROUP_A",
+                        home_tla="ESP", away_tla="GER", home_score=2, away_score=0, winner="HOME_TEAM"),
+            _make_match(date, "FINISHED", group="GROUP_A",
+                        home_tla="GER", away_tla="BRA", home_score=1, away_score=0, winner="HOME_TEAM"),
+            _make_match(date, "FINISHED", group="GROUP_A",
+                        home_tla="ESP", away_tla="BRA", home_score=0, away_score=0, winner="DRAW"),
+        ]
+        # Groups B-I: each 3rd gets 0pts -> BRA (1pt) outranks all 8 other thirds
+        for letter in "BCDEFGHI":
+            matches += _build_group_matches(
+                f"GROUP_{letter}", f"{letter}1", f"{letter}2", f"{letter}3", date
+            )
+
+        rows = compute_ranking_at_jornada(
+            _PREDICTIONS_ALICE_GROUP_A, matches, jornada, "Europe/Madrid", 9
+        )
+        alice = rows[0]
+        # ESP exact 1st (+1.0), GER exact 2nd (+1.0), BRA exact 3rd qualifies (+1.0)
+        assert alice.group_score == pytest.approx(3.0)
+
