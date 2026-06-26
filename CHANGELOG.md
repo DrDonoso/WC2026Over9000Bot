@@ -5,6 +5,18 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260626.02] - 2026-06-26
+
+- Stop poisoning the broadcast cache for 6h when the RTVE fetch fails; empty results now expire after 30 min so the next call retries
+- Add a same-day exact-TLA-pair fallback in tve_channel_for so a match is still labelled when RTVE lists a programme-block time outside the +/-20-min kickoff window
+- Merged 3 decision inbox files (kante-tve-*, pirlo-tve-*, buffon-tve-*) into decisions.md
+- Updated agent histories (kante, pirlo, buffon) with session outcomes
+- Kante: 1618→1627 (+9 tests); both gates passed
+- Buffon: added +2 edge-case tests (1627→1629 final)
+- Pirlo: approved; recommended moving DAILY_UPDATE_HOUR to 11:00
+- Code changes remain UNCOMMITTED per owner decision
+
+
 ## [20260626] - 2026-06-26
 
 - Compute the 8 best third-placed teams from group standings using FIFA tiebreakers (points -> goal difference -> goals for)
