@@ -90,6 +90,25 @@ _MAX_CLIP_ATTEMPTS = 25
 MATCH_OVER_AGE = timedelta(hours=4)
 
 
+def _match_is_over(match, now_utc: datetime) -> bool:
+    """True when the match kickoff was >MATCH_OVER_AGE (4 h) ago.
+
+    Pure wall-clock guard: API status is deliberately ignored because
+    football-data.org can stay stuck at IN_PLAY/PAUSED long after FT.
+    ET + penalties comfortably fit inside 4 h, so this never cuts off a
+    legitimately live match.  FINISHED matches within 4 h are NOT over by
+    this predicate — they remain eligible for final-goal catch-up in the
+    goal-polling jobs.
+    """
+    try:
+        kickoff = datetime.strptime(match.utc_date, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        return now_utc - kickoff > MATCH_OVER_AGE
+    except Exception:
+        return False
+
+
 # ── daily AI update job ───────────────────────────────────────────────────────
 
 
@@ -550,11 +569,30 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.warning("poll_goals_job: could not get matches: %s", exc)
             return
 
-        # IN_PLAY/PAUSED are live; FINISHED matches already in state catch final goals + FT
+        now_utc = datetime.now(timezone.utc)
+
+        # Evict over-matches (kickoff >MATCH_OVER_AGE ago) from shared state.
+        # This self-heals stuck IN_PLAY entries (e.g. Egypt-Iran) so they can
+        # never keep generating goal/disallowed spam on subsequent ticks.
+        over_ids = {str(m.id) for m in all_matches if _match_is_over(m, now_utc)}
+        pruned = [k for k in over_ids if k in scores]
+        for k in pruned:
+            log.info("poll_goals_job: pruning over-match key=%s from live state", k)
+            scores.pop(k, None)
+            seen_api.pop(k, None)
+            seen_scores["thread"].pop(k, None)
+        if pruned:
+            save_scores(state_path, scores)
+
+        # IN_PLAY/PAUSED are live; FINISHED matches already in state catch final goals + FT.
+        # Hard-exclude any match whose kickoff was >MATCH_OVER_AGE ago.
         relevant = [
             m for m in all_matches
-            if m.status in ("IN_PLAY", "PAUSED")
-            or (m.status == "FINISHED" and str(m.id) in scores)
+            if not _match_is_over(m, now_utc)
+            and (
+                m.status in ("IN_PLAY", "PAUSED")
+                or (m.status == "FINISHED" and str(m.id) in scores)
+            )
         ]
 
         if not relevant:
@@ -720,6 +758,12 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         except FootballAPIError as exc:
             log.warning("poll_thread_goals_job: could not get live matches: %s", exc)
             return
+
+        # Hard-exclude matches whose kickoff was >MATCH_OVER_AGE ago so a stuck
+        # IN_PLAY entry (e.g. Egypt-Iran) can never keep generating spam from
+        # an oscillating Reddit thread.
+        now_utc = datetime.now(timezone.utc)
+        live_matches = [m for m in live_matches if not _match_is_over(m, now_utc)]
 
         if not live_matches:
             return

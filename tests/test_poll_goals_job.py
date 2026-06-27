@@ -4,6 +4,7 @@ and persistence.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,10 +25,16 @@ def _make_match(
     away_tla: str = "SEN",
     home_score: int | None = 1,
     away_score: int | None = 0,
+    utc_date: str | None = None,
 ) -> Match:
+    if utc_date is None:
+        # Default: kickoff 30 min ago so MATCH_OVER_AGE (4h) never triggers in standard tests.
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
     return Match(
         id=mid,
-        utc_date="2026-06-17T18:00:00Z",
+        utc_date=utc_date,
         status=status,
         stage="GROUP_STAGE",
         group="GROUP_A",
@@ -69,7 +76,7 @@ def _no_enrichment_scanner() -> MagicMock:
     return scanner
 
 
-from worldcup_bot.__main__ import poll_goals_job
+from worldcup_bot.__main__ import _match_is_over, poll_goals_job
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -661,3 +668,298 @@ class TestNotifyGoal:
             )
 
         assert expected_token in ctx.bot_data["clip_store"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Over-match filter — the Egypt-Iran / stuck-IN_PLAY bug
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _over_utc_date(hours: float = 5.0) -> str:
+    """Return a UTC kickoff string that is `hours` hours in the past (default 5h > 4h ceiling)."""
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _recent_utc_date(minutes: float = 30.0) -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+class TestMatchOverFilter:
+    """Regression suite for the Egypt-Iran loop bug.
+
+    Root cause: football-data.org stayed stuck at IN_PLAY long after FT, and
+    the Reddit thread oscillated between N and N-1 goals → endless goal/disallowed
+    spam.  The fix: hard-exclude any match whose kickoff is >4h ago regardless of
+    API status, and prune stuck entries from live_scores + seen_scores.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stale_inplay_match_excluded_from_relevant(self, tmp_path):
+        """IN_PLAY match whose kickoff was 5h ago is hard-excluded — no goal detection."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={})
+
+        stored_state = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
+        ctx.bot_data["live_scores"] = stored_state
+
+        match = _make_match(1, "IN_PLAY", home_score=2, away_score=0, utc_date=_over_utc_date())
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+        # Pruned → save_scores called with match removed
+        mock_save.assert_called_once()
+        saved = mock_save.call_args[0][1]
+        assert "1" not in saved
+
+    @pytest.mark.asyncio
+    async def test_stale_match_pruned_from_live_scores_and_seen(self, tmp_path):
+        """Over-match is evicted from scores, seen_api, and seen_thread in-memory dicts."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"1": {"home": 1, "away": 0}})
+        ctx.bot_data["seen_scores"]["thread"]["1"] = {"home": 1, "away": 0}
+
+        stored_state = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
+        ctx.bot_data["live_scores"] = stored_state
+
+        match = _make_match(1, "IN_PLAY", home_score=1, away_score=0, utc_date=_over_utc_date())
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        # Both in-memory dicts are cleared
+        assert "1" not in ctx.bot_data["live_scores"]
+        assert "1" not in ctx.bot_data["seen_scores"]["api"]
+        assert "1" not in ctx.bot_data["seen_scores"]["thread"]
+
+    @pytest.mark.asyncio
+    async def test_egypt_iran_oscillation_produces_zero_sends(self, tmp_path):
+        """Reproduce the exact Egypt-Iran loop: stuck IN_PLAY, thread flip-flops 1-0/0-0.
+
+        With the fix, both ticks must produce zero sends (match excluded from relevant).
+        """
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(
+            settings, _no_enrichment_scanner(),
+            seen_api={"99": {"home": 0, "away": 1}},
+        )
+        ctx.bot_data["seen_scores"]["thread"]["99"] = {"home": 0, "away": 1}
+
+        stored_state = {"99": {"home": 0, "away": 1, "status": "IN_PLAY"}}
+        ctx.bot_data["live_scores"] = stored_state
+
+        stale_match = _make_match(
+            99, "IN_PLAY",
+            home_name="Egypt", away_name="Iran",
+            home_tla="EGY", away_tla="IRN",
+            home_score=0, away_score=1,
+            utc_date=_over_utc_date(hours=20),  # kicked off 20h ago
+        )
+
+        for tick_score in [1, 0, 1, 0]:  # oscillating API/thread score
+            stale_match.away_score = tick_score
+            with (
+                patch("worldcup_bot.__main__.make_client") as mock_client,
+                patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+                patch("worldcup_bot.__main__.save_scores"),
+            ):
+                mock_client.return_value.get_all_matches.return_value = [stale_match]
+                await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recent_match_within_4h_goals_still_announced(self, tmp_path):
+        """A genuinely live match (kickoff 30 min ago) still gets goal announcements."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"2": {"home": 0, "away": 0}})
+
+        stored_state = {"2": {"home": 0, "away": 0, "status": "IN_PLAY"}}
+        match = _make_match(
+            2, "IN_PLAY",
+            home_name="Brazil", away_name="Argentina",
+            home_score=1, away_score=0,
+            utc_date=_recent_utc_date(minutes=30),
+        )
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_called_once()
+        assert "⚽" in ctx.bot.send_message.call_args.kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_recently_finished_match_in_state_still_polled(self, tmp_path):
+        """FINISHED match with kickoff 2h ago (within 4h ceiling) remains eligible
+        for final-goal catch-up — existing behavior must not be broken."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"3": {"home": 1, "away": 0}})
+
+        stored_state = {"3": {"home": 1, "away": 0, "status": "IN_PLAY"}}
+        match = _make_match(
+            3, "FINISHED",
+            home_name="Germany", away_name="Japan",
+            home_score=2, away_score=0,
+            utc_date=_recent_utc_date(minutes=120),  # 2h ago → within 4h ceiling
+        )
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        # Final goal must still be announced
+        ctx.bot.send_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_over_match_finished_5h_ago_not_polled(self, tmp_path):
+        """FINISHED match 5h past kickoff is excluded even though it's in scores."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"4": {"home": 2, "away": 1}})
+
+        stored_state = {"4": {"home": 2, "away": 1, "status": "FINISHED"}}
+        ctx.bot_data["live_scores"] = stored_state
+
+        match = _make_match(
+            4, "FINISHED",
+            home_name="Spain", away_name="Portugal",
+            home_score=3, away_score=1,
+            utc_date=_over_utc_date(hours=5),
+        )
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_real_var_during_live_match_still_works(self, tmp_path):
+        """A real VAR disallowed during a genuinely live match (recent kickoff) still fires."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"5": {"home": 2, "away": 0}})
+
+        stored_state = {"5": {"home": 2, "away": 0, "status": "IN_PLAY"}}
+        match = _make_match(
+            5, "IN_PLAY",
+            home_name="France", away_name="Belgium",
+            home_score=1, away_score=0,
+            utc_date=_recent_utc_date(minutes=45),
+        )
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_called_once()
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "❌" in text or "VAR" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# _match_is_over unit tests — boundary + safe defaults
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMatchIsOverUnit:
+    """Direct unit tests for the _match_is_over predicate.
+
+    These guard the boundary behaviour and the safe fallback for bad utc_dates.
+    """
+
+    def test_invalid_utc_date_returns_false(self):
+        """Unparseable utc_date → False (safe: keep match eligible rather than silence it).
+
+        If the API sends a malformed date, the bot must not silently kill goal
+        announcements for the match.  Exclusion requires a parseable kickoff.
+        """
+        match = _make_match(1, "IN_PLAY", utc_date="not-a-valid-date")
+        assert not _match_is_over(match, datetime.now(timezone.utc))
+
+    def test_empty_utc_date_returns_false(self):
+        """Empty string utc_date → False (safe default via except Exception guard)."""
+        match = _make_match(1, "IN_PLAY", utc_date="")
+        assert not _match_is_over(match, datetime.now(timezone.utc))
+
+    def test_3h59m_kickoff_is_not_over(self):
+        """Match kicked off 3h59m ago is NOT over — comfortably inside the 4h ceiling.
+
+        This covers the ET+penalties scenario: a match at 3h59m with PKs in
+        progress must still be polled.  The ceiling is strictly >4h (not >=).
+        """
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=239)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        match = _make_match(1, "IN_PLAY", utc_date=utc_date)
+        assert not _match_is_over(match, datetime.now(timezone.utc))
+
+    def test_4h2m_kickoff_is_over(self):
+        """Match kicked off 4h2m ago IS over — clearly beyond the 4h wall-clock ceiling."""
+        utc_date = (datetime.now(timezone.utc) - timedelta(hours=4, minutes=2)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        match = _make_match(1, "IN_PLAY", utc_date=utc_date)
+        assert _match_is_over(match, datetime.now(timezone.utc))
+
+    @pytest.mark.asyncio
+    async def test_et_penalties_match_3h50m_still_announced(self, tmp_path):
+        """Integration: match in ET+PKs 3h50m past kickoff still gets goals announced.
+
+        A penalty shootout can start ~2h30m after kickoff; the decisive penalty
+        might arrive at ~3h45m.  Must NOT be cut off by _match_is_over.
+        """
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"10": {"home": 1, "away": 1}})
+
+        stored_state = {"10": {"home": 1, "away": 1, "status": "IN_PLAY"}}
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=230)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        match = _make_match(
+            10, "IN_PLAY",
+            home_name="Argentina", away_name="Netherlands",
+            home_score=2, away_score=1,
+            utc_date=utc_date,
+        )
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_called_once()
+        assert "⚽" in ctx.bot.send_message.call_args.kwargs["text"]

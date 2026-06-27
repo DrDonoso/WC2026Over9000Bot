@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -23,10 +24,16 @@ def _make_match(
     away_tla: str = "SEN",
     home_score: int | None = 2,
     away_score: int | None = 0,
+    utc_date: str | None = None,
 ) -> Match:
+    if utc_date is None:
+        # Default: kickoff 30 min ago so MATCH_OVER_AGE (4h) never triggers in standard tests.
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
     return Match(
         id=mid,
-        utc_date="2026-06-17T18:00:00Z",
+        utc_date=utc_date,
         status=status,
         stage="GROUP_STAGE",
         group="GROUP_A",
@@ -1352,3 +1359,125 @@ class TestMultiGoalExpansion:
         api_sends = ctx_api.bot.send_message.call_count
         assert thread_sends == 3, f"Thread should send 3 goals, sent {thread_sends}"
         assert api_sends == 0, f"API catchup must send 0 (all claimed), sent {api_sends}"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Over-match filter — thread job must not scan/announce for finished matches
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _over_utc_date(hours: float = 5.0) -> str:
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _recent_utc_date(minutes: float = 30.0) -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+class TestMatchOverFilterThread:
+    """Regression suite for the Egypt-Iran loop bug — thread job side.
+
+    The thread job must never scan/reconcile for a match whose kickoff is >4h ago,
+    regardless of what get_live_matches() returns (the API can lag at IN_PLAY).
+    """
+
+    @pytest.mark.asyncio
+    async def test_stale_inplay_match_filtered_thread_job_no_announce(self, tmp_path):
+        """Live-match list contains a match with kickoff 5h ago → filtered out,
+        scan_live_matches not called for it, no goal/disallowed sent."""
+        settings = _make_settings(tmp_path)
+        stale_match = _make_match(
+            99, "IN_PLAY",
+            home_name="Egypt", away_name="Iran",
+            home_tla="EGY", away_tla="IRN",
+            home_score=0, away_score=1,
+            utc_date=_over_utc_date(hours=20),
+        )
+
+        live_scores = {"99": {"home": 0, "away": 1, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores)
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with patch("worldcup_bot.__main__.make_client") as mock_client:
+            mock_client.return_value.get_live_matches.return_value = [stale_match]
+            await poll_thread_goals_job(ctx)
+
+        # scan_live_matches must have been called with an empty list (stale match filtered)
+        # OR not called at all (empty → early return).
+        # Either way, no goal/disallowed notification should be sent.
+        ctx.bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stale_match_oscillation_zero_sends_thread_job(self, tmp_path):
+        """Exact Egypt-Iran scenario via thread job: oscillating thread score on a
+        >4h-old match produces zero sends across multiple ticks."""
+        settings = _make_settings(tmp_path)
+        stale_match = _make_match(
+            99, "IN_PLAY",
+            home_name="Egypt", away_name="Iran",
+            home_tla="EGY", away_tla="IRN",
+            home_score=0, away_score=1,
+            utc_date=_over_utc_date(hours=20),
+        )
+
+        live_scores = {"99": {"home": 0, "away": 1, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"99": {"home": 0, "away": 1}})
+
+        for away_score in [1, 0, 1, 0]:
+            stale_match.away_score = away_score
+            event = _make_goal_event(
+                scorer="Mehdi", scoring_team="Iran",
+                home_score=0, away_score=away_score,
+                home_team="Egypt", away_team="Iran",
+            )
+            result = _make_thread_result("EGY", "IRN", [event])
+            mock_scanner = MagicMock()
+            mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+            ctx.bot_data["reddit_scanner"] = mock_scanner
+
+            with patch("worldcup_bot.__main__.make_client") as mock_client:
+                mock_client.return_value.get_live_matches.return_value = [stale_match]
+                await poll_thread_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recent_match_still_processed_by_thread_job(self, tmp_path):
+        """A genuinely live match (kickoff 30 min ago) is not filtered — goals announced."""
+        settings = _make_settings(tmp_path)
+        match = _make_match(
+            1, "IN_PLAY",
+            home_name="England", away_name="Senegal",
+            home_tla="ENG", away_tla="SEN",
+            home_score=2, away_score=0,
+            utc_date=_recent_utc_date(minutes=30),
+        )
+
+        live_scores = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"1": {"home": 1, "away": 0}})
+
+        event = _make_goal_event(
+            scorer="Bellingham", scoring_team="England",
+            home_score=2, away_score=0, minute_text="72",
+        )
+        result = _make_thread_result("ENG", "SEN", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        ctx.bot.send_message.assert_called_once()
+        assert "⚽" in ctx.bot.send_message.call_args.kwargs["text"]
