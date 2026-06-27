@@ -69,3 +69,18 @@
 **Outcome:** APPROVE. Ready for Buffon QA gate.
 
 **Buffon added 5 regression tests** (TestQualifyingThirdsCallerRegression) to guard against callers dropping `qualifying_thirds` param. Coverage gap closed.
+
+### 2026-06-27 — Finished-Match Goal Loop Fix (Egypt-Iran) — Review Gate
+
+**Session:** kante-3 implementation + pirlo-3 review  
+**Status:** APPROVED — no required code changes
+
+**Reviewed:** Kanté's `_match_is_over` wall-clock guard for stuck goal-polling loop.
+
+**Key approvals:**
+1. 4h threshold is correct (ET+penalties fit comfortably, margin safe)
+2. Prune safety verified (no interaction with recap job)
+3. Concurrency atomic (no interleaving on single-threaded asyncio)
+4. Error path safe (date parse failure → match stays live)
+
+**Verdict:** APPROVE — fix is correct, minimal, safe. Ship it.

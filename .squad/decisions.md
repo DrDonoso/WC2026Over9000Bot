@@ -986,3 +986,195 @@ Kanté's implementation is correct and complete. All 42 new tests are real. One 
 
 **Final pytest count: 1618 passed, 5 warnings**  
 (1571 baseline → +42 Kanté → +5 Buffon = 1618)
+
+---
+
+# Decision: Hard-exclude matches >4h past kickoff from goal-polling jobs
+
+**Date:** 2026-06-27  
+**Author:** Kanté (Backend Developer)  
+**Status:** Implemented  
+**Triggered by:** Production loop — Egypt-Iran goal/disallowed spam after match ended
+
+---
+
+## Problem
+
+football-data.org can stay stuck at `IN_PLAY` or `PAUSED` long after full time (hours, sometimes days). When this happens AND the Reddit match thread oscillates on a VAR-disallowed goal, the bot emits an endless alternating "⚽ gol" / "🚫 gol anulado" every ~25s with no termination condition.
+
+The existing `MATCH_OVER_AGE = timedelta(hours=4)` constant was only used by `poll_finished_matches_job` (first-run seeding). The two goal-polling jobs had no wall-clock cutoff.
+
+## Decision
+
+Add a shared `_match_is_over(match, now_utc) -> bool` predicate to `__main__.py`:
+- Returns `True` when `kickoff > MATCH_OVER_AGE (4h) ago` — pure wall-clock, API status ignored.
+- FINISHED matches within 4h are NOT excluded (they remain eligible for final-goal catch-up).
+- ET + penalties comfortably fit within 4h of kickoff.
+
+Apply it in both goal-polling jobs:
+
+1. **`poll_goals_job`**: prune over-matches from `live_scores` / `seen_api` / `seen_thread` (evict stuck entries, persist), then exclude from `relevant` with `not _match_is_over(m, now_utc)`.
+2. **`poll_thread_goals_job`**: filter `live_matches` before scanning Reddit.
+
+## Rationale
+
+- Wall-clock is the only reliable signal — API status cannot be trusted.
+- 4h is a generous ceiling that accommodates any realistic match (regular time + ET + penalties + any broadcast delay).
+- Prune + filter together are idempotent: once evicted, the match is structurally impossible to re-enter the goal pipeline without a bot restart.
+- Self-healing on next tick after deploy: no manual `live_scores.json` deletion required.
+
+## Alternatives considered
+
+- **Trust FINISHED status**: Too fragile — API lag means FINISHED can arrive minutes or hours after FT.  
+- **Gate on Reddit thread age**: Reddit threads stay active for days. Not reliable.
+- **Rate-limit disallowed**: Treats the symptom, not the cause. Would still loop.
+
+## Impact
+
+- All existing tests pass (+10 new regression tests added).
+- Genuinely live matches (within 4h), including ET and penalties, are unaffected.
+- FINISHED matches that just ended (within 4h) still receive final-goal catch-up.
+- Prune is logged at INFO level for observability.
+# Review: Hard-exclude matches >4h past kickoff from goal-polling jobs
+
+**Date:** 2026-06-27  
+**Reviewer:** Pirlo (Lead / Tech Lead)  
+**Author:** Kanté  
+**Status:** APPROVED  
+**Triggered by:** Production loop — Egypt-Iran goal/disallowed spam
+
+---
+
+## Review Summary
+
+### 1) THRESHOLD — 4h is the right call ✅
+
+Regulation ~2h, ET+penalties ~3h max. A 4h ceiling gives a full hour of margin beyond the longest realistic match. The only scenario exceeding 4h is an abandoned-and-resumed-next-day match — an extraordinary event that would require manual intervention regardless and has never occurred at a World Cup. The risk of silencing a genuinely live match is negligible vs. the proven production harm of the spam loop. Reuses the established `MATCH_OVER_AGE` constant already proven safe for the recap seeding job. **Confirmed: no adjustment needed.**
+
+### 2) PRUNE SAFETY — no regression with recap job ✅
+
+`poll_finished_matches_job` operates on its own state:
+- `finished_announced` (bot_data set + `finished_announced.json`)
+- Fetches matches directly from `client.get_all_matches()`
+- Checks `m.status == "FINISHED"` against the API response
+
+It **never reads** `live_scores`, `seen_api`, or `seen_thread`. Pruning those dicts has zero interaction with the recap pipeline. A late FT recap is driven entirely by `finished_announced.json` and the API's status flip — both untouched by this change. **No regression.**
+
+### 3) CONCURRENCY — atomic, no interleaving hazard ✅
+
+Verified: `save_scores` (score_state.py:53) is synchronous (`open` + `json.dump`). The entire eviction block (build `over_ids` set → `scores.pop` → `seen_api.pop` → `seen_thread.pop` → `save_scores`) contains **zero `await` points**. On the single-threaded asyncio event loop, this runs atomically — no coroutine can interleave.
+
+The eviction runs **before** the `goal_lock`-protected reconcile section, which is correct: it removes entries that should never reach reconcile. `poll_thread_goals_job` filters its own `live_matches` list independently (also no `await` in the filter). The two jobs cannot observe each other's mid-mutation state. **Safe.**
+
+### 4) Overall — simplest correct fix ✅
+
+**Wall-clock is the only signal that can't lie.** API status lies (stuck IN_PLAY). Reddit thread status lies (oscillating VAR). Wall-clock from kickoff is monotonic and deterministic. This is the correct primitive for a circuit breaker.
+
+**Date parse failure path:** `_match_is_over` catches all exceptions and returns `False` — the match stays in polling. This is the safe direction (over-poll, never silence). A persistently malformed `utc_date` would prevent eviction, but: (a) the same format string is used everywhere in the codebase (`%Y-%m-%dT%H:%M:%SZ`), so a parse failure would break many features, not just this guard; (b) it cannot cause the spam loop, which requires *both* stuck status AND oscillating thread scores.
+
+**No slip-through path identified.** Once `_match_is_over` returns `True`:
+- `poll_goals_job`: evicts from all three dicts + excludes from `relevant`
+- `poll_thread_goals_job`: excludes from `live_matches` before Reddit scan
+- Re-entry is impossible without a bot restart (eviction is idempotent and persisted)
+
+---
+
+## VERDICT: APPROVE
+
+No required changes. Fix is correct, minimal, and safe. Ship it.
+
+---
+
+
+---
+
+# QA Gate Verdict: Finished-match loop fix (Egypt-Iran)
+
+**Date:** 2026-06-27  
+**QA Agent:** Buffon (Tester / QA)  
+**Reviewed:** Kanté's `_match_is_over` wall-clock cutoff for goal-polling jobs  
+**Requested by:** drdonoso (live production loop on Egypt-Iran)
+
+---
+
+## VERDICT: PASS WITH ADDED TESTS (+5)
+
+**Test count: 1629 → 1639 (Kanté +10) → 1644 (Buffon +5). All 1644 pass.**
+
+---
+
+## Step 1 — Full Suite
+
+`pytest -q`: **1639 passed** immediately after Kanté's changes, matching his stated count. ✅
+
+---
+
+## Step 2 — Kanté's +10 Tests Are Real
+
+### `test_egypt_iran_oscillation_produces_zero_sends` (poll_goals_job)
+
+Correctly reproduces the production loop:
+- Seeds `seen_api["99"] = {home:0, away:1}` with kickoff 20h ago.
+- Oscillates `stale_match.away_score` through [1, 0, 1, 0] across 4 ticks in the same `ctx`.
+- **WITHOUT fix**: tick 2 → DISALLOWED sent, tick 3 → GOAL sent, tick 4 → DISALLOWED sent (3 sends, traced through `reconcile()` + persisted `seen_api` state).
+- **WITH fix**: match pruned on tick 1 (removed from `scores`, `seen_api`, `seen_thread`), then excluded from `relevant` → 0 sends. ✅ Real regression guard.
+
+### `test_stale_match_oscillation_zero_sends_thread_job` (poll_thread_goals_job)
+
+Same scenario on the thread job:
+- Stale match filtered from `live_matches` before scanner is called.
+- Even with scanner returning events for each oscillating tick, they're never processed.
+- WITHOUT fix: scanner would fire, events reconciled, alternating sends. ✅ Real guard.
+
+### Prune assertions ✅
+
+- `test_stale_inplay_match_excluded_from_relevant`: `save_scores` called with "1" absent → disk write confirmed.
+- `test_stale_match_pruned_from_live_scores_and_seen`: `live_scores`, `seen_scores["api"]`, `seen_scores["thread"]` all cleared in-memory. ✅
+
+### Live path preserved ✅
+
+| Scenario | Test | Result |
+|---|---|---|
+| Recent match 30min (kickoff) | `test_recent_match_within_4h_goals_still_announced` | ⚽ announced |
+| FINISHED match 2h past kickoff | `test_recently_finished_match_in_state_still_polled` | ⚽ final goal |
+| Real VAR during live match 45min | `test_real_var_during_live_match_still_works` | ❌ VAR fires |
+| Recent thread job match 30min | `test_recent_match_still_processed_by_thread_job` | ⚽ announced |
+
+---
+
+## Step 3 — `_make_match` Default Date Change
+
+Old default `"2026-06-17T18:00:00Z"` (10 days ago = >4h) would silently exclude ALL existing tests' matches via `_match_is_over`, causing widespread `send_message` assertion failures. Kanté correctly replaced it with a dynamic "30min ago" default. No existing test was silently weakened. All other test files that use hard-coded dates do not call `poll_goals_job` / `poll_thread_goals_job` → unaffected. ✅
+
+---
+
+## Step 4 — Edge Cases Added by Buffon (+5)
+
+**Gap:** No tests for `_match_is_over`'s safe fallback or exact boundary direction.
+
+**Class `TestMatchIsOverUnit` added to `test_poll_goals_job.py`:**
+
+| Test | Scenario | Result |
+|---|---|---|
+| `test_invalid_utc_date_returns_false` | `"not-a-valid-date"` → `except Exception: return False` | Match stays live ✅ |
+| `test_empty_utc_date_returns_false` | `""` → same safe path | Match stays live ✅ |
+| `test_3h59m_kickoff_is_not_over` | 239min ago → `< 240min` → False | NOT excluded ✅ |
+| `test_4h2m_kickoff_is_over` | 4h2m ago → True | IS excluded ✅ |
+| `test_et_penalties_match_3h50m_still_announced` | IN_PLAY 3h50m, home scores → integration | ⚽ announced ✅ |
+
+**Boundary direction:** `>` (strict), not `>=`. A match at exactly 4h to-the-second is marginally excluded (due to microseconds in `now_utc`), but this is a non-issue since 4h past kickoff is well beyond any real match. ET+PKs fully covered at 3h50m.
+
+**"Prune then re-seed" scenario:** Structurally impossible — a re-appearing match >4h old is still excluded from `relevant` by `_match_is_over`. No test needed.
+
+---
+
+## Hazards / Findings
+
+**None blocking.** One observation:
+
+- `_match_is_over` on invalid/None utc_date returns **False** (keeps match live). This is the safe choice — an API anomaly on `utc_date` won't silently kill a live match. However, if a match has a permanently malformed date AND is stuck IN_PLAY, the 4h wall-clock guard won't fire. This is an extreme edge case and is now documented via the two safe-default tests.
+
+---
+
+**VERDICT: PASS WITH ADDED TESTS (+5)**  
+**Final count: 1644 passed, 5 warnings.**
