@@ -5,6 +5,13 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260627] - 2026-06-27
+
+- Add _match_is_over (kickoff >4h ago) and exclude over-matches from both goal-polling jobs even when football-data status is stuck at IN_PLAY
+- Evict and persist-prune over-matches from live_scores and per-source seen state so a stuck entry self-heals on the next tick
+- Fixes the endless goal -> disallowed loop caused by an oscillating Reddit thread read on a match that ended hours ago (e.g. Egypt-Iran)
+
+
 ## [20260626.02] - 2026-06-26
 
 - Stop poisoning the broadcast cache for 6h when the RTVE fetch fails; empty results now expire after 30 min so the next call retries
