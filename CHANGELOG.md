@@ -5,6 +5,17 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260627.02] - 2026-06-27
+
+- Seed live_scores at 0-0 when poll_kickoff_job fires, so goals are detected as proper 0-0->0-1 transitions from the first minute
+- When a match is seeded late, recover the real per-goal scorer and clip from the Reddit thread and send proper "Ver gol" notifications, using the neutral "Me perdi N goles" message only as a fallback
+- Two-tick FINISHED eviction stops goal-polling a match after full time, fixing the post-FT goal/disallowed oscillation (e.g. Uruguay 0-1 Spain), while preserving a real in-match VAR disallowed
+- Persist live_scores immediately after each thread goal claim
+- kante-3: Implementation of _match_is_over wall-clock guard (+10 tests)
+- pirlo-3: Review gate APPROVED
+- buffon-3: QA gate PASS WITH ADDED TESTS (+5)
+
+
 ## [20260627] - 2026-06-27
 
 - Add _match_is_over (kickoff >4h ago) and exclude over-matches from both goal-polling jobs even when football-data status is stuck at IN_PLAY
