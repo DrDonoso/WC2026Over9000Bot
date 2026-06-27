@@ -371,7 +371,7 @@ class RedditMatchScanner:
             f"?q={urllib.parse.quote(query)}&restrict_sr=on&sort=new&include_over_18=on&t=week"
         )
         try:
-            resp = self._session.get(url, timeout=15)
+            resp = self._session.get(url, timeout=5)
             resp.raise_for_status()
             # Search results use class="search-title" links, not the /new/ listing format.
             for m in _SEARCH_RESULT_LINK_RE.finditer(resp.text):

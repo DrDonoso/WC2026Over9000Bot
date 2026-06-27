@@ -433,3 +433,123 @@ class TestFormatMatchStart:
         m = self._make_match_for_format()
         text = format_match_start(m)
         assert "<b>" in text and "</b>" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 0-0 live_scores seed at kickoff
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestKickoffSeedLiveScores:
+    """After announcing a kickoff, poll_kickoff_job must seed live_scores at 0-0
+    so the first poll_goals_job tick sees a stored entry and detects goals via
+    the normal scored delta path (not the first-seen catch-up path)."""
+
+    def _ctx_seeded(self, settings, announced=None) -> MagicMock:
+        ctx = _make_context(settings)
+        ctx.bot_data["kickoff_seeded"] = True
+        ctx.bot_data["kickoff_announced"] = set(announced or [])
+        return ctx
+
+    @pytest.mark.asyncio
+    async def test_kickoff_seeds_live_scores_at_zero_zero(self, tmp_path):
+        """After sending kickoff notice, live_scores["<id>"] == {home:0, away:0, status:IN_PLAY}."""
+        settings = _make_settings(tmp_path)
+        ctx = self._ctx_seeded(settings)
+        match = _make_match(30, status="SCHEDULED", utc_date=_PAST_STR)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.save_scores") as mock_save_scores,
+        ):
+            await poll_kickoff_job(ctx)
+
+        assert "live_scores" in ctx.bot_data
+        assert "30" in ctx.bot_data["live_scores"]
+        assert ctx.bot_data["live_scores"]["30"] == {"home": 0, "away": 0, "status": "IN_PLAY"}
+        mock_save_scores.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_kickoff_seed_idempotent_if_already_present(self, tmp_path):
+        """If live_scores already has the match key, kickoff does not overwrite it."""
+        settings = _make_settings(tmp_path)
+        ctx = self._ctx_seeded(settings)
+        ctx.bot_data["live_scores"] = {"31": {"home": 1, "away": 0, "status": "IN_PLAY"}}
+
+        match = _make_match(31, status="SCHEDULED", utc_date=_PAST_STR)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.save_scores") as mock_save_scores,
+        ):
+            await poll_kickoff_job(ctx)
+
+        assert ctx.bot_data["live_scores"]["31"]["home"] == 1
+        mock_save_scores.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_kickoff_seed_then_goal_is_proper_delta_not_catchup(self, tmp_path):
+        """After 0-0 seed: first IN_PLAY poll seeds seen_api; second at 0-1 fires proper goal."""
+        from worldcup_bot.__main__ import poll_goals_job
+        from worldcup_bot.api.models import Match
+
+        settings = _make_settings(tmp_path)
+        ctx = self._ctx_seeded(settings)
+        match_sched = _make_match(32, status="SCHEDULED", utc_date=_PAST_STR)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match_sched]
+
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            await poll_kickoff_job(ctx)
+
+        assert ctx.bot_data["live_scores"]["32"] == {"home": 0, "away": 0, "status": "IN_PLAY"}
+        ctx.bot.send_message.assert_awaited_once()  # kickoff notice
+        ctx.bot.send_message.reset_mock()
+
+        no_enrich = MagicMock()
+        no_enrich.find_thread_permalink = MagicMock(return_value=None)
+        no_enrich.find_match_thread = MagicMock(return_value=None)
+        no_enrich.get_thread_body = MagicMock(return_value="")
+        ctx.bot_data["reddit_scanner"] = no_enrich
+
+        def _inplay(home_score, away_score):
+            return Match(id=32, utc_date=_PAST_STR, status="IN_PLAY",
+                         stage="GROUP_STAGE", group="GROUP_A",
+                         home_tla="ARG", away_tla="AUT",
+                         home_name="Argentina", away_name="Austria",
+                         home_score=home_score, away_score=away_score, winner=None)
+
+        # Tick at 0-0: seeds seen_api, no send.
+        with (
+            patch("worldcup_bot.__main__.make_client") as mc,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mc.return_value.get_all_matches.return_value = [_inplay(0, 0)]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+
+        # Tick at 0-1: proper goal delta (not catchup).
+        ctx.bot_data["clip_store"] = {}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=2))
+        with (
+            patch("worldcup_bot.__main__.make_client") as mc,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mc.return_value.get_all_matches.return_value = [_inplay(0, 1)]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_called_once()
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "GOOOL" in text or "Gol" in text
+        assert "perdí" not in text

@@ -32,6 +32,8 @@ class GoalDelta:
     new_away: int       # current away score after the change
     kind: str           # "goal", "disallowed", or "catchup"
     goals_missed: int = 0  # number of goals missed (catchup only)
+    prev_home: int = 0     # score before the catch-up window (catchup only)
+    prev_away: int = 0     # score before the catch-up window (catchup only)
 
 
 def load_scores(path: str) -> dict:
@@ -198,6 +200,8 @@ def reconcile(
                 new_away=new_away,
                 kind="catchup",
                 goals_missed=home_diff + away_diff,
+                prev_home=announced["home"],
+                prev_away=announced["away"],
             )
             return ([catchup], new, new)
         # new <= announced: source is lagging or at the same level — no delta.

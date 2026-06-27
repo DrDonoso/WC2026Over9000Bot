@@ -367,6 +367,155 @@ async def _notify_catchup(
     log.debug("Clip-store catchup entry created: token=%s key=%s", tok, token_key)
 
 
+async def _attempt_goal_recovery(
+    match,
+    curr_home: int,
+    curr_away: int,
+    prev_home: int,
+    prev_away: int,
+    goals_missed: int,
+    scanner: RedditMatchScanner,
+    settings: Settings,
+    context: ContextTypes.DEFAULT_TYPE,
+    silent: bool,
+    seen_thread: dict,
+    match_key: str,
+) -> bool:
+    """Attempt to recover per-goal events from the Reddit match thread.
+
+    Called when the bot missed goals (first-seen at non-zero score OR restart-ahead).
+    Looks up the match thread, parses goal events, and emits proper _notify_goal
+    notifications (scorer + "Ver gol" keyboard) for each missed goal.
+
+    Returns True if all missed goals were recovered and proper notifications sent.
+    Returns False (fallback to neutral catch-up) when:
+    - No thread found
+    - Thread body empty or unparseable
+    - Recovered event count != goals_missed
+    - Any individual goal cannot be matched to a thread event
+    """
+    try:
+        # Try cached /new/ listing first (no extra HTTP), then search fallback.
+        permalink = await asyncio.to_thread(
+            scanner.find_thread_permalink, match.home_name, match.away_name
+        )
+        if permalink is None:
+            permalink = await asyncio.to_thread(
+                scanner.find_match_thread, match.home_name, match.away_name
+            )
+        if permalink is None:
+            log.info(
+                "_attempt_goal_recovery: no thread for %s vs %s → neutral fallback",
+                match.home_name, match.away_name,
+            )
+            return False
+
+        selftext = await asyncio.to_thread(scanner.get_thread_body, permalink)
+        if not selftext:
+            log.info(
+                "_attempt_goal_recovery: empty thread body for %s vs %s → neutral fallback",
+                match.home_name, match.away_name,
+            )
+            return False
+
+        events = parse_goal_events(selftext)
+        if not events:
+            log.info(
+                "_attempt_goal_recovery: no events parsed for %s vs %s → neutral fallback",
+                match.home_name, match.away_name,
+            )
+            return False
+
+        sorted_events = sorted(events, key=lambda e: e.minute_sort)
+        goals_to_notify: list[dict] = []
+
+        for target in range(prev_home + 1, curr_home + 1):
+            event = next(
+                (
+                    e for e in sorted_events
+                    if e.home_score == target
+                    and _teams_match(e.scoring_team, match.home_name)
+                ),
+                None,
+            )
+            if event is None:
+                log.info(
+                    "_attempt_goal_recovery: cannot match home goal %d for %s → neutral fallback",
+                    target, match.home_name,
+                )
+                return False
+            goals_to_notify.append({
+                "scoring_team": match.home_name,
+                "new_home": target,
+                "new_away": event.away_score,
+                "scorer": event.scorer or None,
+                "minute": event.minute_text or None,
+                "minute_sort": event.minute_sort,
+            })
+
+        for target in range(prev_away + 1, curr_away + 1):
+            event = next(
+                (
+                    e for e in sorted_events
+                    if e.away_score == target
+                    and _teams_match(e.scoring_team, match.away_name)
+                ),
+                None,
+            )
+            if event is None:
+                log.info(
+                    "_attempt_goal_recovery: cannot match away goal %d for %s → neutral fallback",
+                    target, match.away_name,
+                )
+                return False
+            goals_to_notify.append({
+                "scoring_team": match.away_name,
+                "new_home": event.home_score,
+                "new_away": target,
+                "scorer": event.scorer or None,
+                "minute": event.minute_text or None,
+                "minute_sort": event.minute_sort,
+            })
+
+        if len(goals_to_notify) != goals_missed:
+            log.info(
+                "_attempt_goal_recovery: recovered %d goals but expected %d for %s vs %s → neutral fallback",
+                len(goals_to_notify), goals_missed, match.home_name, match.away_name,
+            )
+            return False
+
+        goals_to_notify.sort(key=lambda g: g["minute_sort"])
+
+        for g in goals_to_notify:
+            await _notify_goal(
+                match=match,
+                new_home=g["new_home"],
+                new_away=g["new_away"],
+                scoring_team=g["scoring_team"],
+                scorer=g["scorer"],
+                minute=g["minute"],
+                settings=settings,
+                context=context,
+                silent=silent,
+            )
+
+        # Claim in seen_thread so poll_thread_goals_job won't re-announce these goals.
+        seen_thread[match_key] = {"home": curr_home, "away": curr_away}
+        log.info(
+            "_attempt_goal_recovery: recovered %d goal(s) for %s vs %s via thread",
+            goals_missed, match.home_name, match.away_name,
+        )
+        return True
+
+    except Exception as exc:
+        log.warning(
+            "_attempt_goal_recovery: error for %s vs %s: %s → neutral fallback",
+            match.home_name, match.away_name, exc,
+        )
+        return False
+
+
+
 async def _backfill_scorer_in_clip_store(
     match,
     events: list,
@@ -478,9 +627,28 @@ async def _process_goal_delta(
     settings: Settings,
     context: ContextTypes.DEFAULT_TYPE,
     silent: bool,
+    seen_thread: dict | None = None,
+    match_key: str | None = None,
 ) -> None:
     """Send a goal or disallowed notification for a single score-change delta."""
     if delta.kind == "catchup":
+        if seen_thread is not None and match_key is not None:
+            recovered = await _attempt_goal_recovery(
+                match=match,
+                curr_home=delta.new_home,
+                curr_away=delta.new_away,
+                prev_home=delta.prev_home,
+                prev_away=delta.prev_away,
+                goals_missed=delta.goals_missed,
+                scanner=scanner,
+                settings=settings,
+                context=context,
+                silent=silent,
+                seen_thread=seen_thread,
+                match_key=match_key,
+            )
+            if recovered:
+                return
         await _notify_catchup(
             match=match,
             new_home=delta.new_home,
@@ -584,6 +752,25 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if pruned:
             save_scores(state_path, scores)
 
+        # Evict POSTPONED/SUSPENDED matches that were seeded (e.g. by poll_kickoff_job
+        # 0-0 seed).  The 4h wall-clock prune is backup; this handles status changes
+        # within the 4h window so stale 0-0 entries don't persist indefinitely.
+        postponed_evicted = [
+            str(m.id) for m in all_matches
+            if m.status in ("POSTPONED", "SUSPENDED") and str(m.id) in scores
+        ]
+        for k in postponed_evicted:
+            m = next((x for x in all_matches if str(x.id) == k), None)
+            log.warning(
+                "poll_goals_job: match %s became %s — evicting seeded entry from live state",
+                k, m.status if m else "POSTPONED/SUSPENDED",
+            )
+            scores.pop(k, None)
+            seen_api.pop(k, None)
+            seen_scores["thread"].pop(k, None)
+        if postponed_evicted:
+            save_scores(state_path, scores)
+
         # IN_PLAY/PAUSED are live; FINISHED matches already in state catch final goals + FT.
         # Hard-exclude any match whose kickoff was >MATCH_OVER_AGE ago.
         relevant = [
@@ -627,6 +814,11 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # Always advance this source's seen baseline.
                 seen_api[match_key] = new_seen
 
+                # Track whether this is already a FINISHED tick (for two-tick eviction).
+                was_already_finished = (
+                    stored is not None and stored.get("status") == "FINISHED"
+                )
+
                 if stored is None:
                     # First-seen by any source: seed live_scores entry.
                     log.info(
@@ -641,13 +833,13 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     }
                     changed = True
                     # If the API first reported IN_PLAY/PAUSED with a non-zero score
-                    # (status-flip delay), earlier goals were never seen.  Emit ONE
-                    # neutral catch-up notification — we don't know the actual goal
-                    # sequence so we must not fabricate per-team attributions.
+                    # (status-flip delay), earlier goals were never seen.  Attempt to
+                    # recover proper per-goal notifications from the Reddit thread;
+                    # fall back to a neutral catch-up if the thread is unavailable.
                     if curr_home > 0 or curr_away > 0:
                         log.info(
                             "poll_goals_job: match %d first seen at %d-%d — "
-                            "emitting ONE catch-up notification for %d missed goal(s)",
+                            "will attempt recovery for %d missed goal(s)",
                             match.id, curr_home, curr_away, curr_home + curr_away,
                         )
                         deltas_to_process.append(GoalDelta(
@@ -657,6 +849,8 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                             new_away=curr_away,
                             kind="catchup",
                             goals_missed=curr_home + curr_away,
+                            prev_home=0,
+                            prev_away=0,
                         ))
 
                 elif deltas:
@@ -675,22 +869,40 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     deltas_to_process = list(deltas)
 
                 else:
-                    # No goals/disallowed to announce, but status or lag-resolved score may change.
-                    announced_changed = (
-                        new_ann["home"] != stored["home"] or new_ann["away"] != stored["away"]
-                    )
-                    status_changed = stored.get("status") != match.status
-                    if announced_changed or status_changed:
-                        scores[match_key]["home"] = new_ann["home"]
-                        scores[match_key]["away"] = new_ann["away"]
-                        scores[match_key]["status"] = match.status
+                    # No goals/disallowed to announce.
+                    if was_already_finished:
+                        # Second+ FINISHED tick with no new delta → evict from live state.
+                        # Stops post-FT thread oscillations (e.g. Uruguay-Spain) from
+                        # re-announcing after the match ends.  The FT recap job uses its
+                        # own finished_announced set and is unaffected.
+                        log.info(
+                            "poll_goals_job: match %d (%s vs %s) already FINISHED, "
+                            "no new delta → evicting from live state",
+                            match.id, match.home_name, match.away_name,
+                        )
+                        scores.pop(match_key, None)
+                        seen_api.pop(match_key, None)
+                        seen_scores["thread"].pop(match_key, None)
                         changed = True
+                    else:
+                        # Normal no-delta path: update status/score if changed.
+                        announced_changed = (
+                            new_ann["home"] != stored["home"] or new_ann["away"] != stored["away"]
+                        )
+                        status_changed = stored.get("status") != match.status
+                        if announced_changed or status_changed:
+                            scores[match_key]["home"] = new_ann["home"]
+                            scores[match_key]["away"] = new_ann["away"]
+                            scores[match_key]["status"] = match.status
+                            changed = True
 
             # ── Outside the lock: slow enrichment + Telegram sends ────────────────
             for delta in deltas_to_process:
                 try:
                     await _process_goal_delta(
-                        delta, match, scanner, settings, context, silent
+                        delta, match, scanner, settings, context, silent,
+                        seen_thread=seen_scores["thread"],
+                        match_key=match_key,
                     )
                 except Exception as exc:
                     # Score already claimed; log only — do not re-announce.
@@ -853,8 +1065,12 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                                     new_ann["away"] = clamped
 
                         # CLAIM the announced score before slow Telegram sends.
+                        # Persist immediately — closes the save-window race where a
+                        # crash between claim and a deferred save could lose the
+                        # claimed score and trigger re-announcement on restart.
                         scores[key]["home"] = new_ann["home"]
                         scores[key]["away"] = new_ann["away"]
+                        save_scores(state_path, scores)
                         changed = True
 
                 # ── Outside the lock: build notifications ─────────────────────
@@ -971,9 +1187,6 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     "poll_thread_goals_job: error for match %s vs %s: %s",
                     result.home_tla, result.away_tla, exc,
                 )
-
-        if changed:
-            save_scores(state_path, scores)
 
     except Exception as exc:
         log.exception("poll_thread_goals_job: unexpected error (will retry next tick): %s", exc)
@@ -1246,6 +1459,14 @@ async def poll_kickoff_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             finally:
                 announced.add(mid)
                 save_finished(path, announced)
+                # Seed live_scores at 0-0 so the first IN_PLAY API tick sees a proper
+                # 0→1 goal delta rather than triggering the first-seen catch-up path.
+                scores_dict: dict = context.bot_data.setdefault("live_scores", {})
+                match_key_str = str(mid)
+                if match_key_str not in scores_dict:
+                    scores_dict[match_key_str] = {"home": 0, "away": 0, "status": "IN_PLAY"}
+                    save_scores(f"{settings.state_dir}/live_scores.json", scores_dict)
+                    log.info("poll_kickoff_job: seeded match %d at 0-0 in live_scores", mid)
 
     except Exception as exc:
         log.exception("poll_kickoff_job: unexpected error: %s", exc)

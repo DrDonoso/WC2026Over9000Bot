@@ -1481,3 +1481,109 @@ class TestMatchOverFilterThread:
 
         ctx.bot.send_message.assert_called_once()
         assert "⚽" in ctx.bot.send_message.call_args.kwargs["text"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Immediate save after goal claim (Part 4 — save-window race fix)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestImmediateSave:
+    """save_scores must be called INSIDE the goal_lock (immediately after claiming
+    the score), not deferred to the end of the loop — prevents losing the claim
+    if the process crashes between the in-memory update and the deferred save."""
+
+    @pytest.mark.asyncio
+    async def test_save_called_immediately_after_goal_claim(self, tmp_path):
+        """Goal claimed -> save_scores called once with the new score right away."""
+        settings = _make_settings(tmp_path)
+        match = _make_match(1, "IN_PLAY", home_score=2, away_score=0)
+        live_scores = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores,
+                            seen_thread={"1": {"home": 1, "away": 0}})
+
+        event = _make_goal_event(scorer="Harry Kane", scoring_team="England",
+                                 home_score=2, away_score=0, minute_text="60")
+        result = _make_thread_result("ENG", "SEN", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        mock_save.assert_called_once()
+        saved_state = mock_save.call_args[0][1]
+        assert saved_state["1"]["home"] == 2
+
+    @pytest.mark.asyncio
+    async def test_save_persists_claim_even_when_notify_fails(self, tmp_path):
+        """Even if send_message raises, the score was already saved inside the lock."""
+        settings = _make_settings(tmp_path)
+        match = _make_match(1, "IN_PLAY", home_score=2, away_score=0)
+        live_scores = {"1": {"home": 1, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(settings, live_scores=live_scores,
+                            seen_thread={"1": {"home": 1, "away": 0}})
+
+        event = _make_goal_event(scorer="Harry Kane", scoring_team="England",
+                                 home_score=2, away_score=0, minute_text="60")
+        result = _make_thread_result("ENG", "SEN", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+        ctx.bot.send_message = AsyncMock(side_effect=Exception("Telegram API error"))
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)  # must not raise
+
+        mock_save.assert_called_once()
+        saved_state = mock_save.call_args[0][1]
+        assert saved_state["1"]["home"] == 2
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Post-FT eviction dedup — evicted match skipped by thread job
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPostFTEvictionDedup:
+    """Once poll_goals_job evicts a match from live_scores (two-tick FINISHED eviction),
+    poll_thread_goals_job must skip it entirely — no post-FT goal/disallowed sends."""
+
+    @pytest.mark.asyncio
+    async def test_evicted_match_skipped_by_thread_job(self, tmp_path):
+        """live_scores has no entry for match -> thread job skips -> zero sends."""
+        settings = _make_settings(tmp_path)
+        live_scores = {}  # match already evicted
+        ctx = _make_context(settings, live_scores=live_scores)
+
+        event = _make_goal_event(scorer="Baena", scoring_team="Spain",
+                                 home_score=0, away_score=1, minute_text="42",
+                                 home_team="Uruguay", away_team="Spain")
+        result = _make_thread_result("URU", "ESP", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        match = _make_match(99, "IN_PLAY", home_name="Uruguay", away_name="Spain",
+                            home_tla="URU", away_tla="ESP",
+                            home_score=0, away_score=1)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+        mock_save.assert_not_called()

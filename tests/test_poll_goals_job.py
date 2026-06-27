@@ -76,7 +76,7 @@ def _no_enrichment_scanner() -> MagicMock:
     return scanner
 
 
-from worldcup_bot.__main__ import _match_is_over, poll_goals_job
+from worldcup_bot.__main__ import _match_is_over, poll_goals_job, poll_thread_goals_job
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -963,3 +963,616 @@ class TestMatchIsOverUnit:
 
         ctx.bot.send_message.assert_called_once()
         assert "⚽" in ctx.bot.send_message.call_args.kwargs["text"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FINISHED two-tick eviction — B regression (Uruguay-Spain post-FT oscillation)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFinishedEviction:
+    """Regression suite for the Uruguay-Spain post-FT oscillation bug.
+
+    Root cause: football-data.org reports FINISHED, but the Reddit thread continued
+    to flicker between goal/no-goal for ~4 minutes post-FT (within the <4h window
+    that the Egypt-Iran fix did not catch).
+
+    Fix: two-tick FINISHED eviction — keep match in live_scores for one FINISHED
+    tick (catches late final goals), evict on the second tick with no new delta.
+    """
+
+    @pytest.mark.asyncio
+    async def test_first_finished_tick_updates_status_no_eviction(self, tmp_path):
+        """First FINISHED tick (was IN_PLAY): status updated, match stays in scores, no send."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"99": {"home": 0, "away": 1}})
+        ctx.bot_data["seen_scores"]["thread"]["99"] = {"home": 0, "away": 1}
+        ctx.bot_data["live_scores"] = {"99": {"home": 0, "away": 1, "status": "IN_PLAY"}}
+
+        match = _make_match(99, "FINISHED", home_name="Uruguay", away_name="Spain",
+                            home_tla="URU", away_tla="ESP", home_score=0, away_score=1)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+        assert "99" in ctx.bot_data["live_scores"]
+        assert ctx.bot_data["live_scores"]["99"]["status"] == "FINISHED"
+        mock_save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_second_finished_tick_evicts_match(self, tmp_path):
+        """Second FINISHED tick with no new delta -> match evicted from all live state."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"99": {"home": 0, "away": 1}})
+        ctx.bot_data["seen_scores"]["thread"]["99"] = {"home": 0, "away": 1}
+        ctx.bot_data["live_scores"] = {"99": {"home": 0, "away": 1, "status": "FINISHED"}}
+
+        match = _make_match(99, "FINISHED", home_name="Uruguay", away_name="Spain",
+                            home_tla="URU", away_tla="ESP", home_score=0, away_score=1)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+        assert "99" not in ctx.bot_data["live_scores"]
+        assert "99" not in ctx.bot_data["seen_scores"]["api"]
+        assert "99" not in ctx.bot_data["seen_scores"]["thread"]
+        mock_save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_uruguay_spain_full_timeline_zero_post_ft_sends(self, tmp_path):
+        """Full Uruguay-Spain B regression: two poll_goals ticks evict the match,
+        then thread oscillation produces ZERO post-FT sends."""
+        from worldcup_bot.reddit.models import GoalEvent, MatchThreadResult, ThreadInfo
+
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"99": {"home": 0, "away": 1}})
+        ctx.bot_data["seen_scores"]["thread"]["99"] = {"home": 0, "away": 1}
+        ctx.bot_data["live_scores"] = {"99": {"home": 0, "away": 1, "status": "IN_PLAY"}}
+
+        uru_match = _make_match(99, "FINISHED", home_name="Uruguay", away_name="Spain",
+                                home_tla="URU", away_tla="ESP", home_score=0, away_score=1)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [uru_match]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot_data["live_scores"]["99"]["status"] == "FINISHED"
+        ctx.bot.send_message.assert_not_called()
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [uru_match]
+            await poll_goals_job(ctx)
+
+        assert "99" not in ctx.bot_data["live_scores"]
+        ctx.bot.send_message.assert_not_called()
+
+        def _osc_event(away_score: int) -> GoalEvent:
+            return GoalEvent(
+                minute_text="42", minute_sort=42.0, scorer="Baena", scoring_team="Spain",
+                home_team="Uruguay", away_team="Spain",
+                home_score=0, away_score=away_score,
+                raw="Goal!", key=f"abc:0-{away_score}@42:baena",
+            )
+
+        thread_info = ThreadInfo(post_id="abc", title="URU vs ESP",
+                                 permalink="/r/soccer/abc", created_utc=1.0)
+        uru_live = _make_match(99, "IN_PLAY", home_name="Uruguay", away_name="Spain",
+                               home_tla="URU", away_tla="ESP", home_score=0, away_score=1)
+
+        for oscillating_events in ([], [_osc_event(1)]):
+            result = MatchThreadResult(thread=thread_info, events=oscillating_events,
+                                       home_tla="URU", away_tla="ESP")
+            osc_scanner = MagicMock()
+            osc_scanner.scan_live_matches = MagicMock(return_value=[result])
+            ctx.bot_data["reddit_scanner"] = osc_scanner
+            with (
+                patch("worldcup_bot.__main__.make_client") as mock_client,
+                patch("worldcup_bot.__main__.save_scores"),
+                patch("worldcup_bot.__main__.save_clips"),
+            ):
+                mock_client.return_value.get_live_matches.return_value = [uru_live]
+                await poll_thread_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_real_var_during_inplay_still_fires(self, tmp_path):
+        """Real in-match VAR (IN_PLAY, was_already_finished=False) must still fire."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"99": {"home": 0, "away": 1}})
+        ctx.bot_data["live_scores"] = {"99": {"home": 0, "away": 1, "status": "IN_PLAY"}}
+
+        match = _make_match(99, "IN_PLAY", home_name="Uruguay", away_name="Spain",
+                            home_tla="URU", away_tla="ESP", home_score=0, away_score=0)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_called_once()
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "VAR" in text or "anulado" in text
+
+    @pytest.mark.asyncio
+    async def test_final_goal_at_ft_still_notified(self, tmp_path):
+        """Final goal on first FINISHED tick -> goal notified, match NOT evicted."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"99": {"home": 0, "away": 0}})
+        ctx.bot_data["live_scores"] = {"99": {"home": 0, "away": 0, "status": "IN_PLAY"}}
+        ctx.bot_data["clip_store"] = {}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+
+        match = _make_match(99, "FINISHED", home_name="Uruguay", away_name="Spain",
+                            home_tla="URU", away_tla="ESP", home_score=0, away_score=1)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_called_once()
+        assert "99" in ctx.bot_data["live_scores"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Catch-up recovery from Reddit thread
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCatchupRecovery:
+    """Tests for _attempt_goal_recovery — proper per-goal sends vs neutral fallback."""
+
+    def _make_recovery_scanner(self, permalink, selftext: str) -> MagicMock:
+        scanner = MagicMock()
+        scanner.find_thread_permalink = MagicMock(return_value=permalink)
+        scanner.find_match_thread = MagicMock(return_value=None)
+        scanner.get_thread_body = MagicMock(return_value=selftext)
+        return scanner
+
+    @pytest.mark.asyncio
+    async def test_recovery_sends_proper_per_goal_not_neutral(self, tmp_path):
+        """First seen at 0-2, thread has 2 matching events -> 2 goal sends (no neutral)."""
+        from worldcup_bot.reddit.models import GoalEvent
+
+        settings = _make_settings(tmp_path)
+        scanner = self._make_recovery_scanner("/r/soccer/abc", "selftext")
+        ctx = _make_context(settings, scanner)
+        ctx.bot_data["clip_store"] = {}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+
+        match = _make_match(1, "IN_PLAY", home_name="France", away_name="Senegal",
+                            home_tla="FRA", away_tla="SEN", home_score=0, away_score=2)
+        events = [
+            GoalEvent(minute_text="30", minute_sort=30.0, scorer="Mane",
+                      scoring_team="Senegal", home_team="France", away_team="Senegal",
+                      home_score=0, away_score=1, raw="Goal!", key="abc:0-1@30:mane"),
+            GoalEvent(minute_text="65", minute_sort=65.0, scorer="Ndoye",
+                      scoring_team="Senegal", home_team="France", away_team="Senegal",
+                      home_score=0, away_score=2, raw="Goal!", key="abc:0-2@65:ndoye"),
+        ]
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.parse_goal_events", return_value=events),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 2
+        texts = [c.kwargs["text"] for c in ctx.bot.send_message.call_args_list]
+        assert all("GOOOL" in t or "Gol" in t for t in texts)
+        assert all("⚠️" not in t for t in texts)
+
+    @pytest.mark.asyncio
+    async def test_recovery_claims_seen_thread_for_dedup(self, tmp_path):
+        """After recovery, seen_thread is updated to prevent poll_thread re-announcement."""
+        from worldcup_bot.reddit.models import GoalEvent
+
+        settings = _make_settings(tmp_path)
+        scanner = self._make_recovery_scanner("/r/soccer/abc", "selftext")
+        ctx = _make_context(settings, scanner)
+        ctx.bot_data["clip_store"] = {}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+
+        match = _make_match(1, "IN_PLAY", home_name="France", away_name="Senegal",
+                            home_tla="FRA", away_tla="SEN", home_score=0, away_score=2)
+        events = [
+            GoalEvent(minute_text="30", minute_sort=30.0, scorer="Mane",
+                      scoring_team="Senegal", home_team="France", away_team="Senegal",
+                      home_score=0, away_score=1, raw="Goal!", key="abc:0-1@30:mane"),
+            GoalEvent(minute_text="65", minute_sort=65.0, scorer="Ndoye",
+                      scoring_team="Senegal", home_team="France", away_team="Senegal",
+                      home_score=0, away_score=2, raw="Goal!", key="abc:0-2@65:ndoye"),
+        ]
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.parse_goal_events", return_value=events),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot_data["seen_scores"]["thread"]["1"] == {"home": 0, "away": 2}
+
+    @pytest.mark.asyncio
+    async def test_recovery_fallback_when_thread_unavailable(self, tmp_path):
+        """No thread found -> falls back to neutral catch-up message."""
+        settings = _make_settings(tmp_path)
+        scanner = _no_enrichment_scanner()
+        scanner.find_thread_permalink = MagicMock(return_value=None)
+        scanner.find_match_thread = MagicMock(return_value=None)
+        ctx = _make_context(settings, scanner)
+        ctx.bot_data["clip_store"] = {}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+
+        match = _make_match(1, "IN_PLAY", home_name="France", away_name="Senegal",
+                            home_tla="FRA", away_tla="SEN", home_score=0, away_score=2)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "perdí" in text
+
+    @pytest.mark.asyncio
+    async def test_recovery_fallback_when_event_cannot_be_matched(self, tmp_path):
+        """Thread missing goal 2 event -> can't match target -> neutral fallback."""
+        from worldcup_bot.reddit.models import GoalEvent
+
+        settings = _make_settings(tmp_path)
+        scanner = self._make_recovery_scanner("/r/soccer/abc", "selftext")
+        ctx = _make_context(settings, scanner)
+        ctx.bot_data["clip_store"] = {}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+
+        match = _make_match(1, "IN_PLAY", home_name="France", away_name="Senegal",
+                            home_tla="FRA", away_tla="SEN", home_score=0, away_score=2)
+        incomplete_events = [
+            GoalEvent(minute_text="30", minute_sort=30.0, scorer="Mane",
+                      scoring_team="Senegal", home_team="France", away_team="Senegal",
+                      home_score=0, away_score=1, raw="Goal!", key="abc:0-1@30:mane"),
+        ]
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.parse_goal_events", return_value=incomplete_events),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "perdí" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POSTPONED / SUSPENDED eviction
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPostponedEviction:
+    """Matches seeded at 0-0 that become POSTPONED/SUSPENDED must be evicted promptly."""
+
+    @pytest.mark.asyncio
+    async def test_postponed_match_seeded_is_evicted(self, tmp_path):
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"20": {"home": 0, "away": 0}})
+        ctx.bot_data["seen_scores"]["thread"]["20"] = {"home": 0, "away": 0}
+        ctx.bot_data["live_scores"] = {"20": {"home": 0, "away": 0, "status": "IN_PLAY"}}
+
+        match = _make_match(20, "POSTPONED", home_score=None, away_score=None)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        assert "20" not in ctx.bot_data["live_scores"]
+        assert "20" not in ctx.bot_data["seen_scores"]["api"]
+        assert "20" not in ctx.bot_data["seen_scores"]["thread"]
+        ctx.bot.send_message.assert_not_called()
+        mock_save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_suspended_match_seeded_is_evicted(self, tmp_path):
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"21": {"home": 0, "away": 0}})
+        ctx.bot_data["seen_scores"]["thread"]["21"] = {"home": 0, "away": 0}
+        ctx.bot_data["live_scores"] = {"21": {"home": 0, "away": 0, "status": "IN_PLAY"}}
+
+        match = _make_match(21, "SUSPENDED", home_score=None, away_score=None)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        assert "21" not in ctx.bot_data["live_scores"]
+        assert "21" not in ctx.bot_data["seen_scores"]["api"]
+        assert "21" not in ctx.bot_data["seen_scores"]["thread"]
+        ctx.bot.send_message.assert_not_called()
+        mock_save.assert_called_once()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Eviction edge cases: coexistence with age-prune + dedup loop prevention
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestEvictionEdgeCases:
+    """Edge-case coverage for eviction coexistence and post-send loop prevention."""
+
+    @pytest.mark.asyncio
+    async def test_var_flip_oscillation_post_ft_zero_sends(self, tmp_path):
+        """Proper B regression: realistic VAR-flip (0-1→0-0→0-1) post-FT sends nothing.
+
+        The existing test uses []→[0-1] oscillation which never fires regardless of eviction
+        (reconcile(seen=0-1, ann=0-1, 0, 1) = step-2 no-change).  This test uses the real
+        bug pattern: [0-0]→[0-1].  Without two-tick eviction:
+          tick 3: reconcile(seen=0-1, ann=0-1, 0, 0) → disallowed → SENDS ❌
+          tick 4: reconcile(seen=0-0, ann=0-0, 0, 1) → GOOOL → SENDS ⚽
+        With the fix: match is evicted before thread ticks run → zero sends.
+        """
+        from worldcup_bot.reddit.models import GoalEvent, MatchThreadResult, ThreadInfo
+
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"99": {"home": 0, "away": 1}})
+        ctx.bot_data["seen_scores"]["thread"]["99"] = {"home": 0, "away": 1}
+        ctx.bot_data["live_scores"] = {"99": {"home": 0, "away": 1, "status": "IN_PLAY"}}
+
+        uru_match = _make_match(99, "FINISHED", home_name="Uruguay", away_name="Spain",
+                                home_tla="URU", away_tla="ESP", home_score=0, away_score=1)
+
+        # Tick 1: IN_PLAY → FINISHED, no delta → status updated, no eviction yet
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [uru_match]
+            await poll_goals_job(ctx)
+        assert ctx.bot_data["live_scores"]["99"]["status"] == "FINISHED"
+
+        # Tick 2: FINISHED, was_already_finished=True → evicted
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [uru_match]
+            await poll_goals_job(ctx)
+        assert "99" not in ctx.bot_data["live_scores"]
+
+        def _osc_event(away_score: int) -> GoalEvent:
+            return GoalEvent(
+                minute_text="42", minute_sort=42.0, scorer="Baena", scoring_team="Spain",
+                home_team="Uruguay", away_team="Spain",
+                home_score=0, away_score=away_score,
+                raw="Goal!", key=f"abc:0-{away_score}@42:baena",
+            )
+
+        thread_info = ThreadInfo(post_id="abc", title="URU vs ESP",
+                                 permalink="/r/soccer/abc", created_utc=1.0)
+        uru_live = _make_match(99, "IN_PLAY", home_name="Uruguay", away_name="Spain",
+                               home_tla="URU", away_tla="ESP", home_score=0, away_score=1)
+
+        # Realistic VAR oscillation: [0-0] (VAR) then [0-1] (restored).
+        # Without the fix, tick-3 reconcile(seen=0-1,ann=0-1,0,0) → disallowed;
+        # tick-4 reconcile(seen=0-0,ann=0-0,0,1) → GOOOL.  With the fix: match is
+        # evicted so scores.get("99") is None → both ticks skipped → zero sends.
+        for oscillating_events in ([_osc_event(0)], [_osc_event(1)]):
+            result = MatchThreadResult(thread=thread_info, events=oscillating_events,
+                                       home_tla="URU", away_tla="ESP")
+            osc_scanner = MagicMock()
+            osc_scanner.scan_live_matches = MagicMock(return_value=[result])
+            ctx.bot_data["reddit_scanner"] = osc_scanner
+            with (
+                patch("worldcup_bot.__main__.make_client") as mock_client,
+                patch("worldcup_bot.__main__.save_scores"),
+                patch("worldcup_bot.__main__.save_clips"),
+            ):
+                mock_client.return_value.get_live_matches.return_value = [uru_live]
+                await poll_thread_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_age_prune_and_finished_eviction_no_crash(self, tmp_path):
+        """Match >4h old AND FINISHED: age prune removes it first; two-tick logic never runs; no crash.
+
+        The >4h prune fires before the relevant filter so the match is already gone from
+        live_scores before the FINISHED two-tick logic could see it.  Both eviction paths
+        coexist safely.
+        """
+        old_date = (datetime.now(timezone.utc) - timedelta(hours=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"50": {"home": 1, "away": 0}})
+        ctx.bot_data["seen_scores"]["thread"]["50"] = {"home": 1, "away": 0}
+        ctx.bot_data["live_scores"] = {"50": {"home": 1, "away": 0, "status": "FINISHED"}}
+
+        match = _make_match(50, "FINISHED", home_score=1, away_score=0, utc_date=old_date)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)  # must not crash
+
+        assert "50" not in ctx.bot_data["live_scores"]
+        assert "50" not in ctx.bot_data["seen_scores"]["api"]
+        assert "50" not in ctx.bot_data["seen_scores"]["thread"]
+        ctx.bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_recovery_dedup_no_resend_on_next_thread_tick(self, tmp_path):
+        """After recovery claims seen_thread, next poll_thread_goals_job tick with same score emits nothing.
+
+        reconcile(seen={0,2}, ann={0,2}, 0, 2) hits step-2 (new==seen) → ([], ...) → no send.
+        """
+        from worldcup_bot.reddit.models import GoalEvent, MatchThreadResult, ThreadInfo
+
+        settings = _make_settings(tmp_path)
+        scanner = MagicMock()
+        scanner.find_thread_permalink = MagicMock(return_value="/r/soccer/abc")
+        scanner.find_match_thread = MagicMock(return_value=None)
+        scanner.get_thread_body = MagicMock(return_value="selftext")
+        ctx = _make_context(settings, scanner)
+        ctx.bot_data["clip_store"] = {}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+
+        match = _make_match(1, "IN_PLAY", home_name="France", away_name="Senegal",
+                            home_tla="FRA", away_tla="SEN", home_score=0, away_score=2)
+        events = [
+            GoalEvent(minute_text="30", minute_sort=30.0, scorer="Mane",
+                      scoring_team="Senegal", home_team="France", away_team="Senegal",
+                      home_score=0, away_score=1, raw="Goal!", key="abc:0-1@30:mane"),
+            GoalEvent(minute_text="65", minute_sort=65.0, scorer="Ndoye",
+                      scoring_team="Senegal", home_team="France", away_team="Senegal",
+                      home_score=0, away_score=2, raw="Goal!", key="abc:0-2@65:ndoye"),
+        ]
+
+        # Step 1: recovery → 2 proper sends, seen_thread["1"] claimed at {home:0, away:2}
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.parse_goal_events", return_value=events),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 2
+        assert ctx.bot_data["seen_scores"]["thread"]["1"] == {"home": 0, "away": 2}
+        ctx.bot.send_message.reset_mock()
+
+        # Step 2: poll_thread_goals_job with same thread score → reconcile(seen=0-2, ann=0-2, 0, 2)
+        # step-2 no-change → ([], ...) → zero sends
+        thread_result = MatchThreadResult(
+            thread=ThreadInfo(post_id="abc", title="FRA vs SEN",
+                              permalink="/r/soccer/abc", created_utc=1.0),
+            events=events,
+            home_tla="FRA",
+            away_tla="SEN",
+        )
+        thread_scanner = MagicMock()
+        thread_scanner.scan_live_matches = MagicMock(return_value=[thread_result])
+        ctx.bot_data["reddit_scanner"] = thread_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_neutral_fallback_no_loop_on_next_thread_tick(self, tmp_path):
+        """Neutral fallback does not loop: next poll_thread tick with same score → zero sends.
+
+        After neutral send, seen_thread is NOT claimed.  But reconcile(None, {0,2}, 0, 2)
+        returns [] because _ahead(equal, equal) is False.  On subsequent ticks seen_thread
+        is set to {0,2} and step-2 fires.  Never resends.
+        """
+        from worldcup_bot.reddit.models import GoalEvent, MatchThreadResult, ThreadInfo
+
+        settings = _make_settings(tmp_path)
+        scanner = _no_enrichment_scanner()
+        scanner.find_thread_permalink = MagicMock(return_value=None)
+        scanner.find_match_thread = MagicMock(return_value=None)
+        ctx = _make_context(settings, scanner)
+        ctx.bot_data["clip_store"] = {}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
+
+        match = _make_match(1, "IN_PLAY", home_name="France", away_name="Senegal",
+                            home_tla="FRA", away_tla="SEN", home_score=0, away_score=2)
+
+        # Step 1: poll_goals_job first-seen at 0-2 → no thread → 1 neutral send
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1
+        assert "perdí" in ctx.bot.send_message.call_args.kwargs["text"]
+        assert "1" not in ctx.bot_data["seen_scores"]["thread"]  # neutral path never claims seen_thread
+        ctx.bot.send_message.reset_mock()
+
+        # Step 2: poll_thread_goals_job with same score → reconcile(seen=None, ann={0,2}, 0, 2)
+        # _ahead({0,2}, {0,2}) is False → returns ([], ...) → zero sends
+        thread_events = [
+            GoalEvent(minute_text="30", minute_sort=30.0, scorer="Mane",
+                      scoring_team="Senegal", home_team="France", away_team="Senegal",
+                      home_score=0, away_score=1, raw="Goal!", key="abc:0-1@30:mane"),
+            GoalEvent(minute_text="65", minute_sort=65.0, scorer="Ndoye",
+                      scoring_team="Senegal", home_team="France", away_team="Senegal",
+                      home_score=0, away_score=2, raw="Goal!", key="abc:0-2@65:ndoye"),
+        ]
+        thread_result = MatchThreadResult(
+            thread=ThreadInfo(post_id="abc", title="FRA vs SEN",
+                              permalink="/r/soccer/abc", created_utc=1.0),
+            events=thread_events,
+            home_tla="FRA",
+            away_tla="SEN",
+        )
+        thread_scanner = MagicMock()
+        thread_scanner.scan_live_matches = MagicMock(return_value=[thread_result])
+        ctx.bot_data["reddit_scanner"] = thread_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
