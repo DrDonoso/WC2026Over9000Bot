@@ -22,7 +22,12 @@ from worldcup_bot.ai.daily_update import generate_daily_update
 from worldcup_bot.ai.goal_extractor import extract_scorer
 from worldcup_bot.ai.rich_image import run_rich_iteration
 from worldcup_bot.api.client import FootballAPIError
-from worldcup_bot.bot.formatters import bold_person_names, format_match_start, team_flag
+from worldcup_bot.bot.formatters import (
+    bold_person_names,
+    format_match_camps,
+    format_match_start,
+    team_flag,
+)
 from worldcup_bot.bot.handlers import (
     cmd_actual,
     cmd_ayer,
@@ -51,6 +56,7 @@ from worldcup_bot.config import Settings, ai_enabled, image_ai_enabled, load_set
 from worldcup_bot.espn.client import ESPNClient
 from worldcup_bot.espn.formatter import format_match_stats
 from worldcup_bot.porra import predictions as pred_loader
+from worldcup_bot.porra.camps import compute_match_camps
 from worldcup_bot.porra.engine import compute_general_ranking
 from worldcup_bot.porra.history import ensure_history
 from worldcup_bot.porra.live import build_state, diff_live, load_live, render_porra_context, save_live
@@ -1440,6 +1446,21 @@ async def poll_kickoff_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Announce
             try:
                 text = format_match_start(m)
+                try:
+                    kickoff_preds = pred_loader.load(settings.predictions_path)
+                    camps = compute_match_camps(
+                        m.home_tla, m.away_tla, m.stage, m.group, kickoff_preds,
+                        home_name=m.home_name, away_name=m.away_name,
+                    )
+                    camps_block = format_match_camps(
+                        camps, use_html=True, title="⚔️ ¿Con quién va la porra?"
+                    )
+                    if camps_block:
+                        text = f"{text}\n\n{camps_block}"
+                except Exception as exc:
+                    log.warning(
+                        "poll_kickoff_job: camps block failed for match %d: %s", mid, exc
+                    )
                 await context.bot.send_message(
                     chat_id=settings.telegram_group_id,
                     text=text,
@@ -1631,8 +1652,30 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"{h_flag} {h_name} {hs}-{as_} {a_name} {a_flag}"
                 )
 
+                # ── Section 2: porra face-off ("guerra de la porra") ─────────
+                camps_section: str | None = None
+                try:
+                    camps_preds = pred_loader.load(settings.predictions_path)
+                    camps = compute_match_camps(
+                        match.home_tla, match.away_tla, match.stage, match.group,
+                        camps_preds, home_name=match.home_name, away_name=match.away_name,
+                    )
+                    winner_side = (
+                        "home" if match.winner == "HOME_TEAM"
+                        else "away" if match.winner == "AWAY_TEAM"
+                        else None
+                    )
+                    camps_section = format_match_camps(
+                        camps, use_html=True, title="⚔️ La guerra de la porra",
+                        winner_side=winner_side,
+                    ) or None
+                except Exception as exc:
+                    log.error("Face-off failed for match %d: %s", match_id, exc)
+
                 # ── Assemble sections and always send ─────────────────────────
                 sections: list[str] = [result_section]
+                if camps_section:
+                    sections.append(camps_section)
                 if stats_text:
                     sections.append(stats_text)
                 if commentary_text:

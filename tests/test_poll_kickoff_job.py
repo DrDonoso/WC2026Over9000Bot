@@ -189,6 +189,35 @@ class TestNormalPass:
         assert 10 in ctx.bot_data["kickoff_announced"]
 
     @pytest.mark.asyncio
+    async def test_knockout_kickoff_includes_faceoff(self, tmp_path):
+        """A knockout match kickoff notice includes the ⚔️ porra face-off."""
+        settings = _make_settings(tmp_path)
+        ctx = self._ctx_seeded(settings)
+        match = Match(
+            id=10, utc_date=_PAST_STR, status="SCHEDULED",
+            stage="ROUND_OF_32", group=None,
+            home_tla="NED", away_tla="MAR", home_name="Netherlands", away_name="Morocco",
+            home_score=None, away_score=None, winner=None,
+        )
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+        preds = {"participants": {
+            "ann": {"display_name": "Ann", "groups": {}, "knockout": {"round_of_32": ["NED"]}},
+            "bob": {"display_name": "Bob", "groups": {}, "knockout": {"round_of_32": ["MAR"]}},
+        }}
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value=preds),
+        ):
+            await poll_kickoff_job(ctx)
+
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "🟢" in text  # kickoff notice
+        assert "⚔️" in text  # face-off appended
+        assert "Ann" in text and "Bob" in text
+
+    @pytest.mark.asyncio
     async def test_does_not_announce_future_match(self, tmp_path):
         """A SCHEDULED match with kickoff in the future → no send."""
         settings = _make_settings(tmp_path)

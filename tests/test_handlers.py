@@ -2430,6 +2430,49 @@ class TestCmdEnDirecto:
         assert "Congo DR" in text
 
     @pytest.mark.asyncio
+    async def test_knockout_match_appends_camps_faceoff(self, fake_settings):
+        """A live KNOCKOUT match appends the ⚔️ porra face-off with backers."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        ko_match = Match(
+            id=9, utc_date="2026-06-29T18:00:00Z", status="IN_PLAY",
+            stage="ROUND_OF_32", group=None,
+            home_tla="NED", away_tla="MAR", home_name="Netherlands", away_name="Morocco",
+            home_score=0, away_score=0, winner=None,
+        )
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [ko_match]
+        preds = {"participants": {
+            "ann": {"display_name": "Ann", "groups": {}, "knockout": {"round_of_32": ["NED"]}},
+            "bob": {"display_name": "Bob", "groups": {}, "knockout": {"round_of_32": ["MAR"]}},
+        }}
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.pred_loader.load", return_value=preds):
+                await cmd_en_directo(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "⚔️" in text
+        assert "Ann" in text and "Bob" in text
+
+    @pytest.mark.asyncio
+    async def test_group_match_has_no_camps_faceoff(self, fake_settings):
+        """A live GROUP-STAGE match does NOT append the ⚔️ face-off."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [_LIVE_MATCH]  # GROUP_STAGE
+        preds = {"participants": {
+            "ann": {"display_name": "Ann", "groups": {"A": ["POR", "COD", "MEX"]},
+                    "knockout": {"round_of_32": ["POR"]}},
+        }}
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            with patch("worldcup_bot.bot.handlers.pred_loader.load", return_value=preds):
+                await cmd_en_directo(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "⚔️" not in text
+
+    @pytest.mark.asyncio
     async def test_ai_enabled_no_thread_uses_format_match_fallback(self, tmp_path):
         """AI enabled but no match thread found → falls back to format_match."""
         settings = Settings(

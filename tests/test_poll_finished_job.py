@@ -1533,3 +1533,66 @@ class TestRestartSimulation:
         assert {10, 11, 12}.issubset(ctx.bot_data["finished_announced"])
         # No sends
         ctx.bot.send_message.assert_not_awaited()
+
+
+# ── porra face-off ("guerra de la porra") section ─────────────────────────────
+
+
+def _make_ko_match(mid: int, winner: str | None = "AWAY_TEAM") -> Match:
+    return Match(
+        id=mid,
+        utc_date="2026-06-29T18:00:00Z",
+        status="FINISHED",
+        stage="ROUND_OF_32",
+        group=None,
+        home_tla="NED",
+        away_tla="MAR",
+        home_name="Netherlands",
+        away_name="Morocco",
+        home_score=0,
+        away_score=1,
+        winner=winner,
+    )
+
+
+class TestFaceOffSection:
+    _PREDS = {
+        "participants": {
+            "ann": {"display_name": "Ann", "groups": {}, "knockout": {"round_of_32": ["NED"]}},
+            "bob": {"display_name": "Bob", "groups": {}, "knockout": {"round_of_32": ["MAR"]}},
+        }
+    }
+
+    @pytest.mark.asyncio
+    async def test_knockout_match_appends_faceoff_with_winner_marks(self, tmp_path):
+        settings = _make_settings(tmp_path, ai=False)
+        match = _make_ko_match(1, winner="AWAY_TEAM")  # Morocco (away) wins
+        ctx, mock_client = _ctx_for_result(settings, match)
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value=self._PREDS),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        text = ctx.bot.send_message.call_args_list[0][1]["text"]
+        assert "⚔️" in text
+        assert "Ann" in text and "Bob" in text
+        assert "🏆" in text and "💀" in text  # winner/loser camps marked
+
+    @pytest.mark.asyncio
+    async def test_group_match_has_no_faceoff(self, tmp_path):
+        settings = _make_settings(tmp_path, ai=False)
+        match = _make_match(1, winner="HOME_TEAM")  # GROUP_STAGE
+        ctx, mock_client = _ctx_for_result(settings, match)
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value=self._PREDS),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        text = ctx.bot.send_message.call_args_list[0][1]["text"]
+        assert "⚔️" not in text

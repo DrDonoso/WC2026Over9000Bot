@@ -8,7 +8,7 @@ from __future__ import annotations
 import html
 import re
 from datetime import datetime, timezone
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 import flag as flag_lib
 import pytz
@@ -16,6 +16,9 @@ from telegram import InlineKeyboardButton
 
 from worldcup_bot.api.models import Match, Standing
 from worldcup_bot.data.tla_map import tla_to_iso
+
+if TYPE_CHECKING:
+    from worldcup_bot.porra.camps import MatchCamps
 
 # ── person-name bolding ───────────────────────────────────────────────────────
 
@@ -416,6 +419,71 @@ def format_match_start(match: Match) -> str:
     return (
         f"🟢 <b>¡Empieza el partido!</b>\n"
         f"{home_fl} <b>{home}</b> vs <b>{away}</b> {away_fl}"
+    )
+
+
+# ── porra face-off ("guerra de la porra") ─────────────────────────────────────
+
+
+def format_match_camps(
+    camps: "MatchCamps",
+    *,
+    use_html: bool = False,
+    title: str = "⚔️ ¿Con quién vas?",
+    winner_side: str | None = None,
+    bar_width: int = 10,
+) -> str:
+    """Render the ⚔️ porra face-off (style B: force bar + names per team).
+
+    camps: a MatchCamps (duck-typed — formatters never imports porra).
+    use_html: True for kickoff / finish recaps (HTML), False for /endirecto.
+    winner_side: "home"/"away" marks the winning camp 🏆 and the losing one 💀
+      (used on the match-finish recap).  None leaves both unmarked.
+
+    Returns "" when no participant backs either team (e.g. group-stage matches),
+    so callers can simply append the result and skip empty blocks.
+    """
+    home = list(camps.home_backers)
+    away = list(camps.away_backers)
+    total = len(home) + len(away)
+    if total == 0:
+        return ""
+
+    home_fill = round(len(home) / total * bar_width)
+    if home:  # keep both sides visible when both have backers
+        home_fill = max(1, home_fill)
+    if away:
+        home_fill = min(bar_width - 1, home_fill)
+    home_fill = max(0, min(bar_width, home_fill))
+    bar = "▓" * home_fill + "░" * (bar_width - home_fill)
+
+    hf = team_flag(camps.home_tla)
+    af = team_flag(camps.away_tla)
+
+    def esc(s: str) -> str:
+        return html.escape(s, quote=False) if use_html else s
+
+    def strong(s: str) -> str:
+        return f"<b>{s}</b>" if use_html else s
+
+    home_mark = away_mark = ""
+    if winner_side == "home":
+        home_mark, away_mark = "🏆 ", "💀 "
+    elif winner_side == "away":
+        home_mark, away_mark = "💀 ", "🏆 "
+
+    home_names = ", ".join(esc(n) for n in home) or "—"
+    away_names = ", ".join(esc(n) for n in away) or "—"
+    home_label = strong(esc(camps.home_name) or camps.home_tla)
+    away_label = strong(esc(camps.away_name) or camps.away_tla)
+
+    return "\n".join(
+        [
+            title,
+            f"{hf} {len(home)}  {bar}  {len(away)} {af}",
+            f"{home_mark}{hf} {home_label}: {home_names}",
+            f"{away_mark}{af} {away_label}: {away_names}",
+        ]
     )
 
 

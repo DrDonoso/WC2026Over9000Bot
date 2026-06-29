@@ -25,6 +25,7 @@ from worldcup_bot.bot.formatters import (
     format_general_ranking,
     format_live_match_detail,
     format_match,
+    format_match_camps,
     format_match_with_date,
     render_endirecto,
     format_standings,
@@ -49,6 +50,7 @@ from worldcup_bot.data.tongo import (
 )
 from worldcup_bot.data.gifs import list_tongo_gifs
 from worldcup_bot.porra import engine, predictions as pred_loader
+from worldcup_bot.porra.camps import compute_match_camps
 from worldcup_bot.porra.history import ensure_history
 from worldcup_bot.porra.chart import render_evolution_png
 from worldcup_bot.reddit.clip_finder import find_goal_clip
@@ -390,7 +392,20 @@ async def cmd_en_directo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         else None
     )
     store_path = f"{settings.state_dir}/endirecto.json"
+    predictions = pred_loader.load(settings.predictions_path)
+
+    def _camps_block(match) -> str:
+        try:
+            camps = compute_match_camps(
+                match.home_tla, match.away_tla, match.stage, match.group,
+                predictions, home_name=match.home_name, away_name=match.away_name,
+            )
+            return format_match_camps(camps, use_html=False, title="⚔️ ¿Con quién vas?")
+        except Exception:
+            return ""
+
     for m in live[:4]:
+        camps_block = _camps_block(m)
         try:
             if ai is not None:
                 # Try the cached /new/ listing first (avoids the 429-prone search endpoint).
@@ -424,18 +439,26 @@ async def cmd_en_directo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     }
                     _ed_save_snapshot(store_path, snap)
                     text, kb = render_endirecto(snap)
+                    if camps_block:
+                        text = f"{text}\n\n{camps_block}"
                     await update.message.reply_text(
                         text,
                         reply_markup=InlineKeyboardMarkup(kb) if kb else None,
                     )
                     continue
-            await update.message.reply_text(format_match(m, settings.timezone))
+            text = format_match(m, settings.timezone)
+            if camps_block:
+                text = f"{text}\n\n{camps_block}"
+            await update.message.reply_text(text)
         except Exception as exc:
             log.warning(
                 "cmd_en_directo enrichment failed for %s vs %s: %s",
                 m.home_name, m.away_name, exc,
             )
-            await update.message.reply_text(format_match(m, settings.timezone))
+            text = format_match(m, settings.timezone)
+            if camps_block:
+                text = f"{text}\n\n{camps_block}"
+            await update.message.reply_text(text)
 
 
 async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
