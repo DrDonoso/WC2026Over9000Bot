@@ -5,6 +5,13 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260629.02] - 2026-06-29
+
+- porra/camps.py: compute_match_camps splits participants by their round_of_X pick (knockout only; group-stage matches are not split).
+- formatters.format_match_camps: style-B force bar (▓░) + names per team; HTML for kickoff/finish, plain text for /endirecto; empty string when no one backs either team so callers skip it.
+- __main__ poll_kickoff_job + poll_finished_matches_job and handlers cmd_en_directo append the block (best-effort, never breaks the message).
+
+
 ## [20260629] - 2026-06-29
 
 - score_knockout: add decided_teams param; not-yet-played picks are 'pending' (⏳) instead of 'fallo' (❌). Backward-compatible when None.
