@@ -5,6 +5,18 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260629] - 2026-06-29
+
+- score_knockout: add decided_teams param; not-yet-played picks are 'pending' (⏳) instead of 'fallo' (❌). Backward-compatible when None.
+- client: add get_knockout_decided() (finished-match participants).
+- engine.compute_user_detail: drop finished_stages gating; score KO from all finished matches in both modes via _build_decided_teams.
+- formatters: render 'pending' as ⏳ in /listaaciertos[actual].
+- Merge 5 inbox decision documents into decisions.md
+- Add orchestration logs for all 5 agents (kante-4, pirlo-4, kante-5, pirlo-5, buffon-4)
+- Add session log for catch-up recovery + FINISHED eviction fix
+- Update Pirlo history with design and review gate roles
+
+
 ## [20260627.02] - 2026-06-27
 
 - Seed live_scores at 0-0 when poll_kickoff_job fires, so goals are detected as proper 0-0->0-1 transitions from the first minute
