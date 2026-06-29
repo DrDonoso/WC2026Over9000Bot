@@ -5,6 +5,12 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260629.03] - 2026-06-29
+
+- get_stage_results(''ROUND_OF_32'') matched no finished match, so the already-played Canada result was never scored in /listaaciertosactual, /listaaciertos and /general.
+- live/finished knockout matches (stage ''LAST_32'') were not recognised as knockout, so the ⚔️ face-off never appeared in /endirecto, the kickoff notice or the finish recap.
+
+
 ## [20260629.02] - 2026-06-29
 
 - porra/camps.py: compute_match_camps splits participants by their round_of_X pick (knockout only; group-stage matches are not split).
