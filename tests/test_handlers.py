@@ -21,6 +21,7 @@ from worldcup_bot.bot.handlers import (
     cmd_actual,
     cmd_clasificacion,
     cmd_endirecto_callback,
+    cmd_endirecto_goal_callback,
     cmd_en_directo,
     cmd_estadisticas,
     cmd_general,
@@ -2918,7 +2919,7 @@ class TestCmdEndirectoCallback:
         update.callback_query.answer.assert_called_once_with("Datos no disponibles.", show_alert=True)
 
     @pytest.mark.asyncio
-    async def test_all_revealed_edits_with_no_keyboard(self, tmp_path, fake_settings):
+    async def test_all_revealed_still_has_goles_button(self, tmp_path, fake_settings):
         import json
 
         settings = replace(fake_settings, state_dir=str(tmp_path))
@@ -2945,7 +2946,10 @@ class TestCmdEndirectoCallback:
 
         await cmd_endirecto_callback(update, context)
 
-        assert update.callback_query.edit_message_text.call_args.kwargs["reply_markup"] is None
+        # The ⚽ Goles button is always present, even once every section is revealed.
+        markup = update.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+        assert markup is not None
+        assert markup.inline_keyboard[-1][0].callback_data == "ed|abc12345|g"
 
     @pytest.mark.asyncio
     async def test_invalid_code_answers_alert(self, fake_settings, tmp_path):
@@ -2972,7 +2976,147 @@ class TestCmdEndirectoCallback:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# cmd_hoy — jornada rollover logic
+# /endirecto ⚽ Goles button — on-demand goal fetch + per-goal send
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _write_snap(tmp_path, **overrides) -> dict:
+    import json
+    snap = {
+        "token": "abc12345", "match_id": 1, "minute": "30",
+        "home_name": "Brazil", "away_name": "Japan",
+        "home_tla": "BRA", "away_tla": "JPN",
+        "home_score": 1, "away_score": 0,
+        "goals": [], "cards": [], "subs": [],
+        "lineup": {"home": [], "away": []}, "revealed": [], "created": 0.0,
+    }
+    snap.update(overrides)
+    (tmp_path / "endirecto.json").write_text(json.dumps({snap["token"]: snap}), encoding="utf-8")
+    return snap
+
+
+def _make_goles_update(data: str) -> MagicMock:
+    update = MagicMock()
+    update.callback_query.data = data
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+    update.callback_query.edit_message_reply_markup = AsyncMock()
+    update.callback_query.message.chat_id = 999
+    update.callback_query.message.message_id = 42
+    return update
+
+
+def _goal_event(minute="23", scorer="Neymar", hs=1, as_=0, key="p:1-0@23:neymar"):
+    from worldcup_bot.reddit.models import GoalEvent
+    return GoalEvent(
+        minute_text=minute, minute_sort=float(minute), scorer=scorer, scoring_team="Brazil",
+        home_team="Brazil", away_team="Japan", home_score=hs, away_score=as_, raw="", key=key,
+    )
+
+
+class TestEndirectoGolesButton:
+    @pytest.mark.asyncio
+    async def test_goles_fetches_and_shows_one_button_per_goal(self, tmp_path, fake_settings):
+        settings = replace(fake_settings, state_dir=str(tmp_path))
+        _write_snap(tmp_path)
+        update = _make_goles_update("ed|abc12345|g")
+        context = _make_context(settings)
+        context.bot.send_message = AsyncMock()
+        scanner = MagicMock()
+        scanner.find_thread_permalink.return_value = "/r/soccer/comments/xyz/match/"
+        scanner.get_thread_body.return_value = "body"
+        context.bot_data["reddit_scanner"] = scanner
+
+        goals = [_goal_event("23", "Neymar", 1, 0, "k1"), _goal_event("67", "Mitoma", 1, 1, "k2")]
+        with patch("worldcup_bot.bot.handlers.parse_goal_events", return_value=goals):
+            await cmd_endirecto_callback(update, context)
+
+        update.callback_query.edit_message_reply_markup.assert_called_once()
+        markup = update.callback_query.edit_message_reply_markup.call_args.kwargs["reply_markup"]
+        assert len(markup.inline_keyboard) == 2
+        assert markup.inline_keyboard[0][0].callback_data == "edgol|abc12345|0"
+        assert markup.inline_keyboard[1][0].callback_data == "edgol|abc12345|1"
+
+    @pytest.mark.asyncio
+    async def test_goles_only_adds_goals_not_already_stored(self, tmp_path, fake_settings):
+        settings = replace(fake_settings, state_dir=str(tmp_path))
+        existing = {"minute_text": "23", "minute_sort": 23.0, "scorer": "Neymar", "scoring_team": "Brazil",
+                    "home_team": "Brazil", "away_team": "Japan", "home_score": 1, "away_score": 0, "raw": "", "key": "k1"}
+        _write_snap(tmp_path, reddit_goals=[existing])
+        update = _make_goles_update("ed|abc12345|g")
+        context = _make_context(settings)
+        context.bot.send_message = AsyncMock()
+        scanner = MagicMock()
+        scanner.find_thread_permalink.return_value = "/r/soccer/comments/xyz/match/"
+        scanner.get_thread_body.return_value = "body"
+        context.bot_data["reddit_scanner"] = scanner
+
+        # Reddit returns the already-known k1 plus a new k2 → only k2 added.
+        goals = [_goal_event("23", "Neymar", 1, 0, "k1"), _goal_event("67", "Mitoma", 1, 1, "k2")]
+        with patch("worldcup_bot.bot.handlers.parse_goal_events", return_value=goals):
+            await cmd_endirecto_callback(update, context)
+
+        markup = update.callback_query.edit_message_reply_markup.call_args.kwargs["reply_markup"]
+        assert len(markup.inline_keyboard) == 2  # deduped to 2 unique goals
+
+    @pytest.mark.asyncio
+    async def test_goles_no_goals_sends_message_no_keyboard(self, tmp_path, fake_settings):
+        settings = replace(fake_settings, state_dir=str(tmp_path))
+        _write_snap(tmp_path)
+        update = _make_goles_update("ed|abc12345|g")
+        context = _make_context(settings)
+        context.bot.send_message = AsyncMock()
+        scanner = MagicMock()
+        scanner.find_thread_permalink.return_value = None
+        scanner.find_match_thread.return_value = None
+        context.bot_data["reddit_scanner"] = scanner
+
+        await cmd_endirecto_callback(update, context)
+
+        update.callback_query.edit_message_reply_markup.assert_not_called()
+        context.bot.send_message.assert_called_once()
+        assert "No he encontrado goles" in context.bot.send_message.call_args.kwargs["text"]
+
+    @pytest.mark.asyncio
+    async def test_goal_button_sends_goal_and_clears_keyboard(self, tmp_path, fake_settings):
+        settings = replace(fake_settings, state_dir=str(tmp_path))
+        goal = {"minute_text": "23", "minute_sort": 23.0, "scorer": "Neymar", "scoring_team": "Brazil",
+                "home_team": "Brazil", "away_team": "Japan", "home_score": 1, "away_score": 0, "raw": "", "key": "k1"}
+        _write_snap(tmp_path, reddit_goals=[goal])
+        update = _make_goles_update("edgol|abc12345|0")
+        context = _make_context(settings)
+        context.bot.send_message = AsyncMock()
+
+        await cmd_endirecto_goal_callback(update, context)
+
+        context.bot.send_message.assert_called_once()
+        sent = context.bot.send_message.call_args.kwargs
+        assert "Neymar" in sent["text"] and "¡GOL!" in sent["text"]
+        assert sent["reply_to_message_id"] == 42
+        # the goals keyboard is removed after posting
+        update.callback_query.edit_message_reply_markup.assert_called_once_with(reply_markup=None)
+
+    @pytest.mark.asyncio
+    async def test_goal_button_invalid_index_alerts(self, tmp_path, fake_settings):
+        settings = replace(fake_settings, state_dir=str(tmp_path))
+        _write_snap(tmp_path, reddit_goals=[])
+        update = _make_goles_update("edgol|abc12345|5")
+        context = _make_context(settings)
+        context.bot.send_message = AsyncMock()
+
+        await cmd_endirecto_goal_callback(update, context)
+
+        update.callback_query.answer.assert_called_once_with("Ese gol ya no está disponible.", show_alert=True)
+        context.bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_edgol_handler_registered(self, fake_settings):
+        from telegram.ext import CallbackQueryHandler
+        from worldcup_bot.__main__ import build_app
+        app = build_app(fake_settings)
+        patterns = [h.pattern.pattern for group in app.handlers.values() for h in group
+                    if isinstance(h, CallbackQueryHandler) and getattr(h, "pattern", None)]
+        assert any("edgol" in p for p in patterns)
 # ══════════════════════════════════════════════════════════════════════════════
 
 

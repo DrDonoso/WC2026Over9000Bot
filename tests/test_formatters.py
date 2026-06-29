@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from worldcup_bot.bot.formatters import bold_person_names, render_endirecto, set_beloved_teams, team_flag
+from worldcup_bot.bot.formatters import (
+    bold_person_names,
+    build_endirecto_goals_keyboard,
+    goal_button_label,
+    render_endirecto,
+    set_beloved_teams,
+    team_flag,
+)
 
 
 class TestTeamFlagBelovedTeams:
@@ -407,10 +414,14 @@ class TestRenderEndirecto:
         assert "👥 Alineación" not in text
         assert "🔄 Cambios" not in text
 
-    def test_revealed_empty_has_3_buttons(self):
+    def test_revealed_empty_has_reveal_row_and_goles_button(self):
         _, kb = render_endirecto(dict(_MINIMAL_SNAP))
-        assert len(kb) == 1
+        # Row 0: the 3 reveal buttons; row 1: the ⚽ Goles action button.
+        assert len(kb) == 2
         assert len(kb[0]) == 3
+        assert len(kb[1]) == 1
+        assert kb[1][0].callback_data == "ed|abc12345|g"
+        assert kb[1][0].text == "⚽ Goles"
 
     def test_goals_always_shown_regardless_of_revealed(self):
         snap = dict(_MINIMAL_SNAP)
@@ -430,11 +441,14 @@ class TestRenderEndirecto:
         text, _ = render_endirecto(snap)
         assert text.index("🟨 Tarjetas") < text.index("🔄 Cambios")
 
-    def test_all_revealed_no_keyboard(self):
+    def test_all_revealed_only_goles_button(self):
         snap = dict(_MINIMAL_SNAP)
         snap["revealed"] = ["tarjetas", "alineacion", "cambios"]
         _, kb = render_endirecto(snap)
-        assert kb == []
+        # No reveal buttons left, but the ⚽ Goles button is always present.
+        assert len(kb) == 1
+        assert len(kb[0]) == 1
+        assert kb[0][0].callback_data == "ed|abc12345|g"
 
     def test_no_goals_shows_sin_goles(self):
         snap = dict(_MINIMAL_SNAP)
@@ -493,3 +507,44 @@ class TestRenderEndirecto:
         text, _ = render_endirecto(snap)
         assert "🔄 Cambios" in text
         assert "Rafael Leão" in text
+
+
+_GOAL_DICTS = [
+    {"minute_text": "23", "scorer": "Neymar", "home_score": 1, "away_score": 0, "key": "p:1-0@23:neymar"},
+    {"minute_text": "67", "scorer": "Mitoma", "home_score": 1, "away_score": 1, "key": "p:1-1@67:mitoma"},
+]
+
+
+class TestGoalButtonLabel:
+    def test_includes_minute_scorer_and_score(self):
+        label = goal_button_label(_GOAL_DICTS[0])
+        assert label == "⚽ 23' Neymar (1-0)"
+
+    def test_long_scorer_truncated(self):
+        label = goal_button_label({"minute_text": "5", "scorer": "A" * 40, "home_score": 1, "away_score": 0})
+        assert label.endswith("… (1-0)")
+        assert len(label) < 50
+
+    def test_missing_score_omitted(self):
+        label = goal_button_label({"minute_text": "5", "scorer": "X"})
+        assert label == "⚽ 5' X"
+
+    def test_supports_minute_alias(self):
+        label = goal_button_label({"minute": "12", "scorer": "Y", "home_score": 0, "away_score": 1})
+        assert "12'" in label
+
+
+class TestBuildEndirectoGoalsKeyboard:
+    def test_one_button_per_goal_one_per_row(self):
+        kb = build_endirecto_goals_keyboard("abc12345", _GOAL_DICTS)
+        assert len(kb) == 2
+        assert all(len(row) == 1 for row in kb)
+
+    def test_callback_data_carries_token_and_index(self):
+        kb = build_endirecto_goals_keyboard("abc12345", _GOAL_DICTS)
+        assert kb[0][0].callback_data == "edgol|abc12345|0"
+        assert kb[1][0].callback_data == "edgol|abc12345|1"
+
+    def test_empty_goals_empty_keyboard(self):
+        assert build_endirecto_goals_keyboard("tok", []) == []
+

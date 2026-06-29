@@ -12,6 +12,7 @@ from worldcup_bot.bot.endirecto_store import (
     new_token,
     prune,
     save_snapshot,
+    set_reddit_goals,
     set_revealed,
 )
 
@@ -124,3 +125,41 @@ class TestPrune:
         path = tmp_path / "missing.json"
         prune(str(path), max_age_secs=3600)
         assert not path.exists()
+
+
+def _goal(key: str, minute_sort: float, scorer: str = "X") -> dict:
+    return {"minute_text": str(int(minute_sort)), "minute_sort": minute_sort,
+            "scorer": scorer, "scoring_team": "A", "home_team": "A", "away_team": "B",
+            "home_score": 1, "away_score": 0, "raw": "", "key": key}
+
+
+class TestSetRedditGoals:
+    def test_stores_goals_sorted_by_minute(self, tmp_path):
+        path = tmp_path / "endirecto.json"
+        snap = _sample_snap()
+        save_snapshot(str(path), snap)
+        updated = set_reddit_goals(str(path), snap["token"], [_goal("k2", 67), _goal("k1", 23)])
+        assert [g["key"] for g in updated["reddit_goals"]] == ["k1", "k2"]
+
+    def test_merges_only_new_goals_dedup_by_key(self, tmp_path):
+        path = tmp_path / "endirecto.json"
+        snap = _sample_snap()
+        save_snapshot(str(path), snap)
+        set_reddit_goals(str(path), snap["token"], [_goal("k1", 23)])
+        updated = set_reddit_goals(str(path), snap["token"], [_goal("k1", 23), _goal("k2", 67)])
+        keys = [g["key"] for g in updated["reddit_goals"]]
+        assert keys == ["k1", "k2"]  # k1 not duplicated
+
+    def test_persists_to_disk(self, tmp_path):
+        path = tmp_path / "endirecto.json"
+        snap = _sample_snap()
+        save_snapshot(str(path), snap)
+        set_reddit_goals(str(path), snap["token"], [_goal("k1", 10)])
+        reloaded = load_snapshot(str(path), snap["token"])
+        assert reloaded["reddit_goals"][0]["key"] == "k1"
+
+    def test_missing_token_returns_none(self, tmp_path):
+        path = tmp_path / "endirecto.json"
+        save_snapshot(str(path), _sample_snap())
+        assert set_reddit_goals(str(path), "deadbeef", [_goal("k1", 10)]) is None
+

@@ -9,6 +9,7 @@ Snapshot schema:
    "home_score": int|None, "away_score": int|None,
    "goals": [...], "cards": [...], "subs": [...],
    "lineup": {"home": [...], "away": [...]},
+   "reddit_goals": [GoalEvent-as-dict, ...]  # on-demand "⚽ Goles" fetch
    "revealed": [], "created": float (unix ts)}
 """
 
@@ -102,4 +103,33 @@ def set_revealed(path: str, token: str, section: str) -> dict | None:
         _save_store(path, store)
         return snap
     except Exception:
+        return None
+
+
+def set_reddit_goals(path: str, token: str, new_goals: list[dict]) -> dict | None:
+    """Merge *new_goals* into the snapshot's ``reddit_goals``, dedup by ``key``.
+
+    Existing goals are kept (we only add the ones we don't have yet — "que no
+    tengas"); the merged list is sorted by ``minute_sort``.  Returns the updated
+    snapshot, or None if the token is unknown.
+    """
+    try:
+        store = _load_store(path)
+        snap = store.get(token)
+        if snap is None:
+            return None
+        existing = snap.get("reddit_goals")
+        if not isinstance(existing, list):
+            existing = []
+        by_key = {g.get("key"): g for g in existing if isinstance(g, dict)}
+        for g in new_goals:
+            if isinstance(g, dict) and g.get("key") not in by_key:
+                by_key[g["key"]] = g
+        merged = sorted(by_key.values(), key=lambda g: g.get("minute_sort", 0))
+        snap["reddit_goals"] = merged
+        store[token] = snap
+        _save_store(path, store)
+        return snap
+    except Exception as exc:
+        log.warning("endirecto_store: set_reddit_goals failed for %s: %s", path, exc)
         return None

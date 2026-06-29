@@ -12,6 +12,7 @@ import html
 import logging
 import random
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import requests as _requests
@@ -22,6 +23,7 @@ from telegram.ext import ContextTypes
 from worldcup_bot.api.cache import get_default_cache
 from worldcup_bot.api.client import FootballDataClient, FootballAPIError
 from worldcup_bot.bot.formatters import (
+    build_endirecto_goals_keyboard,
     format_general_ranking,
     format_live_match_detail,
     format_match,
@@ -63,6 +65,7 @@ from worldcup_bot.bot.endirecto_store import (
     load_snapshot as _ed_load_snapshot,
     new_token as _ed_new_token,
     save_snapshot as _ed_save_snapshot,
+    set_reddit_goals as _ed_set_reddit_goals,
     set_revealed as _ed_set_revealed,
 )
 from worldcup_bot.reddit.downloader import MediaDownloader
@@ -912,7 +915,7 @@ async def cmd_ver_gol_callback(
 async def cmd_endirecto_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle /endirecto inline reveal buttons (tarjetas / alineacion / cambios)."""
+    """Handle /endirecto inline buttons: reveal sections (t/l/c) or ⚽ Goles (g)."""
     query = update.callback_query
     try:
         parts = query.data.split("|", 2)
@@ -920,6 +923,11 @@ async def cmd_endirecto_callback(
             await query.answer("Datos inválidos.", show_alert=True)
             return
         _, token, code = parts
+
+        if code == "g":
+            await _endirecto_show_goals(update, context, token)
+            return
+
         _code_map = {"t": "tarjetas", "l": "alineacion", "c": "cambios"}
         section = _code_map.get(code)
         if not section:
@@ -941,6 +949,120 @@ async def cmd_endirecto_callback(
         log.warning("cmd_endirecto_callback: error: %s", exc)
         try:
             await query.answer("Error al procesar.", show_alert=True)
+        except Exception:
+            pass
+
+
+def _fetch_reddit_goals(
+    scanner: RedditMatchScanner, home_name: str, away_name: str
+) -> list[GoalEvent]:
+    """Sync: find the match thread and parse every goal from it (best-effort)."""
+    permalink = scanner.find_thread_permalink(home_name, away_name)
+    if permalink is None:
+        permalink = scanner.find_match_thread(home_name, away_name)
+    if not permalink:
+        return []
+    bits = permalink.strip("/").split("/")
+    post_id = bits[3] if len(bits) > 3 else ""
+    body = scanner.get_thread_body(permalink)
+    if not body:
+        return []
+    return parse_goal_events(body, post_id=post_id)
+
+
+async def _endirecto_show_goals(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, token: str
+) -> None:
+    """⚽ Goles tap: download goals from Reddit we don't have yet, then replace the
+    keyboard with one button per goal (one per row)."""
+    query = update.callback_query
+    settings: Settings = context.bot_data["settings"]
+    store_path = f"{settings.state_dir}/endirecto.json"
+
+    snap = _ed_load_snapshot(store_path, token)
+    if snap is None:
+        await query.answer("Datos no disponibles.", show_alert=True)
+        return
+
+    await query.answer("⏳ Buscando goles…")
+
+    scanner: RedditMatchScanner = context.bot_data.get("reddit_scanner")  # type: ignore[assignment]
+    if scanner is None:
+        scanner = RedditMatchScanner(user_agent=settings.reddit_user_agent)
+        context.bot_data["reddit_scanner"] = scanner
+
+    try:
+        goals = await asyncio.to_thread(
+            _fetch_reddit_goals, scanner, snap.get("home_name", ""), snap.get("away_name", "")
+        )
+    except Exception as exc:
+        log.warning("_endirecto_show_goals: fetch failed: %s", exc)
+        goals = []
+
+    if goals:
+        snap = _ed_set_reddit_goals(store_path, token, [asdict(g) for g in goals]) or snap
+
+    stored_goals = snap.get("reddit_goals", []) if isinstance(snap.get("reddit_goals"), list) else []
+    if not stored_goals:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="⚽ No he encontrado goles en Reddit (todavía).",
+            reply_to_message_id=query.message.message_id,
+        )
+        return
+
+    kb = build_endirecto_goals_keyboard(token, stored_goals)
+    try:
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(kb))
+    except Exception as exc:
+        log.warning("_endirecto_show_goals: edit keyboard failed: %s", exc)
+
+
+async def cmd_endirecto_goal_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """A single goal button was tapped: post that goal and clear the goals keyboard."""
+    query = update.callback_query
+    try:
+        parts = query.data.split("|")
+        if len(parts) != 3:
+            await query.answer("Datos inválidos.", show_alert=True)
+            return
+        _, token, idx_str = parts
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            await query.answer("Datos inválidos.", show_alert=True)
+            return
+
+        settings: Settings = context.bot_data["settings"]
+        store_path = f"{settings.state_dir}/endirecto.json"
+        snap = _ed_load_snapshot(store_path, token)
+        goals = snap.get("reddit_goals", []) if snap else []
+        if not snap or idx < 0 or idx >= len(goals):
+            await query.answer("Ese gol ya no está disponible.", show_alert=True)
+            return
+
+        goal = GoalEvent(**goals[idx])
+        text = format_goal_notification(
+            goal, snap.get("home_tla", ""), snap.get("away_tla", "")
+        )
+
+        await query.answer()
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=text,
+            reply_to_message_id=query.message.message_id,
+        )
+        # Remove the goals inline keyboard after a goal is posted.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    except Exception as exc:
+        log.warning("cmd_endirecto_goal_callback: error: %s", exc)
+        try:
+            await query.answer("Error al enviar el gol.", show_alert=True)
         except Exception:
             pass
 

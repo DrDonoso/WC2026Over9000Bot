@@ -390,18 +390,38 @@ def render_endirecto(snap: dict) -> tuple[str, list]:
 
     text = "\n".join(lines)
     not_revealed = [section for section in _ED_SECTION_ORDER if section not in revealed]
-    if not not_revealed:
-        return text, []
-    return (
-        text,
-        [[
+    rows: list = []
+    if not_revealed:
+        rows.append([
             InlineKeyboardButton(
                 _ED_SECTION_LABELS[section],
                 callback_data=f"ed|{token}|{_ED_SECTION_CODES[section]}",
             )
             for section in not_revealed
-        ]],
-    )
+        ])
+    # Always offer the on-demand "⚽ Goles" action (fetches goals from Reddit).
+    rows.append([InlineKeyboardButton("⚽ Goles", callback_data=f"ed|{token}|g")])
+    return text, rows
+
+
+def goal_button_label(goal: dict) -> str:
+    """Short label for a single goal button: '⚽ 23' Scorer (1-0)'."""
+    minute = str(goal.get("minute_text", goal.get("minute", "?")))
+    scorer = str(goal.get("scorer", "?")).strip() or "?"
+    if len(scorer) > 28:
+        scorer = scorer[:27] + "…"
+    hs = goal.get("home_score", "")
+    as_ = goal.get("away_score", "")
+    score = f" ({hs}-{as_})" if hs != "" and as_ != "" else ""
+    return f"⚽ {minute}' {scorer}{score}"
+
+
+def build_endirecto_goals_keyboard(token: str, goals: list[dict]) -> list:
+    """One button per goal, one per row, callback ``edgol|{token}|{index}``."""
+    return [
+        [InlineKeyboardButton(goal_button_label(g), callback_data=f"edgol|{token}|{i}")]
+        for i, g in enumerate(goals)
+    ]
 
 
 # ── match-start notice ───────────────────────────────────────────────────────
