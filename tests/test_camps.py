@@ -27,16 +27,16 @@ def _preds() -> dict:
 
 class TestComputeMatchCamps:
     def test_knockout_splits_by_round_pick(self):
-        camps = compute_match_camps("NED", "MAR", "ROUND_OF_32", None, _preds())
+        camps = compute_match_camps("NED", "MAR", "LAST_32", None, _preds())
         assert camps.home_backers == ["Ann"]
         assert camps.away_backers == ["Bob"]
 
     def test_participant_with_neither_team_is_undecided(self):
-        camps = compute_match_camps("NED", "MAR", "ROUND_OF_32", None, _preds())
+        camps = compute_match_camps("NED", "MAR", "LAST_32", None, _preds())
         assert camps.undecided == ["Cal"]  # Cal picked CAN, neither NED nor MAR
 
     def test_total_backers_counts_both_camps(self):
-        camps = compute_match_camps("NED", "MAR", "ROUND_OF_32", None, _preds())
+        camps = compute_match_camps("NED", "MAR", "LAST_32", None, _preds())
         assert camps.total_backers == 2
 
     def test_group_stage_is_not_split(self):
@@ -47,11 +47,11 @@ class TestComputeMatchCamps:
 
     def test_uses_username_when_no_display_name(self):
         preds = {"participants": {"zoe": {"knockout": {"round_of_32": ["NED"]}}}}
-        camps = compute_match_camps("NED", "MAR", "ROUND_OF_32", None, preds)
+        camps = compute_match_camps("NED", "MAR", "LAST_32", None, preds)
         assert camps.home_backers == ["@zoe"]
 
     def test_empty_predictions(self):
-        camps = compute_match_camps("NED", "MAR", "ROUND_OF_32", None, {"participants": {}})
+        camps = compute_match_camps("NED", "MAR", "LAST_32", None, {"participants": {}})
         assert camps.total_backers == 0
 
 

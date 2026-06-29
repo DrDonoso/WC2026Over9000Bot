@@ -66,7 +66,7 @@ def compute_match_camps(
 ) -> MatchCamps:
     """Split participants into home/away/undecided for a match.
 
-    stage uses API names (e.g. "ROUND_OF_32"); only knockout stages produce a
+    stage uses API names (e.g. "LAST_32"); only knockout stages produce a
     split (see module docstring).  predictions is the loaded predictions dict.
     """
     yaml_key = STAGE_YAML_KEYS.get(stage)

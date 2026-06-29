@@ -1072,9 +1072,9 @@ class TestFormatUserDetailKnockout:
             "total_score": 1.0,
             "group_detail": [],
             "knockout_detail": [
-                {"stage": "ROUND_OF_32", "display": "Treintaidosavos", "team": "CAN", "points": 1, "note": "acierto"},
-                {"stage": "ROUND_OF_32", "display": "Treintaidosavos", "team": "BRA", "points": 0, "note": "pending"},
-                {"stage": "ROUND_OF_32", "display": "Treintaidosavos", "team": "RSA", "points": 0, "note": "fallo"},
+                {"stage": "LAST_32", "display": "Dieciseisavos de Final", "team": "CAN", "points": 1, "note": "acierto"},
+                {"stage": "LAST_32", "display": "Dieciseisavos de Final", "team": "BRA", "points": 0, "note": "pending"},
+                {"stage": "LAST_32", "display": "Dieciseisavos de Final", "team": "RSA", "points": 0, "note": "fallo"},
             ],
             "official": False,
             "finished_groups": None,
@@ -1085,7 +1085,7 @@ class TestFormatUserDetailKnockout:
     def test_section_header_and_total_present(self):
         text = format_user_detail(self._detail())
         assert "Fases eliminatorias" in text
-        assert "Treintaidosavos" in text
+        assert "Dieciseisavos de Final" in text
         assert "Total eliminatorias" in text
 
     def test_acierto_pending_and_fallo_icons_rendered(self):
@@ -2436,7 +2436,7 @@ class TestCmdEnDirecto:
         context = _make_context(fake_settings)
         ko_match = Match(
             id=9, utc_date="2026-06-29T18:00:00Z", status="IN_PLAY",
-            stage="ROUND_OF_32", group=None,
+            stage="LAST_32", group=None,
             home_tla="NED", away_tla="MAR", home_name="Netherlands", away_name="Morocco",
             home_score=0, away_score=0, winner=None,
         )

@@ -45,7 +45,7 @@ ActualStandings = dict[str, list[str]]
 
 # user_knockout: {"round_of_32": ["ESP", ...], ...}
 UserKnockout = dict[str, list[str]]
-# actual_winners: {"ROUND_OF_32": ["ESP", "GER", ...], ...}
+# actual_winners: {"LAST_32": ["ESP", "GER", ...], ...}
 ActualWinners = dict[str, list[str]]
 
 DetailEntry = dict  # {"group"|"stage", "team", "predicted_pos", "actual_pos", "points"}
@@ -248,7 +248,7 @@ def score_knockout(
     """Score knockout-phase predictions.
 
     user_knockout uses yaml keys (e.g. "round_of_32").
-    actual_winners uses API stage names (e.g. "ROUND_OF_32").
+    actual_winners uses API stage names (e.g. "LAST_32").
 
     decided_teams: optional {api_stage: set(TLAs that played a FINISHED match in
       that stage)} — winners and losers alike.  When provided, a predicted team

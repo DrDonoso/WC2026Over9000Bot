@@ -306,28 +306,28 @@ class TestScoreGroupsQualifiesWrongPosition:
 
 
 class TestScoreKnockoutRoundOf32:
-    """ROUND_OF_32 awards 1 point per correct qualifier."""
+    """LAST_32 awards 1 point per correct qualifier."""
 
     def test_one_correct_qualifer_scores_1(self):
         user = {"round_of_32": ["ESP"]}
-        actual = {"ROUND_OF_32": ["ESP", "FRA", "GER"]}
-        pts, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        actual = {"LAST_32": ["ESP", "FRA", "GER"]}
+        pts, detail = score_knockout(user, actual, [("LAST_32", "Dieciseisavos de Final", 1)])
         assert pts == 1.0
         assert detail[0]["note"] == "acierto"
         assert detail[0]["points"] == 1
 
     def test_wrong_qualifier_scores_0(self):
         user = {"round_of_32": ["GER"]}
-        actual = {"ROUND_OF_32": ["ESP", "FRA"]}
-        pts, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        actual = {"LAST_32": ["ESP", "FRA"]}
+        pts, detail = score_knockout(user, actual, [("LAST_32", "Dieciseisavos de Final", 1)])
         assert pts == 0.0
         assert detail[0]["note"] == "fallo"
         assert detail[0]["points"] == 0
 
     def test_multiple_correct_accumulate(self):
         user = {"round_of_32": ["ESP", "FRA", "GER"]}
-        actual = {"ROUND_OF_32": ["ESP", "FRA", "BRA"]}
-        pts, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        actual = {"LAST_32": ["ESP", "FRA", "BRA"]}
+        pts, detail = score_knockout(user, actual, [("LAST_32", "Dieciseisavos de Final", 1)])
         assert pts == 2.0  # ESP + FRA correct; GER fallo
 
 
@@ -415,8 +415,8 @@ class TestScoreKnockoutFinal:
 class TestScoreKnockoutWildcard:
     def test_wildcard_scores_0(self):
         user = {"round_of_32": ["**"]}
-        actual = {"ROUND_OF_32": ["ESP", "FRA"]}
-        pts, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        actual = {"LAST_32": ["ESP", "FRA"]}
+        pts, detail = score_knockout(user, actual, [("LAST_32", "Dieciseisavos de Final", 1)])
         assert pts == 0.0
         assert detail[0]["note"] == "wildcard"
         assert detail[0]["points"] == 0
@@ -432,8 +432,8 @@ class TestScoreKnockoutWildcard:
 
     def test_empty_string_treated_as_wildcard(self):
         user = {"round_of_32": [""]}
-        actual = {"ROUND_OF_32": ["ESP"]}
-        pts, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        actual = {"LAST_32": ["ESP"]}
+        pts, detail = score_knockout(user, actual, [("LAST_32", "Dieciseisavos de Final", 1)])
         assert pts == 0.0
         assert detail[0]["note"] == "wildcard"
 
@@ -441,12 +441,12 @@ class TestScoreKnockoutWildcard:
 class TestScoreKnockoutPending:
     """decided_teams distinguishes a not-yet-played pick (pending) from a loss."""
 
-    _STAGE = [("ROUND_OF_32", "Treintaidosavos", 1)]
+    _STAGE = [("LAST_32", "Dieciseisavos de Final", 1)]
 
     def test_unplayed_pick_is_pending_not_fallo(self):
         user = {"round_of_32": ["BRA"]}
-        actual = {"ROUND_OF_32": ["CAN"]}  # BRA's match not finished
-        decided = {"ROUND_OF_32": {"CAN", "RSA"}}
+        actual = {"LAST_32": ["CAN"]}  # BRA's match not finished
+        decided = {"LAST_32": {"CAN", "RSA"}}
         pts, detail = score_knockout(user, actual, self._STAGE, decided_teams=decided)
         assert pts == 0.0
         assert detail[0]["note"] == "pending"
@@ -454,24 +454,24 @@ class TestScoreKnockoutPending:
 
     def test_eliminated_pick_is_fallo(self):
         user = {"round_of_32": ["RSA"]}  # RSA played and lost
-        actual = {"ROUND_OF_32": ["CAN"]}
-        decided = {"ROUND_OF_32": {"CAN", "RSA"}}
+        actual = {"LAST_32": ["CAN"]}
+        decided = {"LAST_32": {"CAN", "RSA"}}
         pts, detail = score_knockout(user, actual, self._STAGE, decided_teams=decided)
         assert pts == 0.0
         assert detail[0]["note"] == "fallo"
 
     def test_winner_pick_is_acierto(self):
         user = {"round_of_32": ["CAN"]}
-        actual = {"ROUND_OF_32": ["CAN"]}
-        decided = {"ROUND_OF_32": {"CAN", "RSA"}}
+        actual = {"LAST_32": ["CAN"]}
+        decided = {"LAST_32": {"CAN", "RSA"}}
         pts, detail = score_knockout(user, actual, self._STAGE, decided_teams=decided)
         assert pts == 1.0
         assert detail[0]["note"] == "acierto"
 
     def test_mixed_winner_pending_and_fallo(self):
         user = {"round_of_32": ["CAN", "BRA", "RSA"]}
-        actual = {"ROUND_OF_32": ["CAN"]}
-        decided = {"ROUND_OF_32": {"CAN", "RSA"}}
+        actual = {"LAST_32": ["CAN"]}
+        decided = {"LAST_32": {"CAN", "RSA"}}
         pts, detail = score_knockout(user, actual, self._STAGE, decided_teams=decided)
         notes = {d["team"]: d["note"] for d in detail}
         assert notes == {"CAN": "acierto", "BRA": "pending", "RSA": "fallo"}
@@ -480,20 +480,20 @@ class TestScoreKnockoutPending:
     def test_none_decided_is_backward_compatible_fallo(self):
         """Without decided_teams, a non-winner stays 'fallo' (legacy behavior)."""
         user = {"round_of_32": ["BRA"]}
-        actual = {"ROUND_OF_32": ["CAN"]}
+        actual = {"LAST_32": ["CAN"]}
         pts, detail = score_knockout(user, actual, self._STAGE)
         assert detail[0]["note"] == "fallo"
 
 
 class TestScoreKnockoutEmptyInputs:
     def test_empty_user_knockout_no_teams_no_detail(self):
-        pts, detail = score_knockout({}, {"ROUND_OF_32": ["ESP"]})
+        pts, detail = score_knockout({}, {"LAST_32": ["ESP"]})
         assert pts == 0.0
         assert detail == []
 
     def test_empty_actual_winners_all_fallo(self):
         user = {"round_of_32": ["ESP", "FRA"]}
-        pts, detail = score_knockout(user, {}, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        pts, detail = score_knockout(user, {}, [("LAST_32", "Dieciseisavos de Final", 1)])
         assert pts == 0.0
         assert all(d["note"] == "fallo" for d in detail)
 
@@ -521,7 +521,7 @@ class TestScoreKnockoutAllStagesIntegration:
             "final": ["ESP"],
         }
         actual = {
-            "ROUND_OF_32": ["ESP"],
+            "LAST_32": ["ESP"],
             "LAST_16": ["ESP"],
             "QUARTER_FINALS": ["ESP"],
             "SEMI_FINALS": ["ESP"],
@@ -534,7 +534,7 @@ class TestScoreKnockoutAllStagesIntegration:
     def test_knockout_stages_config_point_values(self):
         """Canonical check: each stage has the documented point value."""
         expected = {
-            "ROUND_OF_32": 1,
+            "LAST_32": 1,
             "LAST_16": 1,
             "QUARTER_FINALS": 2,
             "SEMI_FINALS": 3,
@@ -547,8 +547,8 @@ class TestScoreKnockoutAllStagesIntegration:
 
     def test_detail_has_all_required_keys(self):
         user = {"round_of_32": ["ESP"]}
-        actual = {"ROUND_OF_32": ["ESP"]}
-        _, detail = score_knockout(user, actual, [("ROUND_OF_32", "Treintaidosavos", 1)])
+        actual = {"LAST_32": ["ESP"]}
+        _, detail = score_knockout(user, actual, [("LAST_32", "Dieciseisavos de Final", 1)])
         assert {"stage", "display", "team", "points", "note"} <= detail[0].keys()
 
     def test_stage_display_name_in_detail(self):
@@ -561,7 +561,7 @@ class TestScoreKnockoutAllStagesIntegration:
         """If a stage key is missing from user_knockout, that stage has 0 entries."""
         user = {"final": ["ESP"]}  # only final; other stages absent
         actual = {
-            "ROUND_OF_32": ["ESP"],
+            "LAST_32": ["ESP"],
             "LAST_16": ["ESP"],
             "QUARTER_FINALS": ["ESP"],
             "SEMI_FINALS": ["ESP"],

@@ -210,7 +210,7 @@ class TestComputeGeneralRankingOfficial:
     def test_knockout_score_unchanged_between_modes(self):
         """Knockout scoring is identical in official=True and official=False."""
         ko_results = _ko_empty()
-        ko_results["ROUND_OF_32"] = ["GER"]  # GER advances, user predicted GER → +1pt
+        ko_results["LAST_32"] = ["GER"]  # GER advances, user predicted GER → +1pt
 
         predictions = {
             "participants": {
@@ -499,13 +499,13 @@ class TestComputeUserDetailKnockoutPending:
 
     def _client(self, official_groups: bool):
         ko_results = _ko_empty()
-        ko_results["ROUND_OF_32"] = ["CAN"]  # only the CAN vs RSA match is finished
+        ko_results["LAST_32"] = ["CAN"]  # only the CAN vs RSA match is finished
         return _make_client(
             standings=_GROUP_A_STANDINGS,
             finished_groups={"GROUP_A"} if official_groups else None,
             started_groups={"GROUP_A"} if not official_groups else None,
             ko_results=ko_results,
-            decided_teams={"ROUND_OF_32": {"CAN", "RSA"}},
+            decided_teams={"LAST_32": {"CAN", "RSA"}},
         )
 
     def _notes(self, detail):

@@ -195,7 +195,7 @@ class TestNormalPass:
         ctx = self._ctx_seeded(settings)
         match = Match(
             id=10, utc_date=_PAST_STR, status="SCHEDULED",
-            stage="ROUND_OF_32", group=None,
+            stage="LAST_32", group=None,
             home_tla="NED", away_tla="MAR", home_name="Netherlands", away_name="Morocco",
             home_score=None, away_score=None, winner=None,
         )

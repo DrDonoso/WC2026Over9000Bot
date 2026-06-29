@@ -79,7 +79,7 @@ def _build_qualifying_thirds(
 
 
 def _build_actual_winners(client: FootballDataClient) -> dict[str, list[str]]:
-    """Return {ROUND_OF_32: ["ESP", ...]} for all knockout stages."""
+    """Return {LAST_32: ["ESP", ...]} for all knockout stages."""
     return client.get_knockout_results()
 
 
