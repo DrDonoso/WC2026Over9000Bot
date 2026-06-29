@@ -70,6 +70,28 @@
 
 **Buffon added 5 regression tests** (TestQualifyingThirdsCallerRegression) to guard against callers dropping `qualifying_thirds` param. Coverage gap closed.
 
+### 2026-06-27 — Catch-Up Recovery + FINISHED-Eviction Fix — Design & Review Gates
+
+**Session:** kante-4 (investigation) → pirlo-4 (design) → kante-5 (implementation) → pirlo-5 (review) → buffon-4 (QA)  
+**Status:** GATES PASSED (Pirlo-5 APPROVE, Buffon-4 PASS WITH ADDED TESTS +4)
+
+**Pirlo-4 Design Role:**
+- Reviewed Kanté's investigation of three production symptoms (A: missed goals, B: Spain double-notify, C: 4-goal catch-up)
+- Issued two key design decisions:
+  1. **Goal recovery from thread (revises 2026-06-26 Decision 1):** Attempt to extract real goal events from Reddit match thread and emit proper per-goal notifications (scorer + "Ver gol" keyboard). Fallback to neutral "Me perdí N goles" only if thread unavailable or goals can't be matched. Rule: ALL-proper or ALL-neutral, never mixed.
+  2. **Seed at 0-0 + FINISHED two-tick eviction:** Seed `live_scores` at 0-0 when kickoff fires (poll_kickoff_job). Evict FINISHED matches after first processed tick with no delta (two-tick minimum, prevents post-FT oscillation).
+
+**Pirlo-5 Review (Implementation Gate):**
+- Verified deduplication safety: first-seen recovery + concurrent thread job = no duplicate-announce window
+- Verified two-tick eviction correct: first FINISHED (status update), second FINISHED (evict if no delta)
+- Verified recovery fallback strict (ALL-proper or ALL-neutral)
+- Verified hang safety bounded (~35s worst-case, acceptable for one-time event per match)
+- Confirmed no regression with recap job or real in-play VAR
+
+**Outcome:** APPROVE — Implementation is correct, matches design spec, well-tested.
+
+---
+
 ### 2026-06-27 — Finished-Match Goal Loop Fix (Egypt-Iran) — Review Gate
 
 **Session:** kante-3 implementation + pirlo-3 review  

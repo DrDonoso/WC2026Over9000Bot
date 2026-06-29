@@ -1178,3 +1178,382 @@ Old default `"2026-06-17T18:00:00Z"` (10 days ago = >4h) would silently exclude 
 
 **VERDICT: PASS WITH ADDED TESTS (+5)**  
 **Final count: 1644 passed, 5 warnings.**
+
+---
+
+# Investigation: Missed Goals (A/C) + España Duplicate (B)
+
+**Date:** 2026-06-27  
+**Author:** Kanté (Backend Developer)  
+**Status:** INVESTIGATION COMPLETE — awaiting Pirlo/owner decisions before coding
+
+---
+
+## Context
+
+Three live symptoms reported by drdonoso:
+
+- **A** — Single missed goal: `⚠️ Me perdí 1 gol / 🇳🇿 New Zealand 0-1 Belgium 🇧🇪`
+- **B** — España goal announced twice: once live (correct, scorer/video), again at/after FT
+- **C** — 4-goal catch-up: `⚠️ Me perdí 4 goles / 🇳🇴 Norway 1-3 France 🇫🇷`
+
+---
+
+## Investigation Results
+
+### SYMPTOM A — "Me perdí 1 gol" for NZL 0-1 BEL
+
+**Confirmed root cause: football-data.org status-flip delay.**
+
+`poll_goals_job` only includes matches in `IN_PLAY`, `PAUSED`, or `FINISHED-already-in-scores` in its `relevant` filter (`__main__.py:589-596`). SCHEDULED/TIMED matches are ignored entirely.
+
+football-data.org typically takes 5–15 minutes to flip a match from `SCHEDULED` → `IN_PLAY` after kickoff. Belgium scored in those minutes. When the API finally flipped, it reported `IN_PLAY` at 0-1 — the match had never been at 0-0 in the bot's view.
+
+The `stored is None` branch (`__main__.py:630-660`) seeds the match and, because `curr_away > 0`, appends a neutral `GoalDelta(kind="catchup", goals_missed=1)`. `_notify_catchup` formats the ⚠️ message.
+
+`poll_thread_goals_job` cannot rescue this because it has an explicit guard at `__main__.py:800-805`: the thread job only processes matches already seeded by `poll_goals_job`.
+
+`poll_kickoff_job` fires the "match starting" notice but does NOT write to `live_scores`. So even with the kickoff notice in the chat, there is no 0-0 entry for the thread job to track against.
+
+**Why "so slow to notify":** The delay equals the football-data status-flip lag (5–15 min) plus the time to the next `poll_goals_job` tick (up to `goal_poll_interval_seconds`).
+
+### SYMPTOM C — "Me perdí 4 goles" for NOR 1-3 FRA
+
+**Confirmed root cause: bot restart mid-match** (bot restarted while Norway–France was already in progress at 1-3).
+
+On restart, `live_scores` is loaded from disk. If `live_scores.json` did not contain the Norway-France entry, `scores[key]` is `None` → `stored is None`. First `poll_goals_job` tick sees the match as `IN_PLAY` at 1-3 → seeds at 1-3 → emits ONE catch-up for 4 goals. The catch-up text shows the final seeded score (1-3), not the 0-0 origin.
+
+For a **live part of C** (bot was running but API flip was late): if the API flipped to `IN_PLAY` at 1-3 in a single step, the same seed-at-nonzero path fires.
+
+### SYMPTOM B — España Goal Announced Twice
+
+**Confirmed code paths; exact trigger open.**
+
+Three candidate explanations, in descending likelihood:
+
+**Candidate B1 — Two separate goals, perceived as one duplicate (most likely):** España scored TWICE. Thread job announced goal 1 with scorer/video. At FINISHED, the thread showed goal 2 (post-FT update), and `poll_goals_job` announced goal 2 via the FINISHED-in-scores catch-the-last-goal feature. This is **not a bug** — it's correct behaviour on a different goal.
+
+**Candidate B2 — Restart in the save-window (rare):** `poll_thread_goals_job` claims `scores[key]` in memory but `save_scores` is deferred to after all matches are processed. If a crash occurs between claim and save, the disk is stale. On restart, FINISHED tick emits a catch-up notification that appears to be a duplicate.
+
+**Candidate B3 — FINISHED-first-time sees goal:** Specific timing where API flip to FINISHED happens in the same tick as the goal confirmation. The API path notifies once; no duplicate in this sub-case.
+
+**Confirmed open:** requires ACTUAL LOG inspection to confirm which candidate fired.
+
+---
+
+## Question 3 — Feasibility: Recover Scorer+Video for Missed Goals
+
+**Verdict: FEASIBLE — high confidence. Recommend implementing.**
+
+At seed-at-nonzero time, all of the following are available:
+
+- `match` object with `home_name`, `away_name`, `home_tla`, `away_tla`
+- `scanner` (RedditMatchScanner)
+- `scanner.find_thread_permalink(match.home_name, match.away_name)` — uses the cached r/soccer listing
+- `scanner.get_thread_body(permalink)` — returns the full selftext
+- `parse_goal_events(selftext)` — returns `GoalEvent` objects with `scorer`, `scoring_team`, `home_score`, `away_score`, `minute_text`
+
+The Reddit match thread is created at kickoff and updated in real-time. By the time the bot seeds the match (even with a 5-15 minute status-flip lag), the thread already has all goal events.
+
+**This REVISES Pirlo's Decision 1** from the 2026-06-26 "Live Goal Bug Fixes" session. The revision is NOT fabrication — we use REAL Reddit goal events.
+
+---
+
+## Question 4 — Prevention: Seed at 0-0 at Kickoff
+
+**Verdict: YES, this eliminates most "first-goal missed" cases (Symptom A and the live-onset part of C). Recommend implementing alongside the recovery fix.**
+
+`poll_kickoff_job` already detects imminent/just-past kickoffs but does NOT write to `live_scores`. If it also seeded `live_scores` at 0-0 at that moment, the thread job would detect any goal scored in the status-flip lag window as a normal goal delta.
+
+---
+
+# Decision: Catch-Up Pipeline Redesign — Recover Goals from Thread
+
+**Date:** 2026-06-27  
+**Author:** Pirlo (Lead / Tech Lead)  
+**Status:** DIRECTIVE (for Kanté implementation)  
+**Revises:** 2026-06-26 Decision 1 ("Neutral Summary" — `format_catchup_message()`)
+
+---
+
+## Context
+
+The 2026-06-26 Decision 1 mandated a neutral catch-up ("⚠️ Me perdí N gol(es)") because at that time the bot had NO source for the goal sequence. Kanté's 2026-06-27 investigation confirms this is now SOLVABLE.
+
+The owner explicitly wants PROPER per-goal notifications — scorer + video button — for missed goals. This does NOT fabricate data; it uses real thread data.
+
+---
+
+## DECISION 1 — Goal Recovery from Thread (revises 2026-06-26 Decision 1)
+
+### Policy
+
+When the bot encounters a catch-up situation (first-seen at non-zero score OR restart-ahead), it MUST attempt to **recover per-goal events from the Reddit match thread** and emit proper `_notify_goal` notifications (scorer + minute + "Ver gol" keyboard) — identical to the live path.
+
+The neutral "Me perdí N gol(es)" message becomes a **FALLBACK only**.
+
+### Recovery Flow (new function: `_attempt_goal_recovery`)
+
+Location: inside poll_goals_job, replacing lines 647-660 logic. Also callable from the reconcile restart-ahead path in _process_goal_delta for kind="catchup".
+
+1. Compute goals_missed = curr_home + curr_away (first-seen) or home_diff + away_diff (restart).
+2. Attempt thread lookup:
+   a. permalink = scanner.find_thread_permalink(match.home_name, match.away_name)
+   b. If None: permalink = scanner.find_match_thread(match.home_name, match.away_name) (uses search — handles FINISHED/old threads)
+3. If permalink found:
+   a. selftext = scanner.get_thread_body(permalink)
+   b. events = parse_goal_events(selftext, post_id=extract_post_id(permalink))
+   c. Filter events to only those representing goals up to the current score
+4. Build goals_to_notify list using the SAME pattern as poll_thread_goals_job
+5. Validate: len(goals_to_notify) == goals_missed.
+6. If validation passes → emit per-goal via _notify_goal (scorer, minute, clip-store entry each).
+7. If validation fails → FALLBACK (see below).
+
+### Fallback Conditions (emit neutral catch-up)
+
+Send the existing `_notify_catchup()` (neutral "⚠️ Me perdí N gol(es)") in ANY of these cases:
+
+| Condition | Rationale |
+|-----------|-----------|
+| `find_thread_permalink` AND `find_match_thread` both return `None` | No thread available |
+| `get_thread_body` raises or returns empty | Thread body inaccessible |
+| `parse_goal_events` returns `[]` (no parseable events) | Thread format unrecognised |
+| `len(recovered_goals) < goals_missed` | Thread has fewer events than expected — partial data |
+| `len(recovered_goals) > goals_missed` | Score mismatch |
+| Thread event's `scoring_team` cannot be matched | Data integrity failure |
+
+**NEVER** emit partial proper notifications + partial neutral. It's ALL-proper or ALL-neutral.
+
+### Deduplication (CRITICAL)
+
+After recovery (proper or neutral), the goals MUST be claimed in all relevant state so `poll_thread_goals_job` does NOT re-announce them:
+
+1. **`seen_thread[match_key]`** — set to `{"home": curr_home, "away": curr_away}` immediately after recovery.
+2. **`seen_api[match_key]`** — already handled by existing seed flow.
+3. **`scores[match_key]`** — already set.
+4. **Clip-store tokens** — each `_notify_goal` call creates its own token.
+
+---
+
+## DECISION 2 — Seed at 0-0 at Kickoff + FINISHED Eviction
+
+### 2A: Seed `live_scores` at 0-0 When Kickoff Fires
+
+**APPROVED with guard.**
+
+When `poll_kickoff_job` sends a kickoff notice, it MUST ALSO seed:
+
+```python
+scores = context.bot_data["live_scores"]
+match_key = str(mid)
+if match_key not in scores:
+    scores[match_key] = {"home": 0, "away": 0, "status": "IN_PLAY"}
+    save_scores(state_path, scores)
+```
+
+This ensures the first API tick with score 0-1 triggers a normal `reconcile(seen={0,0}, ann={0,0}, curr=0, 1)` → proper goal delta instead of the first-seen catch-up path.
+
+**Stale-0-0 guard (postponed/suspended):**
+- The existing `_match_is_over` (4h wall-clock) handles this: if a match is postponed after kickoff time, the 0-0 entry self-heals when the prune pass fires.
+- **Additional guard (NEW, REQUIRED):** In `poll_goals_job`'s relevant filter, if a match has `status == "POSTPONED"` or `status == "SUSPENDED"` AND `match_key in scores`, evict it from `scores`/`seen_api`/`seen_thread` immediately and log a warning.
+- **4h is acceptable** for the normal case (no match plays >3.5h including ET+pens).
+
+### 2B: FINISHED-Match Eviction Policy
+
+**APPROVED — evict after FIRST fully-processed FINISHED tick with no new delta.**
+
+Current policy keeps FINISHED matches in `live_scores` until 4h prune. This creates repeated FINISHED-tick processing (candidate cause of Symptom B).
+
+**New policy:**
+
+```
+In poll_goals_job, after processing a match where:
+  - stored["status"] was already "FINISHED" (i.e., this is NOT the first FINISHED tick)
+  - AND no new deltas were produced this tick
+  - AND match is in scores
+→ Evict: del scores[match_key], del seen_api[match_key] (if present),
+         del seen_thread[match_key] (if present)
+→ Save immediately.
+```
+
+**Safeguards:**
+
+1. **First FINISHED tick still processes normally** — a goal that arrives exactly at FT (API reports FINISHED + score increment in same response) fires via normal `elif deltas` path BEFORE eviction is considered.
+2. **FT recap not affected** — `poll_finished_matches_job` uses its own `finished_announced` set, NOT `live_scores`.
+3. **Thread-job guard** — `poll_thread_goals_job` already skips matches not in `scores`.
+4. **Timing: TWO-tick minimum** — The match must have been seen as FINISHED for at least one prior tick before eviction.
+
+---
+
+## DECISION 3 — Assessment of Kanté's Fix Plan
+
+### Verdict: SOUND and MINIMAL. Approve with refinements above.
+
+| Fix | Assessment |
+|-----|-----------|
+| **1. Seed at 0-0 at kickoff** | ✅ Correct root-cause fix for Symptom A. Low-risk. Added POSTPONED/SUSPENDED eviction guard. |
+| **2. Recover scorer+video** | ✅ Correct — the data IS available, we're not fabricating. Specified precise fallback rules and dedup contract. |
+| **3. Immediate save after thread-job goal claim** | ✅ Correct fix for save-window race (Symptom B candidate 2). Minimal — one `save_scores()` call inside the existing goal loop. |
+| **4. FINISHED-match eviction** | ✅ Approved with two-tick-minimum safeguard above. Closes repeated FINISHED processing. |
+
+---
+
+# Kanté — Catch-Up / Double-Notify Bug Fix: Implementation Report
+
+**Date:** 2026-06-27  
+**Author:** Kanté (Backend Developer)  
+**Requested by:** drdonoso (repo owner)  
+**Based on:** Pirlo's design spec, confirmed B root cause from owner
+
+---
+
+## Status: IMPLEMENTED ✅
+
+All 4 parts implemented. Full test suite: **1661 passed** (baseline 1644, +17 new tests).
+
+---
+
+## Confirmed Root Cause — Symptom B
+
+Owner provided the actual Uruguay-Spain post-FT timeline:
+- ~04:07 — Final recap sent (match over)
+- 04:10 — "❌ Gol anulado (VAR) Uruguay 0-0 Spain" (spurious, post-FT)
+- 04:11 — "⚽ ¡GOOOL! Spain 0-1, Álex Baena (42')" (same goal re-announced)
+
+This is the Egypt-Iran oscillation but in the **post-FT, <4h window**. The Reddit thread parse flickered the VAR-disallowed event after FT → score dropped to 0-0, then restored to 0-1 → DISALLOWED then GOAL. The two-tick FINISHED eviction (Part 3) is the fix.
+
+---
+
+## Changes by Part
+
+### Part 1 — 0-0 seed at kickoff
+`poll_kickoff_job` now seeds `live_scores[str(mid)] = {home:0, away:0, status:IN_PLAY}` in its `finally:` block, immediately after announcing kickoff. Added POSTPONED/SUSPENDED eviction guard in `poll_goals_job`.
+
+### Part 2 — Catch-up recovery from Reddit thread
+New `_attempt_goal_recovery` async function. Called by `_process_goal_delta` when `delta.kind == "catchup"`:
+
+1. Tries `scanner.find_thread_permalink(home, away)` (cached, no HTTP) → fallback to `scanner.find_match_thread` (HTTP, 5s timeout)
+2. Calls `scanner.get_thread_body(permalink)` and `parse_goal_events(selftext)`
+3. For each missed home/away goal target, finds the matching `GoalEvent`
+4. If ALL matched: sends proper `_notify_goal` per goal, sets `seen_thread[match_key] = {home:curr, away:curr}`, returns `True`
+5. If ANY goal can't be matched: returns `False` → falls through to `_notify_catchup`
+
+Rule: ALL-proper or ALL-neutral, never mixed.
+
+### Part 3 — FINISHED two-tick eviction
+Inside `goal_lock`, before processing deltas, track `was_already_finished = (stored is not None and stored.get("status") == "FINISHED")`.
+
+In the `else:` (no-delta) branch, if `was_already_finished` → evict: `scores.pop`, `seen_api.pop`, `seen_thread.pop`, `changed = True`.
+
+Timeline:
+- Tick N: stored = IN_PLAY → API = FINISHED, no delta → status updated to FINISHED, `was_already_finished=False` (no eviction)
+- Tick N+1: stored = FINISHED → API = FINISHED, no delta → `was_already_finished=True` → evicted
+
+### Part 4 — Immediate save in poll_thread_goals_job
+`save_scores(state_path, scores)` moved INSIDE the `goal_lock`, immediately after score claim. Removed the deferred `if changed: save_scores(...)` at end of results loop.
+
+### Part 5 — 5s timeout on find_match_thread
+`find_match_thread` HTTP timeout reduced from 15s to 5s so `_attempt_goal_recovery` never hangs the poll job.
+
+---
+
+## Tests Added (+17)
+
+**1644 baseline → 1661 final**
+
+| Class | File | Count | What it covers |
+|-------|------|-------|----------------|
+| `TestFinishedEviction` | test_poll_goals_job.py | 5 | Eviction logic and Uruguay-Spain timeline |
+| `TestCatchupRecovery` | test_poll_goals_job.py | 4 | Per-goal sends and fallback scenarios |
+| `TestPostponedEviction` | test_poll_goals_job.py | 2 | POSTPONED/SUSPENDED eviction guards |
+| `TestKickoffSeedLiveScores` | test_poll_kickoff_job.py | 3 | 0-0 seed and integration tests |
+| `TestImmediateSave` | test_poll_thread_goals_job.py | 2 | Immediate save assertions |
+| `TestPostFTEvictionDedup` | test_poll_thread_goals_job.py | 1 | Evicted match skipped by thread job |
+
+---
+
+# Review: Catch-Up / Double-Notify Fix (Parts 1–4)
+
+**Date:** 2026-06-27  
+**Reviewer:** Pirlo (Lead / Tech Lead)  
+**Author:** Kanté  
+**Status:** APPROVED  
+
+---
+
+## Summary
+
+Implementation of the 4-part fix for catch-up (missed goals) and double-notify (post-FT oscillation) bugs. All 1661 tests pass. +17 new tests.
+
+---
+
+## 1. DEDUP — No Duplicate Announcement Window
+
+**SAFE — no dedup hole found.**
+
+Critical scenario: first-seen at non-zero (no kickoff seed), recovery sends proper notifications outside the lock while `poll_thread_goals_job` could concurrently run.
+
+- `scores[key]` is claimed at the final score INSIDE the lock. When `poll_thread_goals_job` later acquires the lock, it reads the already-final score.
+- Thread reads same score → `reconcile()` → no deltas.
+- After recovery completes: `seen_thread[key]` is set → subsequent thread ticks at same score produce no delta.
+- `seen_api[key]` is set → next API tick at same score: no delta.
+
+## 2. TWO-TICK EVICTION — Correct
+
+**Verified all scenarios:**
+
+- **First FINISHED tick (IN_PLAY→FINISHED, no score change):** `was_already_finished=False` → updates status to FINISHED, no eviction
+- **First FINISHED tick (IN_PLAY→FINISHED, with goal):** Goes to `elif deltas:` → goal announced, score claimed
+- **Second FINISHED tick (FINISHED, no delta):** `was_already_finished=True` → **evicts**
+
+## 3. RECOVERY FALLBACK — ALL-Proper or ALL-Neutral
+
+**Rule strictly enforced:** Each target goal must find a matching event. If ANY target fails → immediate fallback. Only on full match: all goals notified.
+
+## 4. HANG SAFETY — Bounded, Acceptable
+
+**Worst case:** `find_thread_permalink` (0s, cached) + `find_match_thread` (5s) + `get_thread_body` (15s) = ~35s.
+
+Why this is acceptable:
+1. One-time event per match (first-seen with missed goals only).
+2. Runs OUTSIDE the lock and via `asyncio.to_thread` — does not block event loop.
+3. Outer `try/except Exception` catches any timeout → returns False → neutral fallback.
+4. Same timeout profile as existing `_enrich_scorer` path.
+
+---
+
+## VERDICT: APPROVE
+
+No required changes. Implementation is correct, matches the design spec, handles all edge cases, and is well-tested. Ship it.
+
+---
+
+# Buffon QA Gate — Catch-Up / Goal Pipeline Fix
+
+**Date:** 2026-06-27  
+**Reviewer:** Buffon (QA / Tester)  
+**Author:** Kanté  
+**Based on:** `kante-catchup-fix-impl-20260627.md`  
+**VERDICT: PASS WITH ADDED TESTS (+4)**  
+**Final pytest count: 1665 passed, 5 warnings**
+
+---
+
+## Summary
+
+All 1661 tests pass on Kanté's baseline. All 5 warnings are pre-existing deprecation warnings unrelated to this change. ✅
+
+Scrutiny of +17 new tests: all are real regressions. One initially-weak test `test_uruguay_spain_full_timeline_zero_post_ft_sends` used simplified oscillation that passed without the fix.
+
+Added 4 edge-case tests by Buffon:
+1. `test_var_flip_oscillation_post_ft_zero_sends` — true B regression (VAR-flip oscillation)
+2. `test_age_prune_and_finished_eviction_no_crash` — age-prune + two-tick coexistence
+3. `test_recovery_dedup_no_resend_on_next_thread_tick` — recovery dedup race
+4. `test_neutral_fallback_no_loop_on_next_thread_tick` — neutral fallback loop prevention
+
+---
+
+## VERDICT
+
+**PASS WITH ADDED TESTS (+4)**  
+1665 passed, 5 warnings (all pre-existing)
