@@ -215,6 +215,26 @@ class FootballDataClient:
             ]
         return result
 
+    def get_knockout_decided(self) -> dict[str, set[str]]:
+        """Return {api_stage: set of TLAs that played a FINISHED match in it}.
+
+        Includes both winners and losers of finished knockout matches.  Lets the
+        scorer tell a not-yet-played pick (pending ⏳) apart from an eliminated
+        one (fallo ❌), mirroring the group-stage "no_data" handling.
+        """
+        from worldcup_bot.data.stages import KNOCKOUT_STAGES
+
+        result: dict[str, set[str]] = {}
+        for api_stage, _display, _pts in KNOCKOUT_STAGES:
+            teams: set[str] = set()
+            for r in self.get_stage_results(api_stage):
+                if r.home_tla:
+                    teams.add(r.home_tla)
+                if r.away_tla:
+                    teams.add(r.away_tla)
+            result[api_stage] = teams
+        return result
+
     def get_finished_groups(self) -> set[str]:
         """Return GROUP_X ids whose group-stage matches are ALL FINISHED."""
         matches = self.get_all_matches()

@@ -1057,6 +1057,46 @@ class TestFormatUserDetailProvisionalFooter:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# format_user_detail — knockout section (acierto / fallo / pending)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFormatUserDetailKnockout:
+    def _detail(self) -> dict:
+        return {
+            "username": "alice",
+            "display_name": "Alice",
+            "base_score": 0.0,
+            "group_score": 0.0,
+            "knockout_score": 1.0,
+            "total_score": 1.0,
+            "group_detail": [],
+            "knockout_detail": [
+                {"stage": "ROUND_OF_32", "display": "Treintaidosavos", "team": "CAN", "points": 1, "note": "acierto"},
+                {"stage": "ROUND_OF_32", "display": "Treintaidosavos", "team": "BRA", "points": 0, "note": "pending"},
+                {"stage": "ROUND_OF_32", "display": "Treintaidosavos", "team": "RSA", "points": 0, "note": "fallo"},
+            ],
+            "official": False,
+            "finished_groups": None,
+            "started_groups": 12,
+            "total_groups": 12,
+        }
+
+    def test_section_header_and_total_present(self):
+        text = format_user_detail(self._detail())
+        assert "Fases eliminatorias" in text
+        assert "Treintaidosavos" in text
+        assert "Total eliminatorias" in text
+
+    def test_acierto_pending_and_fallo_icons_rendered(self):
+        text = format_user_detail(self._detail())
+        # CAN won → ✅, BRA not played yet → ⏳, RSA eliminated → ❌
+        assert "✅" in next(l for l in text.splitlines() if "CAN" in l)
+        assert "⏳" in next(l for l in text.splitlines() if "BRA" in l)
+        assert "❌" in next(l for l in text.splitlines() if "RSA" in l)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # cmd_ver_gol_callback
 # ══════════════════════════════════════════════════════════════════════════════
 

@@ -10,7 +10,8 @@ score_groups: group standings scoring.
       * 3rd-place team does NOT qualify -> NON_QUALIFYING_THIRD_SCORE (0.0)
   - qualifying_thirds=None (default): backward-compat -- all 3rds treated as qualifying
   - otherwise -> 0.0
-score_knockout: knockout stage scoring (correct qualifier -> +stage_points).
+score_knockout: knockout stage scoring (correct qualifier -> +stage_points;
+  optional decided_teams marks not-yet-played picks as pending instead of fallo).
 score_user_groups_detail: same as score_groups but returns per-team breakdown.
 best_qualifying_thirds: FIFA third-place ranking -- return the 8 best thirds.
 """
@@ -242,11 +243,23 @@ def score_knockout(
     user_knockout: UserKnockout,
     actual_winners: ActualWinners,
     stages_config: list[tuple[str, str, int]] = KNOCKOUT_STAGES,
+    decided_teams: dict[str, set[str]] | None = None,
 ) -> tuple[float, list[DetailEntry]]:
     """Score knockout-phase predictions.
 
     user_knockout uses yaml keys (e.g. "round_of_32").
     actual_winners uses API stage names (e.g. "ROUND_OF_32").
+
+    decided_teams: optional {api_stage: set(TLAs that played a FINISHED match in
+      that stage)} — winners and losers alike.  When provided, a predicted team
+      whose match has NOT finished yet is marked "pending" (⏳, 0 pts) instead of
+      "fallo", mirroring the group-stage "no_data" handling so a not-yet-played
+      pick does not look like a loss.  None (default): backward-compatible —
+      every non-winner is "fallo".
+
+    A knockout result is definitive the moment its match is FINISHED, so each
+    finished match scores immediately (provisional and official alike) — the
+    same idea as a closed group counting in the group phase.
 
     Returns (total_points, detail_list).
     """
@@ -257,6 +270,7 @@ def score_knockout(
         yaml_key = STAGE_YAML_KEYS.get(api_stage, api_stage.lower())
         predicted = user_knockout.get(yaml_key, [])
         actual = set(actual_winners.get(api_stage, []))
+        decided = None if decided_teams is None else set(decided_teams.get(api_stage, set()))
 
         for team in predicted:
             if team == "**" or not team:
@@ -273,24 +287,21 @@ def score_knockout(
 
             if team in actual:
                 total += stage_pts
-                detail.append(
-                    {
-                        "stage": api_stage,
-                        "display": display_es,
-                        "team": team,
-                        "points": stage_pts,
-                        "note": "acierto",
-                    }
-                )
+                note, pts = "acierto", stage_pts
+            elif decided is not None and team not in decided:
+                # Its match has not been played yet — pending, not a loss.
+                note, pts = "pending", 0
             else:
-                detail.append(
-                    {
-                        "stage": api_stage,
-                        "display": display_es,
-                        "team": team,
-                        "points": 0,
-                        "note": "fallo",
-                    }
-                )
+                note, pts = "fallo", 0
+
+            detail.append(
+                {
+                    "stage": api_stage,
+                    "display": display_es,
+                    "team": team,
+                    "points": pts,
+                    "note": note,
+                }
+            )
 
     return total, detail

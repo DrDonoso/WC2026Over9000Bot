@@ -438,6 +438,53 @@ class TestScoreKnockoutWildcard:
         assert detail[0]["note"] == "wildcard"
 
 
+class TestScoreKnockoutPending:
+    """decided_teams distinguishes a not-yet-played pick (pending) from a loss."""
+
+    _STAGE = [("ROUND_OF_32", "Treintaidosavos", 1)]
+
+    def test_unplayed_pick_is_pending_not_fallo(self):
+        user = {"round_of_32": ["BRA"]}
+        actual = {"ROUND_OF_32": ["CAN"]}  # BRA's match not finished
+        decided = {"ROUND_OF_32": {"CAN", "RSA"}}
+        pts, detail = score_knockout(user, actual, self._STAGE, decided_teams=decided)
+        assert pts == 0.0
+        assert detail[0]["note"] == "pending"
+        assert detail[0]["points"] == 0
+
+    def test_eliminated_pick_is_fallo(self):
+        user = {"round_of_32": ["RSA"]}  # RSA played and lost
+        actual = {"ROUND_OF_32": ["CAN"]}
+        decided = {"ROUND_OF_32": {"CAN", "RSA"}}
+        pts, detail = score_knockout(user, actual, self._STAGE, decided_teams=decided)
+        assert pts == 0.0
+        assert detail[0]["note"] == "fallo"
+
+    def test_winner_pick_is_acierto(self):
+        user = {"round_of_32": ["CAN"]}
+        actual = {"ROUND_OF_32": ["CAN"]}
+        decided = {"ROUND_OF_32": {"CAN", "RSA"}}
+        pts, detail = score_knockout(user, actual, self._STAGE, decided_teams=decided)
+        assert pts == 1.0
+        assert detail[0]["note"] == "acierto"
+
+    def test_mixed_winner_pending_and_fallo(self):
+        user = {"round_of_32": ["CAN", "BRA", "RSA"]}
+        actual = {"ROUND_OF_32": ["CAN"]}
+        decided = {"ROUND_OF_32": {"CAN", "RSA"}}
+        pts, detail = score_knockout(user, actual, self._STAGE, decided_teams=decided)
+        notes = {d["team"]: d["note"] for d in detail}
+        assert notes == {"CAN": "acierto", "BRA": "pending", "RSA": "fallo"}
+        assert pts == 1.0
+
+    def test_none_decided_is_backward_compatible_fallo(self):
+        """Without decided_teams, a non-winner stays 'fallo' (legacy behavior)."""
+        user = {"round_of_32": ["BRA"]}
+        actual = {"ROUND_OF_32": ["CAN"]}
+        pts, detail = score_knockout(user, actual, self._STAGE)
+        assert detail[0]["note"] == "fallo"
+
+
 class TestScoreKnockoutEmptyInputs:
     def test_empty_user_knockout_no_teams_no_detail(self):
         pts, detail = score_knockout({}, {"ROUND_OF_32": ["ESP"]})

@@ -83,6 +83,22 @@ def _build_actual_winners(client: FootballDataClient) -> dict[str, list[str]]:
     return client.get_knockout_results()
 
 
+def _build_decided_teams(client: FootballDataClient) -> dict[str, set[str]] | None:
+    """Return {api_stage: set(TLAs that played a finished KO match)} or None.
+
+    None disables the pending/fallo distinction (backward-compatible) — used when
+    a client double does not implement get_knockout_decided.
+    """
+    getter = getattr(client, "get_knockout_decided", None)
+    if not callable(getter):
+        return None
+    try:
+        result = getter()
+    except Exception:  # pragma: no cover - defensive
+        return None
+    return result if isinstance(result, dict) else None
+
+
 # ── public ranking functions ──────────────────────────────────────────────────
 
 
@@ -197,9 +213,14 @@ def compute_user_detail(
 ) -> dict | None:
     """Return full scoring detail for a single user, or None if not found.
 
-    official=False (default): live/provisional — all groups and knockout stages score.
-    official=True: only CLOSED groups score; only FINISHED knockout stages score.
-                   Unclosed groups → 'no_data' → ⏳ 0. Pending KO rounds produce no entries.
+    Groups follow the provisional/official split:
+      official=False (default): STARTED groups score from live standings;
+        groups not yet started → 'no_data' → ⏳ 0.
+      official=True: only CLOSED groups score; unclosed groups → 'no_data' → ⏳ 0.
+
+    Knockout scores the SAME way in both modes: a match counts the instant it is
+    FINISHED (its winner is definitive), exactly like a closed group counts.
+    Picks whose match has not been played yet are 'pending' (⏳ 0), not 'fallo'.
     """
     udata = pred_loader.get_participant(predictions, username)
     if udata is None:
@@ -209,24 +230,19 @@ def compute_user_detail(
 
     if official:
         finished_groups = client.get_finished_groups()
-        finished_stages = client.get_finished_stages()
         actual_standings = _build_actual_standings(client, only_groups=finished_groups)
         qualifying_thirds = _build_qualifying_thirds(client, only_groups=finished_groups)
-        full_winners = _build_actual_winners(client)
-        actual_winners = {api: full_winners.get(api, []) for api in finished_stages}
-        user_ko = {
-            yaml: udata.get("knockout", {}).get(yaml, [])
-            for api, yaml in STAGE_YAML_KEYS.items()
-            if api in finished_stages
-        }
-        ko_pts, ko_detail = score_knockout(user_ko, actual_winners)
     else:
         finished_groups = None
         started_groups = client.get_started_groups()
         actual_standings = _build_actual_standings(client, only_groups=started_groups)
         qualifying_thirds = _build_qualifying_thirds(client, only_groups=started_groups)
-        actual_winners = _build_actual_winners(client)
-        ko_pts, ko_detail = score_knockout(udata.get("knockout", {}), actual_winners)
+
+    actual_winners = _build_actual_winners(client)
+    decided_teams = _build_decided_teams(client)
+    ko_pts, ko_detail = score_knockout(
+        udata.get("knockout", {}), actual_winners, decided_teams=decided_teams
+    )
 
     grp_pts, grp_detail = score_groups(udata.get("groups", {}), actual_standings, qualifying_thirds)
     base = udata.get("base_score", 0.0)

@@ -226,7 +226,7 @@ def format_user_detail(detail: dict) -> str:
             if team == "**":
                 continue
             f = team_flag(team)
-            note_map2 = {"acierto": "✅", "fallo": "❌", "wildcard": ""}
+            note_map2 = {"acierto": "✅", "fallo": "❌", "pending": "⏳", "wildcard": ""}
             note = note_map2.get(d.get("note", ""), "")
             pts = d.get("points", 0)
             lines.append(f"    {f}{html.escape(str(team), quote=False)} {note} ({pts}pt)")

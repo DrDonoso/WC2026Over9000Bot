@@ -31,6 +31,7 @@ def _make_client(
     ko_results: dict[str, list[str]] | None = None,
     finished_stages: set[str] | None = None,
     started_groups: set[str] | None = None,
+    decided_teams: dict[str, set[str]] | None = None,
 ) -> MagicMock:
     client = MagicMock()
     client.get_standings.return_value = standings or []
@@ -38,6 +39,11 @@ def _make_client(
     client.get_knockout_results.return_value = ko_results if ko_results is not None else _ko_empty()
     client.get_finished_stages.return_value = finished_stages if finished_stages is not None else set()
     client.get_started_groups.return_value = started_groups if started_groups is not None else set()
+    if decided_teams is not None:
+        client.get_knockout_decided.return_value = decided_teams
+    else:
+        # Not a dict → engine disables the pending/fallo distinction (legacy behavior).
+        client.get_knockout_decided.return_value = MagicMock()
     return client
 
 
@@ -437,8 +443,9 @@ class TestComputeUserDetailOfficial:
         result = compute_user_detail("bob", predictions, client, official=True)
         assert result["knockout_score"] == 1.0  # LAST_16 awards 1 pt per correct pick
 
-    def test_unfinished_ko_stage_produces_no_detail_entries(self):
-        """official=True: a KO stage not yet finished has no entries in knockout_detail."""
+    def test_finished_ko_match_counts_even_if_stage_unfinished(self):
+        """official=True: a FINISHED KO match scores immediately, even if the rest
+        of its stage is still pending (a result is definitive once played)."""
         predictions = {
             "participants": {
                 "carol": {
@@ -453,8 +460,8 @@ class TestComputeUserDetailOfficial:
             }
         }
         ko_results = _ko_empty()
-        ko_results["QUARTER_FINALS"] = ["ESP"]
-        # QUARTER_FINALS is NOT in finished_stages
+        ko_results["QUARTER_FINALS"] = ["ESP"]  # ESP already won its QF match
+        # QUARTER_FINALS is NOT fully finished, but ESP's match is.
         client = _make_client(
             standings=_GROUP_A_STANDINGS,
             finished_groups={"GROUP_A"},
@@ -462,8 +469,59 @@ class TestComputeUserDetailOfficial:
             ko_results=ko_results,
         )
         result = compute_user_detail("carol", predictions, client, official=True)
-        assert result["knockout_detail"] == []
-        assert result["knockout_score"] == 0.0
+        assert result["knockout_score"] == 2.0  # QF awards 2 pts per correct pick
+        assert [d["note"] for d in result["knockout_detail"]] == ["acierto"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# compute_user_detail — round-of-32 partially played (pending vs fallo)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestComputeUserDetailKnockoutPending:
+    """A round_of_32 with only one finished match: the winner scores, every
+    not-yet-played pick is 'pending' (⏳), and an eliminated pick is 'fallo'."""
+
+    _PREDS = {
+        "participants": {
+            "dave": {
+                "display_name": "Dave",
+                "base_score": 0.0,
+                "groups": {"A": ["GER", "ESP", "BRA"]},
+                "knockout": {
+                    "round_of_32": ["CAN", "BRA", "RSA"],  # CAN won, BRA pending, RSA lost
+                    "round_of_16": [], "quarter_finals": [],
+                    "semi_finals": [], "final": [],
+                },
+            }
+        }
+    }
+
+    def _client(self, official_groups: bool):
+        ko_results = _ko_empty()
+        ko_results["ROUND_OF_32"] = ["CAN"]  # only the CAN vs RSA match is finished
+        return _make_client(
+            standings=_GROUP_A_STANDINGS,
+            finished_groups={"GROUP_A"} if official_groups else None,
+            started_groups={"GROUP_A"} if not official_groups else None,
+            ko_results=ko_results,
+            decided_teams={"ROUND_OF_32": {"CAN", "RSA"}},
+        )
+
+    def _notes(self, detail):
+        return {d["team"]: d["note"] for d in detail}
+
+    def test_provisional_marks_pending_and_scores_winner(self):
+        result = compute_user_detail("dave", self._PREDS, self._client(False), official=False)
+        notes = self._notes(result["knockout_detail"])
+        assert notes == {"CAN": "acierto", "BRA": "pending", "RSA": "fallo"}
+        assert result["knockout_score"] == 1.0
+
+    def test_official_counts_finished_match_same_as_provisional(self):
+        result = compute_user_detail("dave", self._PREDS, self._client(True), official=True)
+        notes = self._notes(result["knockout_detail"])
+        assert notes == {"CAN": "acierto", "BRA": "pending", "RSA": "fallo"}
+        assert result["knockout_score"] == 1.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════

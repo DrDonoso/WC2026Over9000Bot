@@ -406,6 +406,39 @@ class TestGetStageResults:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# FootballDataClient — get_knockout_decided
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetKnockoutDecided:
+    @resp_lib.activate
+    def test_includes_both_participants_of_finished_match(self, sample_matches_json):
+        resp_lib.add(resp_lib.GET, WC_MATCHES, json=sample_matches_json, status=200)
+        client = _fresh_client()
+        decided = client.get_knockout_decided()
+        # The finished LAST_16 match was BRA vs ARG → both are "decided".
+        assert decided["LAST_16"] == {"BRA", "ARG"}
+
+    @resp_lib.activate
+    def test_excludes_unfinished_match_participants(self, sample_matches_json):
+        resp_lib.add(resp_lib.GET, WC_MATCHES, json=sample_matches_json, status=200)
+        client = _fresh_client()
+        decided = client.get_knockout_decided()
+        # ESP vs FRA is SCHEDULED → neither team is decided yet.
+        assert "ESP" not in decided["LAST_16"]
+        assert "FRA" not in decided["LAST_16"]
+
+    @resp_lib.activate
+    def test_all_stages_present_as_keys(self):
+        resp_lib.add(resp_lib.GET, WC_MATCHES, json={"matches": []}, status=200)
+        client = _fresh_client()
+        decided = client.get_knockout_decided()
+        from worldcup_bot.data.stages import KNOCKOUT_STAGES
+        for api_stage, _, _ in KNOCKOUT_STAGES:
+            assert decided[api_stage] == set()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # FootballDataClient — error handling
 # ══════════════════════════════════════════════════════════════════════════════
 
