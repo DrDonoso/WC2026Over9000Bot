@@ -5,6 +5,14 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260629.04] - 2026-06-29
+
+- formatters: render_endirecto always appends the ⚽ Goles button; add goal_button_label + build_endirecto_goals_keyboard.
+- endirecto_store: set_reddit_goals merges/dedups/sorts parsed goals into the snapshot.
+- handlers: cmd_endirecto_callback handles code 'g' (fetch + show buttons); new cmd_endirecto_goal_callback posts the goal and clears the keyboard.
+- __main__: register the edgol callback handler.
+
+
 ## [20260629.03] - 2026-06-29
 
 - get_stage_results(''ROUND_OF_32'') matched no finished match, so the already-played Canada result was never scored in /listaaciertosactual, /listaaciertos and /general.
