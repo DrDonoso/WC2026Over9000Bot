@@ -6,6 +6,24 @@
 - **CI reference:** Workflow structure mirrors `../RedditSoccerGoals`.
 - **Created:** 2026-06-15
 
+### Phase 2 Wiring (2026-06-30) — Chat Features Environment
+
+**Task:** Wire 12 new environment variables across all surfaces for LLM-driven chat features (Picante + Revive).
+
+**Deliverables:**
+- `.env.example` — 12 new env vars with defaults (both features disabled by default)
+- `docker-compose.yml` — 12 new env vars with `${VAR:-default}` pattern
+- `docker-compose.local.yml` — identical 12 env vars
+- `README.md` — new "Telegram privacy mode (required for chat features)" section
+
+**Key decision:** Privacy mode MUST be disabled in BotFather (`/setprivacy` → Disable). Bot must be removed from group and re-added after disabling (setting only applies to new memberships).
+
+**Validation:** Both compose files validate with `docker compose config --quiet` → exit 0.
+
+**Status:** Complete and shipping (2026-06-30).
+
+---
+
 ## Key Implementation Patterns (Maldini DevOps)
 
 ### Phase 1 Scaffold (2026-06-15)
@@ -113,6 +131,34 @@
 - **Changes:** (1) `docker-compose.yml`: added `TVE_ENABLED: "${TVE_ENABLED:-1}"` with Spanish comment "Marca con 📺 los partidos que da TVE (vía API de RTVE). '0' para desactivar.", right after `BELOVED_TEAMS` block (line ~43). (2) `docker-compose.local.yml`: identical entry. (3) `.env.example`: added commented line with description ("Mark matches that are broadcast on TVE... Set to 0 to disable if the undocumented RTVE API breaks mid-tournament"). (4) **Both compose files validated cleanly** via `docker compose config -q` exit 0.
 - **No volume changes:** Feature uses existing data/code bindings. Runtime toggle allows quick disabling of RTVE lookup without code change if the undocumented API breaks during tournament.
 - **Parity:** Same optional env-var pattern (`${VAR:-default}`) as PREDICTIONS_PATH, TONGO_USERS_PATH, BELOVED_TEAMS, etc.
+
+### Clip Disk Investigation (2026-06-26)
+- **Issue:** Yesterday matches produced some goals with no keyboard and missing notifications. Volume had ~4GB free. Investigation: is disk-full the cause?
+- **Storage location:** Clips stored at `{STATE_DIR}/clips/` (named volume `bot_state:/app/state` in both compose files). Per-goal metadata in `{STATE_DIR}/goal_clips.json`.
+- **Retention:** `prune_old_entries()` called every 45s in `poll_goal_clips_job`, deletes entries + files older than **7 days**. **No total-size cap** — only age-based cleanup today.
+- **Clips NOT deleted on send:** `cmd_ver_gol_callback()` keeps clips persistent so multiple users can tap the same button. Unclicked clips accumulate until pruning.
+- **Disk pressure estimate:** 80–110 clips stored at any time (7-day retention) = 800 MB–3.3 GB. A busy day adds 240–320 MB. **4GB free is sufficient** for normal ops.
+- **Conclusion:** Disk-full unlikely direct cause, but possible if `prune_old_entries` silently failed (corrupt JSON, permissions). More likely: clip finder miss, download failure, or slow poll job. Recommended: add volume healthcheck + soft-limit LRU eviction.
+- **Deliverable:** `.squad/decisions/inbox/maldini-clip-disk-investigation-2026-06-26.md` (full analysis + infra recommendations for healthcheck, LRU, Kanté coordination).
+
+### Group Chat Features — Environment Wiring & Privacy-Mode Docs (2026-06-30)
+- **Privacy-mode requirement:** For picante (spicy random replies) + revive (inactive-user engagement) features to work, bot must receive ALL group messages, not just `/commands` + replies. Telegram privacy mode must be **DISABLED** in BotFather (`/setprivacy` → **Disable**) and bot must be **removed + re-added** to the group (privacy change only applies to new memberships). Documented in README.md under new subsection "### Telegram privacy mode (required for chat features)" with clear pre-deployment step.
+- **Environment wiring:** Added 12 new env vars to `.env.example` (documented with comments), `docker-compose.yml`, and `docker-compose.local.yml`:
+  - `CHAT_PICANTE_ENABLED=0` (master toggle; default OFF)
+  - `CHAT_REVIVE_ENABLED=0` (master toggle; default OFF)
+  - `CHAT_BUFFER_SIZE=30` (recent messages for AI context)
+  - `PICANTE_PROBABILITY=0.20` (~1 in 5 eligible messages)
+  - `PICANTE_COOLDOWN_SECONDS=300` (min secs between spicy replies)
+  - `PICANTE_MAX_PER_DAY=30` (hard daily cap)
+  - `PICANTE_MIN_BUFFER=5` (buffer threshold)
+  - `PICANTE_TEMPERATURE=0.9` (LLM temperature)
+  - `REVIVE_CHECK_INTERVAL_SECONDS=14400` (4-hour checks)
+  - `REVIVE_INACTIVE_DAYS=3` (inactivity threshold)
+  - `REVIVE_MENTION_COOLDOWN_DAYS=2` (per-user cooldown)
+  - `REVIVE_TEMPERATURE=0.8` (LLM temperature)
+- **Notes in `.env.example`:** Added comment noting both features require OPENAI_* vars (OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL) to be fully set.
+- **Compose style:** Matched existing pattern (`${VAR:-default}`) for consistency; added comment block before the new vars explaining dependency on OPENAI_* and privacy mode.
+- **Validation:** Both `docker-compose.yml` and `docker-compose.local.yml` validated cleanly with `docker compose config --quiet`.
 
 
 

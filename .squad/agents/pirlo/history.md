@@ -106,3 +106,53 @@
 4. Error path safe (date parse failure → match stays live)
 
 **Verdict:** APPROVE — fix is correct, minimal, safe. Ship it.
+
+### 2026-06-30 — LLM Chat Features Design (Picante + Revive Inactive)
+
+**Session:** pirlo design/refinement for two new LLM-powered chat features  
+**Status:** PROPOSED — awaiting David's decisions
+
+**Key architectural decisions:**
+1. New `src/worldcup_bot/chat/` package with clean separation: `listener.py` (Telegram), `picante.py` / `revive.py` (LLM orchestration), `buffer.py` / `state.py` (pure state).
+2. **Privacy stance:** In-memory ring buffer ONLY for message text. NO message bodies persisted to disk. Only `last_seen`, `last_mentioned`, and cooldown metadata saved as JSON.
+3. Both features independently toggleable via `CHAT_PICANTE_ENABLED` / `CHAT_REVIVE_ENABLED` env vars (default: False).
+4. Reuses existing `AIClient` and `OPENAI_*` config — no new API credentials needed.
+5. **Blocking infra requirement:** Bot privacy mode must be DISABLED in BotFather + bot re-added to group.
+6. MessageHandler with `TEXT & ~COMMAND & GROUPS` filter, registered after existing CommandHandlers in `build_app()`.
+7. Rate limiting: per-message probability + cooldown timestamp + daily counter (picante); periodic job + per-user mention cooldown + rotation (revive).
+
+**Open decisions document:** `.squad/decisions/inbox/pirlo-llm-chat-features.md`
+
+### 2026-06-30 — LLM Chat Features Implementation Review (APPROVED)
+
+**Session:** Kanté implementation review (pirlo reviewer gate)  
+**Status:** APPROVED — no blocking issues
+
+**Reviewed files:** `chat/__init__.py`, `buffer.py`, `state.py`, `listener.py`, `picante.py`, `revive.py`, `config.py` additions, `__main__.py` wiring.
+
+**Key verification points:**
+1. All 10 checklist items PASS — filtering, rate limiting, privacy, candidate set, concurrency, resilience, zero-overhead when disabled, guardrails, mention construction, param fidelity.
+2. Gate function purity enables comprehensive unit testing without mocks.
+3. AIError/Exception catch-all in both features prevents LLM flakiness from crashing message processing.
+4. Daily cap reset uses local timezone (`pytz.timezone(settings.timezone)`) for calendar day — correct for the Madrid-based group.
+5. Revive candidate rotation wraps correctly with modulo; seeding at startup prevents day-1 spam.
+
+**Learning:** Pure gate functions (probability, cooldown, daily_cap, min_buffer) separated from Telegram I/O orchestrators is an effective pattern — makes correctness obvious at review time and testable without PTB mocks.
+
+### 2026-06-30 — LLM Chat Features Shipped (Picante + Revive)
+
+**Event:** Successful team delivery of two LLM-driven group-chat features.
+
+**Role:** Lead coordination + design gate + implementation review gate.
+
+**Deliverables:**
+- ✅ Design spec locked (13 open Qs → David's approval)
+- ✅ Implementation review gate (Kanté) — APPROVED (all 10 checklist items PASS)
+- ✅ QA gate (Buffon) — PASS WITH ADDED TESTS (+107 edge-case tests, 0 bugs)
+- ✅ DevOps coordination (Maldini) — 12 env vars wired, README privacy-mode section
+
+**Final status:** All 4 agent deliverables complete. Test suite: 1875 total (1768 + 107 new). Ready for deployment (if privacy mode disabled first).
+
+**Key leadership decision locked:** Candidate set = PORRA PARTICIPANTS ONLY (override of initial "anyone who spoke" recommendation). Rationale: keeps porra-internal data off Revive targeting; participants are the intended audience.
+
+**Blocking pre-deployment requirement documented:** BotFather privacy mode MUST be disabled. Failure mode obvious: features ship in code but produce zero group messages received because API gating blocks them. This requirement now lives in README with step-by-step setup instructions.

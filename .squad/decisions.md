@@ -1,3 +1,193 @@
+# Decision: LLM Chat Features Ship — Picante + Revive (2026-06-30 MERGED)
+
+**Date:** 2026-06-30  
+**Authors:** Pirlo (Design), Kanté (Implementation), Maldini (DevOps), Buffon (Testing)  
+**Status:** ✅ SHIPPED  
+
+---
+
+## MERGED DECISIONS (4 files → 1 entry)
+
+This entry consolidates the complete chat-features feature ship:
+1. `pirlo-llm-chat-features.md` — Design spec + open decisions  
+2. `kante-chat-features-impl.md` — Implementation details  
+3. `pirlo-chat-features-review.md` — Lead review (APPROVED)  
+4. `maldini-chat-features-ops.md` — DevOps/infrastructure  
+
+---
+
+## Overview
+
+Two new LLM-driven group-chat features shipped in `src/worldcup_bot/chat/` package:
+- **Picante**: Random spicy replies to group messages (~1-in-5 probability, 5-min cooldown, 30/day cap)
+- **Revive**: Periodic @mentions of inactive users (4h check interval, 3-day threshold, 2-day mention cooldown)
+
+Both features:
+- **Disabled by default** (`CHAT_PICANTE_ENABLED=0`, `CHAT_REVIVE_ENABLED=0`)
+- Share in-memory ring buffer (30 messages), JSON-persisted state (last_seen/last_mentioned only, no message text on disk)
+- Reuse existing AIClient + OPENAI_* config (no new API key required)
+- Require **BotFather privacy mode to be DISABLED** (blocking pre-deployment step — documented in README)
+
+---
+
+## Architecture
+
+```
+src/worldcup_bot/chat/  (NEW package)
+├── __init__.py
+├── buffer.py          # RingBuffer class (in-memory, N messages)
+├── state.py           # ChatState dataclass + load/save (last_seen, last_mentioned, cooldowns)
+├── listener.py        # MessageHandler + filtering + buffer recording
+├── picante.py         # Probability gate, cooldown, prompt build, reply
+└── revive.py          # Candidate selection, rotation, prompt build, send
+```
+
+**Existing files touched:**
+- `src/worldcup_bot/config.py` — 12 new Settings fields
+- `src/worldcup_bot/__main__.py` — MessageHandler registration, chat_state + chat_buffer seeding, revive job scheduling
+- `README.md` — Privacy mode section (Maldini)
+- `.env.example`, `docker-compose.yml`, `docker-compose.local.yml` — 12 env vars (Maldini)
+
+---
+
+## Locked Parameters (David approved 2026-06-30)
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Picante probability | 0.20 | 1-in-5 eligible messages |
+| Picante cooldown | 300s | 5 min minimum between replies |
+| Picante daily cap | 30 | Hard cap per day |
+| Buffer size | 30 | Recent messages kept in RAM |
+| Min buffer | 5 | Don't fire until buffer has ≥5 |
+| Inactive threshold | 3 days | Days silent = considered inactive |
+| Revive check interval | 14400s | Every 4 hours |
+| Mention cooldown | 2 days | Don't re-mention same user within 2 days |
+| Picante temperature | 0.9 | LLM temperature for spicy replies |
+| Revive temperature | 0.8 | LLM temperature for revive messages |
+| Candidate set | PORRA PARTICIPANTS ONLY | (override of Pirlo's "anyone who spoke") |
+| Language | ES + CAT | Spanish primary, Catalan when natural |
+
+---
+
+## Environment Variables (Maldini wired across all surfaces)
+
+12 new env vars in `.env.example`, `docker-compose.yml`, `docker-compose.local.yml`:
+
+```
+CHAT_PICANTE_ENABLED=0
+CHAT_REVIVE_ENABLED=0
+CHAT_BUFFER_SIZE=30
+PICANTE_PROBABILITY=0.20
+PICANTE_COOLDOWN_SECONDS=300
+PICANTE_MAX_PER_DAY=30
+PICANTE_MIN_BUFFER=5
+PICANTE_TEMPERATURE=0.9
+REVIVE_CHECK_INTERVAL_SECONDS=14400
+REVIVE_INACTIVE_DAYS=3
+REVIVE_MENTION_COOLDOWN_DAYS=2
+REVIVE_TEMPERATURE=0.8
+```
+
+---
+
+## Privacy & Data Design
+
+- **Message text**: In-memory only (lost on restart; buffer refills in minutes)
+- **Persisted to disk** (JSON): only `last_seen`, `last_mentioned`, `picante_daily_count`, `picante_last_date`, `rotate_index` — ZERO message text on disk
+- **GDPR compliant**: No message history disk footprint
+- **Picante prompt guardrails**: "Prohibido: insultos reales, contenido sexual, información personal sensible, discursos de odio" (no real insults, no sexual content, no personal info, no hate speech)
+- **Revive prompt guardrails**: "Tono: cálido, con gracia, sin agresividad" (warm, graceful, non-aggressive)
+
+---
+
+## Testing
+
+**1768 tests total** (baseline 1730 + 38 new tests added by Buffon for edge cases):
+- `tests/test_chat_edge_cases.py` — 107 edge-case tests covering all gates, fallbacks, concurrency, and PORRA-only filtering
+- All tests green, 0 bugs found
+
+---
+
+## Deployment Checklist (Maldini)
+
+**BLOCKING PRE-STEP** (must be done before deployment):
+
+1. In BotFather: `/setprivacy` → **DISABLE** (bot needs to receive ALL group messages, not just /commands + replies)
+2. **Remove bot from group and re-add** — privacy mode setting only applies to new memberships
+3. Deploy bot (environment vars default to disabled)
+4. To enable: set `CHAT_PICANTE_ENABLED=1` and/or `CHAT_REVIVE_ENABLED=1` when ready
+
+---
+
+## Pirlo Lead Review (2026-06-30 APPROVED)
+
+✅ **Verdict: APPROVE** — Implementation is correct, well-structured, faithfully follows spec.
+
+**Checklist results:**
+- ✅ Filtering completeness (all media types rejected, commands rejected, text length checked)
+- ✅ Rate limiting correctness (probability gate, cooldown via Unix time, daily cap with timezone-aware reset)
+- ✅ Privacy (ZERO message text on disk)
+- ✅ Candidate set = PORRA ONLY (sourced from predictions.yml participant keys)
+- ✅ Concurrency (handlers sequential, state fields non-overlapping, no data loss possible)
+- ✅ Resilience (both orchestrators wrapped in try/except, AI errors logged and swallowed)
+- ✅ Disabled = zero overhead (handler only registered if feature enabled, job only scheduled if enabled)
+- ✅ Guardrails (clear prohibitions on insults, sexual content, personal info, hate speech)
+- ✅ Mention construction (plain text @username, Telegram resolves natively)
+- ✅ Fidelity to locked params (all 10 params verified 1:1)
+
+---
+
+## Optional Nits (non-blocking, shipped as-is)
+
+1. Could add explicit `parse_mode=None` to picante reply (defensive coding, low risk)
+2. Inline import in listener.py:101 to avoid circular dep (acceptable)
+3. Buffer allocated unconditionally even when both features disabled (negligible cost)
+
+---
+
+## Buffon QA Gate (107 edge-case tests, all green, 0 bugs)
+
+**1875 tests total passed** (1768 baseline + 107 new edge-case tests).
+
+Edge cases covered:
+- All rate-limit gates (probability, cooldown, daily cap, min buffer)
+- PORRA participant filtering (candidate set correctness)
+- Timezone-aware daily reset
+- Message filtering (media rejection, command rejection, length check)
+- Inactive calculation (3-day threshold, mention cooldown)
+- Rotation logic (round-robin, wrap-around)
+- AI error resilience
+- Concurrency scenarios
+
+---
+
+## Delivery Artifacts
+
+**Code:**
+- ✅ `src/worldcup_bot/chat/` package (5 modules: buffer, state, listener, picante, revive)
+- ✅ `src/worldcup_bot/config.py` — 12 new Settings fields
+- ✅ `src/worldcup_bot/__main__.py` — handler registration, state seeding, job scheduling
+
+**Configuration:**
+- ✅ `README.md` — Privacy mode section + setup instructions
+- ✅ `.env.example` — 12 new env vars with defaults
+- ✅ `docker-compose.yml` — 12 env vars wired
+- ✅ `docker-compose.local.yml` — 12 env vars wired
+
+**Tests:**
+- ✅ `tests/test_chat_edge_cases.py` — 107 comprehensive edge-case tests
+- ✅ All 1875 tests passing
+
+---
+
+## Known Limitations (Deferred to v2)
+
+- Opt-out per user (`/norevive` command) — deferred to v2
+- No disciplinary/drawing-of-lots for mention candidate ties — uses deterministic rotation as fallback
+- No explicit Markdown safety on generated messages (LLM system prompt provides guardrails instead)
+
+---
+
 # Decision: Fix TVE 📺 label missing from 09:00 daily update
 
 **Date:** 2026-06-26  
