@@ -167,22 +167,30 @@ class TestMinBufferGate:
 
 
 class TestPicanteUserMessage:
-    def test_formats_messages_as_name_colon_text(self):
+    def test_last_message_is_trigger_prior_in_context(self):
+        """Multi-message: last in ÚLTIMO MENSAJE block; prior in CONTEXTO block."""
         msgs = [
             {"display_name": "Alice", "text": "Hola!"},
             {"display_name": "Bob", "text": "¿Qué tal?"},
         ]
         result = build_picante_user_message(msgs)
-        assert "Alice: Hola!" in result
+        assert "ÚLTIMO MENSAJE" in result
         assert "Bob: ¿Qué tal?" in result
+        assert "CONTEXTO" in result
+        assert "Alice: Hola!" in result
+        # Context section must precede the trigger section
+        assert result.index("CONTEXTO") < result.index("ÚLTIMO MENSAJE")
 
     def test_empty_returns_placeholder(self):
         assert build_picante_user_message([]) == "(sin contexto)"
 
-    def test_falls_back_to_username_when_no_display_name(self):
+    def test_single_message_no_context_block_username_fallback(self):
+        """Single message: only ÚLTIMO MENSAJE block; username used when no display_name."""
         msgs = [{"username": "alice", "text": "hola!"}]
         result = build_picante_user_message(msgs)
+        assert "ÚLTIMO MENSAJE" in result
         assert "alice: hola!" in result
+        assert "CONTEXTO" not in result
 
 
 # ── Revive candidate selection ────────────────────────────────────────────────
