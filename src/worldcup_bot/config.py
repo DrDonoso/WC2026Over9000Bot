@@ -59,6 +59,9 @@ class Settings:
     revive_inactive_days: int = 3
     revive_mention_cooldown_days: int = 2
     revive_temperature: float = 0.8
+    revive_quiet_start_hour: int = 23
+    revive_quiet_end_hour: int = 6
+    revive_jitter_seconds: int = 2700
 
 
 def _parse_bool(raw: str) -> bool:
@@ -167,4 +170,7 @@ def load_settings() -> Settings:
         revive_inactive_days=int(os.getenv("REVIVE_INACTIVE_DAYS", "3")),
         revive_mention_cooldown_days=int(os.getenv("REVIVE_MENTION_COOLDOWN_DAYS", "2")),
         revive_temperature=float(os.getenv("REVIVE_TEMPERATURE", "0.8")),
+        revive_quiet_start_hour=int(os.getenv("REVIVE_QUIET_START_HOUR", "23")),
+        revive_quiet_end_hour=int(os.getenv("REVIVE_QUIET_END_HOUR", "6")),
+        revive_jitter_seconds=int(os.getenv("REVIVE_JITTER_SECONDS", "2700")),
     )

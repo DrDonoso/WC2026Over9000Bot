@@ -99,6 +99,10 @@ CHAT_PICANTE_ENABLED=1   # Random spicy replies
 CHAT_REVIVE_ENABLED=1    # Revive inactive users
 ```
 
+**Revive feature notes:**
+- **Check interval:** The bot checks for inactive users approximately every 4 hours, with randomized jitter (±45 min) to prevent thundering herd. Configured via `REVIVE_CHECK_INTERVAL_SECONDS` (base) and `REVIVE_JITTER_SECONDS` (randomization).
+- **Quiet window:** Revive mentions are suppressed during nightly hours (default 23:00–06:00 local time). Configure via `REVIVE_QUIET_START_HOUR` and `REVIVE_QUIET_END_HOUR` (uses the bot's `TIMEZONE`).
+
 Both features are **disabled by default** for safety and remain opt-in via env flags.
 
 ---

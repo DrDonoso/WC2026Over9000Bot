@@ -2,12 +2,26 @@
 
 Candidate-selection and prompt-building functions are pure so Buffon can
 unit-test them without Telegram or network I/O.
+
+Scheduling model (self-rescheduling, quiet-aware):
+- Each job run schedules exactly ONE next run via schedule_next_revive() in
+  the finally block, on every exit path (success, quiet-skip, no-candidates,
+  AIError, unexpected Exception).
+- next_revive_delay() adds ±jitter to the base interval so runs are spread
+  across the day rather than firing at a fixed clock time.
+- is_quiet_hours() / next_revive_delay() push any run that would land in the
+  configured quiet window to just after quiet_end:00 + random spread, so the
+  bot never @mentions anyone at night.
 """
 
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime, timedelta, timezone
+from typing import Callable
+
+import pytz
 
 from worldcup_bot.ai.client import AIClient, AIError
 from worldcup_bot.chat.buffer import RingBuffer
@@ -27,7 +41,7 @@ _SYSTEM = (
 )
 
 
-# ── pure candidate-selection functions ───────────────────────────────────────
+# -- pure candidate-selection functions ---------------------------------------
 
 
 def compute_inactive_candidates(
@@ -42,10 +56,8 @@ def compute_inactive_candidates(
 
     A username is eligible when:
     - It is non-empty (required for a valid @mention).
-    - ``last_seen`` is older than *inactive_days* (or absent — seeded at startup
-      and never updated means never spoke, treated as inactive once enough time
-      has elapsed from the seed timestamp).
-    - The user has NOT been mentioned within the last *mention_cooldown_days*.
+    - last_seen is older than inactive_days (or absent).
+    - The user has NOT been mentioned within the last mention_cooldown_days.
 
     The result is sorted for deterministic round-robin rotation.
     """
@@ -57,7 +69,7 @@ def compute_inactive_candidates(
         if not username:
             continue
 
-        # ── inactivity check ──────────────────────────────────────────────────
+        # inactivity check
         seen_iso = last_seen.get(username)
         if seen_iso is None:
             inactive = True
@@ -68,12 +80,12 @@ def compute_inactive_candidates(
                     seen_dt = seen_dt.replace(tzinfo=timezone.utc)
                 inactive = (now - seen_dt) > inactivity_delta
             except Exception:
-                inactive = True  # unparseable timestamp → treat as inactive
+                inactive = True  # unparseable timestamp -> treat as inactive
 
         if not inactive:
             continue
 
-        # ── mention-cooldown check ────────────────────────────────────────────
+        # mention-cooldown check
         mentioned_iso = last_mentioned.get(username)
         if mentioned_iso is not None:
             try:
@@ -83,7 +95,7 @@ def compute_inactive_candidates(
                 if (now - mentioned_dt) <= cooldown_delta:
                     continue  # mentioned too recently
             except Exception:
-                pass  # unparseable → skip cooldown check, allow candidate
+                pass  # unparseable -> skip cooldown check, allow candidate
 
         candidates.append(username)
 
@@ -93,15 +105,95 @@ def compute_inactive_candidates(
 def select_candidate(candidates: list[str], rotate_index: int) -> tuple[str, int]:
     """Pick one candidate using round-robin rotation.
 
-    Returns ``(chosen_username, new_rotate_index)``.
-    *candidates* must be non-empty.  The index wraps modulo ``len(candidates)``.
+    Returns (chosen_username, new_rotate_index).
+    candidates must be non-empty. The index wraps modulo len(candidates).
     """
     idx = rotate_index % len(candidates)
     chosen = candidates[idx]
     return chosen, rotate_index + 1
 
 
-# ── pure prompt builders ──────────────────────────────────────────────────────
+# -- pure scheduling helpers --------------------------------------------------
+
+
+def is_quiet_hours(hour: int, quiet_start: int, quiet_end: int) -> bool:
+    """Return True when hour (0-23) falls inside the configured quiet window.
+
+    - quiet_start == quiet_end: no quiet window -> always False.
+    - quiet_start > quiet_end (midnight wrap, e.g. 23->06):
+      quiet when hour >= quiet_start OR hour < quiet_end.
+    - quiet_start < quiet_end (same day, e.g. 01->06):
+      quiet when quiet_start <= hour < quiet_end.
+    """
+    if quiet_start == quiet_end:
+        return False
+    if quiet_start > quiet_end:  # wraps midnight (e.g. 23 -> 06)
+        return hour >= quiet_start or hour < quiet_end
+    else:  # same-day window (e.g. 01 -> 06)
+        return quiet_start <= hour < quiet_end
+
+
+def next_revive_delay(
+    base_seconds: int,
+    jitter_seconds: int,
+    now_local: datetime,
+    quiet_start: int,
+    quiet_end: int,
+    rand: Callable[[float, float], float] = random.uniform,
+) -> float:
+    """Return seconds until the next revive run.
+
+    Algorithm:
+    1. delay = base_seconds + rand(-jitter_seconds, +jitter_seconds),
+       clamped to >= 60.
+    2. target = now_local + timedelta(seconds=delay).
+    3. If target lands in quiet hours: push to the next quiet_end:00
+       at or after target, plus a rand(0, jitter_seconds) spread so
+       multiple instances do not all wake at exactly quiet_end:00.
+    4. Return final delay (float, seconds).
+
+    rand is injectable so Buffon can test deterministically.
+    """
+    # 1. Base delay with symmetric jitter
+    delay = base_seconds + rand(-jitter_seconds, jitter_seconds)
+    delay = max(delay, 60.0)
+
+    # 2. Target wall-clock time
+    target = now_local + timedelta(seconds=delay)
+
+    # 3. Push past quiet window if needed
+    if is_quiet_hours(target.hour, quiet_start, quiet_end):
+        # Next occurrence of quiet_end:00 at or after target
+        wake = target.replace(hour=quiet_end, minute=0, second=0, microsecond=0)
+        if wake <= target:
+            wake += timedelta(days=1)
+        # Spread runs across [quiet_end:00, quiet_end:00 + jitter) to avoid pile-ups
+        spread = rand(0, jitter_seconds)
+        wake += timedelta(seconds=spread)
+        delay = (wake - now_local).total_seconds()
+
+    return delay
+
+
+def schedule_next_revive(job_queue, settings: Settings) -> None:
+    """Schedule the next revive run as a one-shot PTB job.
+
+    Uses the current local time, jitter, and quiet-hour window from settings.
+    Called from revive_inactive_job's finally block to maintain the
+    self-rescheduling loop.
+    """
+    now_local = datetime.now(pytz.timezone(settings.timezone))
+    delay = next_revive_delay(
+        settings.revive_check_interval_seconds,
+        settings.revive_jitter_seconds,
+        now_local,
+        settings.revive_quiet_start_hour,
+        settings.revive_quiet_end_hour,
+    )
+    job_queue.run_once(revive_inactive_job, when=delay, name="revive_inactive")
+
+
+# -- pure prompt builders -----------------------------------------------------
 
 
 def build_revive_system_prompt() -> str:
@@ -134,24 +226,43 @@ def build_revive_user_message(
     )
 
 
-# ── periodic job ──────────────────────────────────────────────────────────────
+# -- self-rescheduling periodic job -------------------------------------------
 
 
 async def revive_inactive_job(context) -> None:  # noqa: ANN001
-    """Periodic job: @mention one inactive porra participant if one is found.
+    """@mention one inactive porra participant if eligible, then reschedule.
 
-    Guards:
+    Self-rescheduling: the finally block ALWAYS calls schedule_next_revive
+    when revive is enabled, so the loop continues on every exit path: success,
+    quiet-hours skip, no-candidates, AIError, and unexpected Exception.
+
+    Guards (before any work):
     - revive_enabled(settings) AND ai_enabled(settings)
-    - At least one inactive candidate exists after applying cooldowns
+    - ai_client present in bot_data
+    - current local hour is NOT in the quiet window
     """
+    settings: Settings | None = None
     try:
-        settings: Settings = context.bot_data["settings"]
+        settings = context.bot_data["settings"]
 
         if not revive_enabled(settings) or not ai_enabled(settings):
             return
 
         ai: AIClient | None = context.bot_data.get("ai_client")
         if ai is None:
+            return
+
+        # Quiet-hours guard — skip mention but still reschedule via finally
+        now_local = datetime.now(pytz.timezone(settings.timezone))
+        if is_quiet_hours(
+            now_local.hour,
+            settings.revive_quiet_start_hour,
+            settings.revive_quiet_end_hour,
+        ):
+            log.info(
+                "revive_inactive_job: quiet hours (%02d:00) — skipping mention",
+                now_local.hour,
+            )
             return
 
         state: ChatState = context.bot_data["chat_state"]
@@ -210,3 +321,7 @@ async def revive_inactive_job(context) -> None:  # noqa: ANN001
         log.warning("revive_inactive_job: AI error — %s", exc)
     except Exception as exc:
         log.exception("revive_inactive_job: unexpected error — %s", exc)
+    finally:
+        # Always reschedule the next run when revive is enabled.
+        if settings is not None and revive_enabled(settings):
+            schedule_next_revive(context.job_queue, settings)

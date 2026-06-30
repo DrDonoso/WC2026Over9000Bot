@@ -22,6 +22,8 @@ from worldcup_bot.chat.picante import (
 from worldcup_bot.chat.revive import (
     build_revive_user_message,
     compute_inactive_candidates,
+    is_quiet_hours,
+    next_revive_delay,
     select_candidate,
 )
 
@@ -320,3 +322,91 @@ class TestReviveUserMessage:
     def test_empty_buffer_shows_placeholder(self):
         msg = build_revive_user_message("alice", "Alice", [])
         assert "sin mensajes" in msg
+
+
+# ── is_quiet_hours ────────────────────────────────────────────────────────────
+
+
+class TestIsQuietHours:
+    def test_no_window_when_start_equals_end(self):
+        assert is_quiet_hours(3, 6, 6) is False
+        assert is_quiet_hours(23, 23, 23) is False
+
+    def test_midnight_wrap_inside(self):
+        # quiet 23->06: hours 23, 0, 5 are quiet
+        assert is_quiet_hours(23, 23, 6) is True
+        assert is_quiet_hours(0, 23, 6) is True
+        assert is_quiet_hours(5, 23, 6) is True
+
+    def test_midnight_wrap_outside(self):
+        # hours 6..22 are NOT quiet for 23->06
+        assert is_quiet_hours(6, 23, 6) is False
+        assert is_quiet_hours(12, 23, 6) is False
+        assert is_quiet_hours(22, 23, 6) is False
+
+    def test_same_day_window(self):
+        # quiet 01->06: hours 1..5 quiet, 0 and 6 not
+        assert is_quiet_hours(1, 1, 6) is True
+        assert is_quiet_hours(5, 1, 6) is True
+        assert is_quiet_hours(0, 1, 6) is False
+        assert is_quiet_hours(6, 1, 6) is False
+
+
+# ── next_revive_delay ─────────────────────────────────────────────────────────
+
+
+class TestNextReviveDelay:
+    def _now(self, hour: int = 14) -> datetime:
+        import pytz
+        tz = pytz.timezone("Europe/Madrid")
+        return tz.localize(datetime(2026, 6, 30, hour, 0, 0))
+
+    def test_no_quiet_window_returns_base_plus_jitter(self):
+        delay = next_revive_delay(
+            base_seconds=14400,
+            jitter_seconds=2700,
+            now_local=self._now(14),
+            quiet_start=6,
+            quiet_end=6,   # no window
+            rand=lambda a, b: 0.0,
+        )
+        assert delay == 14400.0
+
+    def test_jitter_added(self):
+        delay = next_revive_delay(
+            base_seconds=14400,
+            jitter_seconds=2700,
+            now_local=self._now(14),
+            quiet_start=6,
+            quiet_end=6,
+            rand=lambda a, b: 1234.0,
+        )
+        assert delay == 15634.0
+
+    def test_minimum_delay_clamped_to_60(self):
+        # negative jitter would normally make delay = 14400 - 14400 = 0
+        delay = next_revive_delay(
+            base_seconds=100,
+            jitter_seconds=100,
+            now_local=self._now(14),
+            quiet_start=6,
+            quiet_end=6,
+            rand=lambda a, b: -100.0,
+        )
+        assert delay == 60.0
+
+    def test_target_in_quiet_hours_pushed_to_wake_time(self):
+        # base=3600, no jitter → target = 15:00; quiet window 14->17
+        # should push to 17:00 + spread
+        delay = next_revive_delay(
+            base_seconds=3600,
+            jitter_seconds=2700,
+            now_local=self._now(14),
+            quiet_start=14,
+            quiet_end=17,
+            rand=lambda a, b: 0.0,  # first call for jitter returns 0, second for spread returns 0
+        )
+        # target = 14:00 + 3600s = 15:00 which is in quiet(14->17)
+        # pushed to 17:00 same day → delay from 14:00 = 3*3600 = 10800s
+        assert delay == pytest.approx(10800.0, abs=1.0)
+

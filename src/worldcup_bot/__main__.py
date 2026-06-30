@@ -77,7 +77,7 @@ from worldcup_bot.reddit.finished_state import load_finished, save_finished
 from worldcup_bot.chat.buffer import RingBuffer
 from worldcup_bot.chat.state import load_chat_state
 from worldcup_bot.chat.listener import on_group_text
-from worldcup_bot.chat.revive import revive_inactive_job
+from worldcup_bot.chat.revive import revive_inactive_job, schedule_next_revive
 from worldcup_bot.reddit.clip_finder import find_goal_clip
 from worldcup_bot.reddit.clip_store import (
     add_entry as _cs_add_entry,
@@ -1952,15 +1952,14 @@ def main() -> None:
         )
 
     if revive_enabled(settings):
-        app.job_queue.run_repeating(
-            revive_inactive_job,
-            interval=settings.revive_check_interval_seconds,
-            first=settings.revive_check_interval_seconds,
-            name="revive_inactive",
-        )
+        schedule_next_revive(app.job_queue, settings)
         log.info(
-            "Revive inactive users ENABLED — checking every %ds for group %s",
+            "Revive inactive users ENABLED — base %ds ±%ds, quiet %02d:00–%02d:00 %s, group %s",
             settings.revive_check_interval_seconds,
+            settings.revive_jitter_seconds,
+            settings.revive_quiet_start_hour,
+            settings.revive_quiet_end_hour,
+            settings.timezone,
             settings.telegram_group_id,
         )
     else:
