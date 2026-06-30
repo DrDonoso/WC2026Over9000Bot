@@ -1,9 +1,59 @@
 # Buffon — QA / Tester
 
 **Project:** WorldCup2026Over9000TelegramBot  
-**Current test count:** 1875 (as of 2026-06-30)
+**Current test count:** 1936 (as of 2026-06-30)
 
-## Latest Session: 2026-06-30 — Chat LLM Features (Picante + Revive) — QA Gate (PASS)
+## Latest Session: 2026-06-30 — Revive Quiet Hours + Jitter Scheduling — QA Gate (PASS)
+
+**Kanté's change:** Added quiet-hours window + randomized jitter to revive scheduling.
+Three new pure helpers in `chat/revive.py`: `is_quiet_hours`, `next_revive_delay`, `schedule_next_revive`.
+`revive_inactive_job` reworked to self-reschedule via a `finally` block on every exit path.
+Kanté delivered +8 smoke tests (1883 baseline). ✅
+
+**New file:** `tests/test_revive_schedule.py` — 53 tests added.
+
+**Coverage added (+53):**
+
+*is_quiet_hours (16 + sweeps):* All 16 spec vectors — wrap window (23→6): 23, 0, 3, 5 True; 6, 7, 12,
+22 False. Non-wrap (1→5): 1, 4 True; 0, 5, 6 False. start==end (0,0): always False. Plus exhaustive
+boundary sweeps: every hour [0–23] against both wrap and non-wrap windows; exact quiet_end hour always
+False (exclusive boundary).
+
+*next_revive_delay (16):* deterministic via injectable `rand` kwarg.
+- Clamp: tiny base + large negative jitter → ≥ 60.0.
+- Daytime no-push (10:00, 4 h base, rand→min): delay == base, target not in quiet.
+- Midnight-wrap push from evening (23:30 → pushed to 06:00+ next day): assert
+  `is_quiet_hours(target.hour, 23, 6) is False` and target lands in [06:00, 06:45].
+- Past-midnight push (01:00 → target 03:30 inside quiet → pushed to same-day 06:xx).
+- Same-day push (08:00, base 1 h, quiet 9→10 → target 09:xx → pushed to 10:xx).
+- Target exactly at quiet_end (10:00, 1 h, quiet 9→10 → target == 10:00, not quiet → no push).
+- Cross-midnight date: next-day date correct when pushed from late evening.
+- Spread-additive proof (rand=0, mid, max): pushed target ≥ quiet_end, never before quiet_end.
+
+*schedule_next_revive (4):* `run_once` called with correct callable, `when` ≥ 60 s, `name` matches
+pattern, called exactly once.
+
+*revive_inactive_job rescheduling (17):* using frozen `datetime` subclass for time control.
+- Quiet-skip: now in quiet hours → no `send_message`, but `run_once` called exactly once (reschedule).
+- ALWAYS-RESCHEDULE on 4 paths: success (sends mention), no-candidates, `AIError`, generic `Exception`.
+- Exactly-one-run-once per execution on all paths.
+- Disabled (revive off): no send, no reschedule.
+- `settings` missing from bot_data: no reschedule (settings=None guard in finally).
+- `ai_client=None` with revive enabled: reschedules but does not send.
+- `ai_enabled=False` (no API keys): `revive_enabled=False` → no reschedule.
+
+**New pattern discovered:** `_frozen_datetime_cls(hour, minute)` — factory that returns a
+`datetime.datetime` subclass with `.now()` overridden to return a fixed local time.
+Patches `worldcup_bot.chat.revive.datetime` to control both the quiet-hours check and the
+delay calculation inside `revive_inactive_job` and `schedule_next_revive`.
+
+**Bugs found:** None. All `is_quiet_hours`/`next_revive_delay` edge cases pass correctly.
+
+**Full suite:** 1883 + 53 = 1936 passed, 5 pre-existing warnings. PASS (+53). ✅
+
+---
+
+## Previous Session: 2026-06-30 — Chat LLM Features (Picante + Revive) — QA Gate (PASS)
 
 **Team ship:** Pirlo (Design) + Kanté (Implementation) + Buffon (Testing) + Maldini (DevOps).
 
@@ -155,3 +205,26 @@ For detailed historical sessions, see .squad/agents/buffon/history-archive.md:
 **Regression tests are insurance:** Every fix includes a regression test (e.g., "Group A" normalization, oscillating goal loop). These prevent future refactoring from reintroducing bugs.
 
 **Test suite as contract:** 1644 passing tests serve as executable specification of behavior and API correctness.
+
+---
+
+## Follow-Up Session: 2026-06-30 — Revive Quiet Hours + Jitter Self-Rescheduling (commit 31f1a89)
+
+**Team:** Kanté (Backend) + Maldini (DevOps) + Buffon (Testing) + Pirlo (Lead Review)  
+**Shipped:** ✅ commit 31f1a89
+
+**Buffon's comprehensive test coverage:**
+- New file: `tests/test_revive_schedule.py` — 53 new tests added
+- `is_quiet_hours` tests: all boundary conditions (no-window, midnight wrap 23→6, same-day windows, exhaustive hour sweeps)
+- `next_revive_delay` tests: jitter range, clamp to 60s minimum, quiet-push same-day vs next-day, rand injection for deterministic testing
+- `schedule_next_revive` tests: mock job_queue, verify run_once call args + name
+- `revive_inactive_job` integration tests: quiet-hours skip with no send_message, self-reschedule via finally, settings=None safety path
+- Regression: all existing revive tests pass with new finally block in place
+- Updated ptb-async-testing skill for frozen-datetime pattern
+
+**Test result:** Full suite: **1936 passed, 0 failed** (53 new tests all pass, no regressions)
+
+**Test quality notes:**
+- Excellent injectable rand() parameter for deterministic jitter testing
+- Clean settings-is-None-before-try pattern verification
+- Comprehensive edge case coverage (midnight transitions, boundary conditions, exception paths)

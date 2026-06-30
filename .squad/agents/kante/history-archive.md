@@ -335,3 +335,21 @@ Kanté history.md archived at 16,618 bytes (>= 15,360 threshold) on 2026-06-19T0
 **Test progression: 1565 → 1531 → 1552**  
 **Spawned by:** kante (Claude Sonnet 4.6) + coordinator verification  
 **Decisions linked:** `.squad/decisions.md` (Kickoff-start notice at scheduled kickoff time)
+
+---
+
+## Session Summary (2026-06-30 — Revive Quiet Hours + Jitter)
+
+**Kanté's follow-up feature enhancement — 2026-06-30:**
+
+Shipped self-rescheduling jitter scheduling + quiet-hours window for the Revive feature (commit 31f1a89). Three new pure functions:
+- is_quiet_hours(hour, quiet_start, quiet_end) — UTC-aware quiet window check with midnight-wrap support
+- 
+ext_revive_delay(base, jitter, now_local, quiet_start, quiet_end, rand) — adaptive delay with jitter ± and quiet-push (injectable rand for deterministic testing)
+- schedule_next_revive(job_queue, settings) — one-shot job scheduling replacing old run_repeating
+
+Refactored evive_inactive_job with robust self-rescheduling via finally block (all exit paths: success, quiet-skip, no-candidates, AIError, Exception). Config: 3 new Settings fields (revive_quiet_start_hour, revive_quiet_end_hour, revive_jitter_seconds). Env parsing integrated.
+
+Updated __main__.py for initial schedule via schedule_next_revive (first run randomized + quiet-aware). Added 8 new smoke tests (all pass).
+
+**Result:** Full suite 1936 passed, 0 failed.

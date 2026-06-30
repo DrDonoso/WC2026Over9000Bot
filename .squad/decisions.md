@@ -1,3 +1,170 @@
+# Decision: Revive Feature Enhancement — Quiet Hours + Jitter Self-Rescheduling (2026-06-30 MERGED)
+
+**Date:** 2026-06-30  
+**Authors:** Kanté (Backend Implementation), Maldini (DevOps), Pirlo (Lead Review)  
+**Status:** ✅ SHIPPED (commit 31f1a89)
+
+---
+
+## MERGED DECISIONS (3 files → 1 entry)
+
+This entry consolidates the revive feature enhancement follow-up:
+1. `kante-revive-quiet-jitter.md` — Backend implementation details
+2. `maldini-revive-quiet-jitter.md` — DevOps/environment configuration
+3. `pirlo-revive-quiet-jitter-review.md` — Lead review (APPROVED)
+
+---
+
+## Summary
+
+Two behavioral enhancements to the **Revive** chat feature (quiet hours + jitter scheduling):
+
+1. **Quiet Hours** — `revive_inactive_job` never sends mentions between `REVIVE_QUIET_START_HOUR:00` and `REVIVE_QUIET_END_HOUR:00` local time (respecting bot `TIMEZONE`). Default: 23:00–06:00 (7-hour nightly window).
+
+2. **Self-Rescheduling with Jitter** — Replaced fixed `run_repeating(interval=4h)` with adaptive `run_once` loop where each next interval = base ± randomized jitter (clamped ≥60s). If computed target lands in quiet window, pushed to `quiet_end:00 + rand(0, jitter)` to cluster runs just after quiet ends, preventing thundering herd.
+
+**Scope:** Revive only. Picante remains untouched.
+
+---
+
+## New Configuration
+
+### Environment Variables (3 new)
+
+| Var | Settings Field | Type | Default | Purpose |
+|-----|----------------|------|---------|---------|
+| `REVIVE_QUIET_START_HOUR` | `revive_quiet_start_hour` | int | `23` | Hour (0-23) local time, inclusive start of quiet window |
+| `REVIVE_QUIET_END_HOUR` | `revive_quiet_end_hour` | int | `6` | Hour (0-23) local time, exclusive end (wake hour) |
+| `REVIVE_JITTER_SECONDS` | `revive_jitter_seconds` | int | `2700` | ±45 min; applied symmetrically to base interval + as spread post quiet_end |
+
+**Wiring:** `.env.example`, `docker-compose.yml`, `docker-compose.local.yml` (Maldini)
+
+---
+
+## Implementation Details
+
+### New Functions in `src/worldcup_bot/chat/revive.py`
+
+#### `is_quiet_hours(hour: int, quiet_start: int, quiet_end: int) -> bool`
+
+Returns `True` when hour (0-23) falls inside configured quiet window.
+
+**Rules:**
+- `quiet_start == quiet_end` → no window, always False
+- `quiet_start > quiet_end` (midnight wrap, e.g. 23→06): `hour >= quiet_start OR hour < quiet_end`
+- `quiet_start < quiet_end` (same-day, e.g. 01→06): `quiet_start <= hour < quiet_end`
+
+#### `next_revive_delay(base_seconds, jitter_seconds, now_local, quiet_start, quiet_end, rand=random.uniform) -> float`
+
+Returns seconds (float) until next revive run, with quiet-hours awareness.
+
+**Algorithm:**
+1. `delay = base_seconds + rand(-jitter_seconds, +jitter_seconds)` (clamped to ≥60s)
+2. `target = now_local + timedelta(seconds=delay)`
+3. If target falls in quiet hours:
+   - `wake = target.replace(hour=quiet_end, minute=0, second=0, microsecond=0)`
+   - If `wake <= target`: add 1 day (push to next day)
+   - Add `rand(0, jitter_seconds)` to spread (avoid pile-ups)
+   - `delay = (wake - now_local).total_seconds()`
+4. Return delay
+
+**Key:** `rand` is injectable for deterministic testing. Pass `lambda a, b: 0.0` for fixed values.
+
+#### `schedule_next_revive(job_queue, settings: Settings) -> None`
+
+Schedules exactly one `run_once` job for the next revive run.
+
+- Computes `now_local = datetime.now(pytz.timezone(settings.timezone))`
+- Calls `next_revive_delay(...)` with all settings
+- Calls `job_queue.run_once(revive_inactive_job, when=delay, name="revive_inactive")`
+
+### `revive_inactive_job` Changes
+
+**Quiet-hours guard** (inside try, before AI/Telegram work):
+```python
+now_local = datetime.now(pytz.timezone(settings.timezone))
+if is_quiet_hours(now_local.hour, settings.revive_quiet_start_hour, settings.revive_quiet_end_hour):
+    log.info("revive_inactive_job: quiet hours (%02d:00) — skipping mention", now_local.hour)
+    return   # still rescheduled via finally
+```
+
+**Self-rescheduling `finally` block:**
+```python
+settings: Settings | None = None
+try:
+    settings = context.bot_data["settings"]
+    ...
+finally:
+    if settings is not None and revive_enabled(settings):
+        schedule_next_revive(context.job_queue, settings)
+```
+
+- Rescheduling happens on EVERY exit: success, quiet-skip, no-candidates, AIError, unexpected Exception
+- When revive_enabled is False, finally guard prevents scheduling (no orphan jobs)
+
+### `__main__.py` Changes
+
+**Initial scheduling** (replaces `run_repeating`):
+```python
+if revive_enabled(settings):
+    schedule_next_revive(app.job_queue, settings)
+    log.info(
+        "Revive inactive users ENABLED — base %ds ±%ds, quiet %02d:00–%02d:00 %s, group %s",
+        settings.revive_check_interval_seconds,
+        settings.revive_jitter_seconds,
+        settings.revive_quiet_start_hour,
+        settings.revive_quiet_end_hour,
+        settings.timezone,
+        settings.telegram_group_id,
+    )
+```
+
+First run is also randomized + quiet-aware.
+
+---
+
+## Test Coverage
+
+**New tests in `tests/test_revive_schedule.py`:** 53 tests added
+
+- `is_quiet_hours` — all boundary conditions (wrap, same-day, no-window)
+- `next_revive_delay` — jitter range, clamp, quiet-push, rand injection
+- `schedule_next_revive` — mock job_queue, verify run_once call args
+- `revive_inactive_job` — quiet-hours skip, self-reschedule via finally, settings-is-None path
+- Regression: all existing revive tests pass with new finally block
+
+**Result:** Full test suite: 1936 passed, 0 failed
+
+---
+
+## Design Rationale
+
+1. **Quiet window:** Suppresses nightly mentions (default 23:00–06:00 local) for better UX. Respects bot timezone + DST.
+
+2. **Randomized jitter:** Base interval 14400s (4h) ± 2700s (45m) = actual 11700s–17100s (3.25h–4.75h). Prevents thundering herd if bot is ever scaled or multiple instances deployed.
+
+3. **Self-rescheduling loop:** Single `run_once` per execution, replacing old `run_repeating`. Exactly 1 pending "revive_inactive" job at any time. Robust exit handling: quiet-skip, no-candidates, AIError, Exception all reschedule safely.
+
+4. **Spread after quiet_end:** Not exact boundary (prevents pile-ups during multi-instance deployments).
+
+---
+
+## Verification (Pirlo Review)
+
+✅ **Checklist Results:**
+- is_quiet_hours midnight wrap logic: correct
+- next_revive_delay correctness: next run never in quiet hours
+- Self-reschedule robustness: all exit paths handled
+- JobQueue hygiene: at most 1 pending job at any time
+- Initial schedule in __main__: first run randomized + quiet-aware
+- Picante untouched: no changes to other features
+- David's spec fidelity: quiet 23-06, jitter ±45m, base 4h
+- Test suite: 1883 passed, 5 warnings (all new smoke tests pass)
+
+**Verdict:** ✅ APPROVE — Ship it.
+
+---
+
 # Decision: LLM Chat Features Ship — Picante + Revive (2026-06-30 MERGED)
 
 **Date:** 2026-06-30  

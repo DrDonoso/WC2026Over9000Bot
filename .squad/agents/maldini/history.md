@@ -160,5 +160,38 @@
 - **Compose style:** Matched existing pattern (`${VAR:-default}`) for consistency; added comment block before the new vars explaining dependency on OPENAI_* and privacy mode.
 - **Validation:** Both `docker-compose.yml` and `docker-compose.local.yml` validated cleanly with `docker compose config --quiet`.
 
+### Revive Quiet Window & Jitter (2026-06-30)
+- **Three new REVIVE env vars added** (Kanté implementing in config.py in parallel):
+  - `REVIVE_JITTER_SECONDS=2700` — randomize check interval ±this many seconds (±45 min); prevents thundering herd in distributed setups
+  - `REVIVE_QUIET_START_HOUR=23` — no revive mentions at/after this LOCAL hour
+  - `REVIVE_QUIET_END_HOUR=6` — ...until this LOCAL hour (window wraps midnight, uses bot's TIMEZONE)
+- **Changes:** (1) `.env.example`: Added both vars with inline comments explaining randomized interval (≈4h ± 45m, self-rescheduling), quiet window (23:00–06:00 default, uses TIMEZONE). Updated REVIVE_CHECK_INTERVAL_SECONDS comment to note jitter is applied. (2) `docker-compose.yml` + `docker-compose.local.yml`: Added both new REVIVE_* vars (7 total now) in same block. (3) `README.md`: Updated "Revive feature notes" subsection to explain (~4h randomized interval) + quiet window (23:00–06:00 local, configurable).
+- **Wiring validation:** Both compose files pass `docker compose config --quiet` exit 0.
+- **No app code touched:** Names and defaults match Kanté's config.py.
+
+---
+
+## Follow-Up Session: 2026-06-30 — Revive Quiet Hours + Jitter Self-Rescheduling (commit 31f1a89)
+
+**Team:** Kanté (Backend) + Maldini (DevOps) + Buffon (Testing) + Pirlo (Lead Review)  
+**Shipped:** ✅ commit 31f1a89
+
+**Maldini's DevOps work:**
+- Three new environment variables wired across all surfaces:
+  - `REVIVE_QUIET_START_HOUR=23` (start of quiet window, local time)
+  - `REVIVE_QUIET_END_HOUR=6` (end of quiet window, local time)
+  - `REVIVE_JITTER_SECONDS=2700` (±45 min randomization)
+- Updated `.env.example` with comments explaining randomization, quiet window, timezone semantics
+- Updated `docker-compose.yml` and `docker-compose.local.yml` identically (7 total REVIVE_* vars with defaults)
+- Updated `README.md` with "Revive feature notes" section (check interval ~4h ± jitter, quiet window 23–06 local, both configurable)
+- Validation: Both compose files pass `docker compose config --quiet` ✓
+
+**Design rationale:**
+- Jitter prevents thundering herd: base 14400s (4h) ± 2700s (45m) = 11700–17100s range
+- Quiet window respects TIMEZONE setting; wraps midnight
+- Self-rescheduling loop at most 1 pending job at any time
+
+**Result:** Production-ready DevOps config shipped (commit 31f1a89).
+
 
 

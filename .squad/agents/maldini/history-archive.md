@@ -75,3 +75,20 @@ Secured the `data/rich/` folder to prevent the personal base image from being co
 - `git check-ignore -v data/rich/rich_original.jpg` → `.gitignore:33:data/rich/*	data/rich/rich_original.jpg` (photo would be correctly ignored)
 
 **Decision:** See `.squad/decisions/inbox/maldini-gitignore-rich-photo.md`.
+
+---
+
+## Session Summary (2026-06-30T11:13:18Z — Revive Quiet Hours + Jitter)
+
+**Maldini's DevOps follow-up — 2026-06-30:**
+
+Completed environment variable wiring for Revive quiet-hours + jitter feature (commit 31f1a89). Three new env vars propagated across all surfaces:
+- REVIVE_QUIET_START_HOUR=23 (start of quiet window, local time)
+- REVIVE_QUIET_END_HOUR=6 (end of quiet window, local time)
+- REVIVE_JITTER_SECONDS=2700 (±45 min randomization)
+
+Updated .env.example with detailed comments. Updated docker-compose.yml and docker-compose.local.yml identically (7 total REVIVE_* vars with defaults). Updated README.md with "Revive feature notes" (check interval ~4h ± jitter, quiet window 23–06 local, both configurable).
+
+**Validation:** Both compose files pass docker compose config --quiet ✓. Production-ready DevOps config shipped (commit 31f1a89).
+
+**Design notes:** Jitter prevents thundering herd (base 14400s ± 2700s = 11700–17100s range). Quiet window respects TIMEZONE; wraps midnight. Self-rescheduling ensures at most 1 pending job at any time.

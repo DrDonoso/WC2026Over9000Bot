@@ -139,6 +139,22 @@
 
 **Learning:** Pure gate functions (probability, cooldown, daily_cap, min_buffer) separated from Telegram I/O orchestrators is an effective pattern — makes correctness obvious at review time and testable without PTB mocks.
 
+### 2026-06-30 — Revive Quiet Hours + Jitter Self-Rescheduling Review (APPROVED)
+
+**Session:** Kanté implementation review (pirlo reviewer gate)  
+**Status:** APPROVED — no blocking issues
+
+**Reviewed:** Self-rescheduling `run_once` loop replacing `run_repeating`, quiet-hours guard (23:00–06:00 local), ±jitter on base interval.
+
+**Key verification points:**
+1. `is_quiet_hours` correctly handles midnight wrap (`hour >= start OR hour < end`) and same-day (`start <= hour < end`). Start inclusive, end exclusive, consistent.
+2. `next_revive_delay` guarantees post-quiet spread is additive-only (`rand(0, jitter)`) — cannot push wake backwards into the quiet window.
+3. `finally` block reschedules on ALL exit paths (success, quiet-skip, no-candidates, AIError, Exception) — chain never silently dies while enabled.
+4. `settings is not None and revive_enabled(settings)` guard in finally correctly stops the chain when feature is disabled.
+5. `run_once` one-shot semantics prevent job accumulation — exactly one pending job at any time.
+
+**Learning:** Self-rescheduling `run_once` loops with `finally`-based reschedule are more robust than `run_repeating` for jobs with variable timing — the `settings: T | None = None` pre-try pattern makes the finally guard safe against early KeyError failures.
+
 ### 2026-06-30 — LLM Chat Features Shipped (Picante + Revive)
 
 **Event:** Successful team delivery of two LLM-driven group-chat features.
@@ -156,3 +172,31 @@
 **Key leadership decision locked:** Candidate set = PORRA PARTICIPANTS ONLY (override of initial "anyone who spoke" recommendation). Rationale: keeps porra-internal data off Revive targeting; participants are the intended audience.
 
 **Blocking pre-deployment requirement documented:** BotFather privacy mode MUST be disabled. Failure mode obvious: features ship in code but produce zero group messages received because API gating blocks them. This requirement now lives in README with step-by-step setup instructions.
+
+---
+
+## Follow-Up Session: 2026-06-30 — Revive Quiet Hours + Jitter Self-Rescheduling (commit 31f1a89)
+
+**Team:** Kanté (Backend) + Maldini (DevOps) + Buffon (Testing) + Pirlo (Lead Review)  
+**Shipped:** ✅ commit 31f1a89
+
+**Pirlo's lead review & approval:**
+- Comprehensive 8-item technical checklist:
+  1. is_quiet_hours midnight wrap logic → correct (start inclusive, end exclusive)
+  2. next_revive_delay correctness → next run guaranteed outside quiet hours
+  3. Self-reschedule robustness → all exit paths covered (success, quiet-skip, no-candidates, AIError, Exception)
+  4. JobQueue hygiene → at most 1 pending "revive_inactive" job at any time
+  5. Initial schedule in __main__ → first run randomized + quiet-aware
+  6. Picante untouched → zero side effects to other features
+  7. David's spec fidelity → quiet 23–06 ✓, jitter ±45min ✓, base 4h ✓
+  8. Test suite green → 1883 baseline + 53 new tests = 1936 passed, 0 failed
+
+**Verdict:** ✅ **APPROVE** — Ship it
+
+**Design quality notes documented:**
+- Injectable rand() parameter excellent for deterministic testing
+- settings: Settings | None = None pattern is clean and safe
+- Spread after quiet_end prevents thundering herd (scales well for multi-instance)
+- Double-layer quiet protection (delay calculation + runtime guard) is robust
+
+**Leadership sign-off:** Self-rescheduling loop is bulletproof. Quiet-hours math is correct. Jitter guarantee holds. Chain cannot silently die while revive is enabled.

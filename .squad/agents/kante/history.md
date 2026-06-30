@@ -102,6 +102,57 @@ All in `tests/test_chat.py`:
 Both features OFF by default. Zero overhead when both disabled (MessageHandler not registered).
 
 
+## Session: 2026-06-30 — Revive Quiet Hours + Jitter Scheduling
+
+**Task:** Add quiet-hours suppression and randomized self-rescheduling to the Revive feature only. Picante was NOT touched.
+
+### New Helpers in `chat/revive.py`
+
+| Function | Signature | Purpose |
+|----------|-----------|---------|
+| `is_quiet_hours` | `(hour: int, quiet_start: int, quiet_end: int) -> bool` | Pure; handles midnight wrap (start > end) and no-window (start == end → False) |
+| `next_revive_delay` | `(base_seconds, jitter_seconds, now_local, quiet_start, quiet_end, rand=random.uniform) -> float` | Pure; adds ±jitter, clamps to ≥60s, pushes target past quiet window + random spread if needed |
+| `schedule_next_revive` | `(job_queue, settings: Settings) -> None` | Calls `job_queue.run_once(revive_inactive_job, when=delay, name="revive_inactive")` |
+
+### Self-Rescheduling Design
+
+- Replaced `run_repeating` with `run_once` via `schedule_next_revive()` in `__main__.py`.
+- `revive_inactive_job` has a `finally` block that ALWAYS calls `schedule_next_revive` when `revive_enabled(settings)` — maintains the loop on ALL exit paths: success, quiet-skip, no-candidates, AIError, unexpected Exception.
+- `settings: Settings | None = None` before the try block; `finally` guard `if settings is not None` ensures safe fallback if `bot_data` lookup fails.
+- Quiet-hours guard in job body: logs and returns early (still rescheduled via finally).
+
+### New Env Vars (quiet/jitter)
+
+| Env Var | Field | Default |
+|---------|-------|---------|
+| `REVIVE_QUIET_START_HOUR` | `revive_quiet_start_hour` | `23` |
+| `REVIVE_QUIET_END_HOUR` | `revive_quiet_end_hour` | `6` |
+| `REVIVE_JITTER_SECONDS` | `revive_jitter_seconds` | `2700` (±45 min) |
+
+### `is_quiet_hours` Midnight-Wrap Rules
+
+- `quiet_start == quiet_end` → no quiet window, always False
+- `quiet_start > quiet_end` (e.g. 23→06): `hour >= quiet_start OR hour < quiet_end`
+- `quiet_start < quiet_end` (e.g. 01→06): `quiet_start <= hour < quiet_end`
+
+### `next_revive_delay` Algorithm
+
+1. `delay = base + rand(-jitter, +jitter)`, clamped to ≥60.0
+2. `target = now_local + timedelta(seconds=delay)`
+3. If `is_quiet_hours(target.hour, ...)`: push `target` to `quiet_end:00` on same/next day + `rand(0, jitter)` spread, recompute delay.
+4. Return delay (float, seconds).
+
+### Key Pitfall Learned
+
+The `edit` tool with large `new_str` that spans only the top of the file will **prepend** the new content but leave the old file body appended → doubled/corrupt file. Fix: use `Set-Content` (PowerShell) to write the complete file atomically when rewriting a large portion.
+
+### Tests
+
+Added 8 new smoke tests to `tests/test_chat.py` (`TestIsQuietHours` × 4, `TestNextReviveDelay` × 4).
+**Total: 1883 passed** (up from 1875).
+
+**Do NOT commit** — awaiting Pirlo review + Buffon tests.
+
 
 **Task:** Implement 4-part fix for catch-up (missed goals) and double-notify (post-FT oscillation) bugs. Pirlo design spec followed precisely.
 
@@ -257,3 +308,24 @@ For detailed historical sessions, see `.squad/agents/kante/history-archive.md`:
 - `test_restart_mid_match_missed_goal_announced`: updated to assert catch-up format
 - `test_catchup_message_no_scorer_attribution_no_keyboard`: NEW — asserts no "GOOOL"/no "⚽"/no keyboard on initial send
 - `test_backfill_no_keyboard_when_clip_not_ready`: updated to assert `"reply_markup" not in edit_kwargs` (absence, not None)
+
+---
+
+## Follow-Up Session: 2026-06-30 — Revive Quiet Hours + Jitter Self-Rescheduling (commit 31f1a89)
+
+**Team:** Kanté (Backend) + Maldini (DevOps) + Buffon (Testing) + Pirlo (Lead Review)  
+**Shipped:** ✅ commit 31f1a89
+
+**Kanté's implementation:**
+- Three new pure functions in `chat/revive.py`: `is_quiet_hours()`, `next_revive_delay()`, `schedule_next_revive()`
+- Refactored `revive_inactive_job` with robust self-rescheduling via finally block (all exit paths covered)
+- Config integration: 3 new Settings fields + env parsing (REVIVE_QUIET_START_HOUR, REVIVE_QUIET_END_HOUR, REVIVE_JITTER_SECONDS)
+- Updated __main__.py to use schedule_next_revive (first run also randomized + quiet-aware)
+- 8 new smoke tests (all pass)
+
+**Key algorithms:**
+- Quiet-hours window: configurable hour range, midnight-wrap aware, start inclusive / end exclusive
+- Jitter scheduling: base ± randomized offset, clamped ≥60s, quiet-push to wake_hour if target lands in quiet window
+- Injectable `rand()` parameter for deterministic testing
+
+**Result:** Full suite 1936 passed, 0 failed (commit 31f1a89).
