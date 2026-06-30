@@ -5,6 +5,14 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260630] - 2026-06-30
+
+- Match model: parse duration + penalties; home_score/away_score are now the on-pitch score (penalties stripped); add in_penalty_shootout.
+- formatters.format_final_result: penalty-aware Final card — on-pitch score + '🥅 Penaltis: X-Y — pasa <winner>', winner taken from score.winner.
+- poll_goals_job + poll_thread_goals_job: skip matches in a shootout, so kicks are never announced as goals.
+- poll_finished_matches_job: match_result_is_final defers the Final until the shootout is settled (penalties present + decisive winner), avoiding the premature/transient card.
+
+
 ## [20260629.04] - 2026-06-29
 
 - formatters: render_endirecto always appends the ⚽ Goles button; add goal_button_label + build_endirecto_goals_keyboard.
