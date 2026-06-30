@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260630.06] - 2026-06-30
+
+- refine(chat): picante replies to triggering message, mirrors its language
+
+
 ## [20260630.05] - 2026-06-30
 
 - Merge 2 inbox decisions into decisions.md (Kanté + Pirlo ChatState eager persistence)
