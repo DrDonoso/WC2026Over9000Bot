@@ -5,6 +5,23 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260630.04] - 2026-06-30
+
+- feat(chat): revive quiet hours + randomized self-rescheduling interval
+- Picante: probabilistic spicy AI reply to group messages (~1-in-5). Gates: probability, cooldown (5 min), daily cap (30), min buffer (5 msgs). Enable: CHAT_PICANTE_ENABLED=1 (requires OPENAI_* vars).
+- Revive: periodic @mention of inactive porra participants. Cadence: every 4 h. Inactivity threshold: 3 days. Per-user cooldown: 2 days. Candidate set: porra participants only (matched by predictions YAML username key). Enable: CHAT_REVIVE_ENABLED=1 (requires OPENAI_* vars).
+- DECISIONS ARCHIVE: decisions.md 78575 → 86224 bytes; no entries >7 days old (2026-06-26, 2026-06-27 entries preserved)
+- DECISION INBOX: merged 4 files (pirlo-llm-chat-features.md, kante-chat-features-impl.md, pirlo-chat-features-review.md, maldini-chat-features-ops.md) → consolidated entry in decisions.md; deleted inbox files
+- CROSS-AGENT: appended chat-features team update to kante/maldini/buffon/pirlo history.md noting shipped features + privacy-mode pre-step
+- HISTORY SUMMARIZATION: Kante history.md >= 15360 bytes; Maldini history.md >= 15360 bytes (both reviewed for archival decision)
+- Orchestration logs: 2026-06-30T09-16-38Z-{pirlo,kante,maldini,buffon}.md (agent deliverables)
+- Session log: 2026-06-30T09-16-38Z-chat-features.md (brief summary)
+- ✅ Pirlo: Design spec + lead review gate (APPROVED)
+- ✅ Kanté: Implementation of src/worldcup_bot/chat/ package (5 modules), config wiring
+- ✅ Buffon: 107 edge-case tests, 1875 total tests passing, 0 bugs found
+- ✅ Maldini: README privacy-mode section, 12 env vars wired across all surfaces
+
+
 ## [20260630.03] - 2026-06-30
 
 - docker-deploy.yml: add BuildKit cache (type=gha + inline registry cache on :latest) and provenance:false, so unchanged layers keep stable digests across runners and 'docker compose pull' fetches only the changed app layer.
