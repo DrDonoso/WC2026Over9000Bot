@@ -5,6 +5,15 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260630.05] - 2026-06-30
+
+- Merge 2 inbox decisions into decisions.md (Kanté + Pirlo ChatState eager persistence)
+- Delete inbox files (2 files)
+- Summarize Kanté history (25857 → 1634 bytes, archive pre-2026-06-27 sessions)
+- Update Pirlo history (add ChatState review note)
+- feat(chat): persist chat_state.json eagerly (startup + per-message)
+
+
 ## [20260630.04] - 2026-06-30
 
 - feat(chat): revive quiet hours + randomized self-rescheduling interval
