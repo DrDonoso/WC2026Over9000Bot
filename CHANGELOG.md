@@ -5,6 +5,12 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260630.03] - 2026-06-30
+
+- docker-deploy.yml: add BuildKit cache (type=gha + inline registry cache on :latest) and provenance:false, so unchanged layers keep stable digests across runners and 'docker compose pull' fetches only the changed app layer.
+- Dockerfile: create the /app/data and /app/state dirs BEFORE copying source, so that layer stays cached on code changes.
+
+
 ## [20260630.02] - 2026-06-30
 
 - render_message: append '(penaltis X-Y)' for shootout matches (home_score/ away_score are already the penalty-stripped on-pitch score).
