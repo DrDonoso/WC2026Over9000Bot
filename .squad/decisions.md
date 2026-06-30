@@ -1,3 +1,81 @@
+# Decision: ChatState Eager Persistence — Startup + Live Sync (2026-06-30 MERGED)
+
+**Date:** 2026-06-30  
+**Authors:** Kanté (Backend Implementation), Pirlo (Lead Review)  
+**Status:** ✅ APPROVED
+
+---
+
+## MERGED DECISIONS (2 files → 1 entry)
+
+This entry consolidates the chatstate eager persistence feature:
+1. `kante-chatstate-eager-persist.md` — Implementation details
+2. `pirlo-chatstate-eager-persist-review.md` — Lead review (APPROVED)
+
+---
+
+## Summary
+
+Two-point change to persist `chat_state.json` from startup and after every qualifying group message, ensuring `last_seen` timestamps survive bot restarts independently of picante/revive feature activity.
+
+1. **Startup save** — In `build_app()`, immediately after seeding `chat_state.last_seen` for all porra participants, call `save_chat_state(chat_state_path, chat_state)`. File exists from minute 0 with all known participants.
+
+2. **Per-message save** — In `on_group_text` step 7 (after `state.last_seen[username] = now_utc.isoformat()`), call `save_chat_state(state_path, state)` if path is truthy. Runs on every qualifying message, independent of picante enabled.
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/__main__.py` | Import `save_chat_state`; call it after seeding loop in `build_app()` |
+| `src/worldcup_bot/chat/listener.py` | Import `save_chat_state`; call it in step 7 of `on_group_text` |
+| `tests/test_chat.py` | `TestChatStateEagerPersist` (3 new tests using `tmp_path`) |
+
+---
+
+## Design Decisions
+
+- **Best-effort, never raises** — `save_chat_state` wraps everything in `except Exception → log.warning`. Disk failure logs warning, continues.
+- **Guard: `if state_path:`** — Uses `.get()` on `bot_data` (safe if key absent in tests) and truthiness check (empty-string path is falsy). Existing tests with `chat_state_path: ""` → no save, no warning.
+- **Scope: step 7 only, before picante (step 8)** — Save runs even in revive-only mode so `last_seen` is always up-to-date on disk.
+- **Per-message atomic write acceptable** — Low-volume private group; `save_chat_state` atomic temp-file-replace pattern ensures no torn writes.
+
+---
+
+## Test Coverage
+
+### `TestChatStateEagerPersist` (3 tests in `tests/test_chat.py`)
+
+**`test_qualifying_message_writes_state_file(tmp_path)`**
+- Sends qualifying message through `on_group_text` with real `tmp_path` state file.
+- Asserts file exists and `load_chat_state` finds sender in `last_seen`.
+
+**`test_missing_state_path_key_does_not_raise(tmp_path)`**
+- Removes `chat_state_path` from `bot_data` entirely.
+- Calls `on_group_text` — must not raise.
+- Asserts `last_seen` updated in-memory.
+
+**`test_startup_save_writes_seeded_participants(tmp_path)`**
+- Directly calls `save_chat_state` with seeded state (simulating startup).
+- Asserts `load_chat_state` returns both participants.
+
+---
+
+## Pirlo Lead Review (2026-06-30 APPROVED)
+
+✅ **Verdict: APPROVE** — Minimal, correct, well-guarded change. All checklist items pass.
+
+**Checklist results:**
+- ✅ Startup save placement (after seeding loop in `build_app()`, line 1784)
+- ✅ Per-message save placement (step 7 of `on_group_text`, before picante step 8)
+- ✅ Resilience (wrapped in try/except, logs warning on failure)
+- ✅ Privacy unchanged (still only metadata, zero message text on disk)
+- ✅ Performance (one atomic write per qualifying message, negligible for low-volume group)
+- ✅ Suite green (1939 passed, 5 warnings)
+
+---
+
 # Decision: Revive Feature Enhancement — Quiet Hours + Jitter Self-Rescheduling (2026-06-30 MERGED)
 
 **Date:** 2026-06-30  

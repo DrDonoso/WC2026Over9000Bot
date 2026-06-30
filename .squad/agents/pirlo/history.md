@@ -200,3 +200,14 @@
 - Double-layer quiet protection (delay calculation + runtime guard) is robust
 
 **Leadership sign-off:** Self-rescheduling loop is bulletproof. Quiet-hours math is correct. Jitter guarantee holds. Chain cannot silently die while revive is enabled.
+
+### 2026-06-30 — ChatState Eager Persistence Review (APPROVED)
+
+**Session:** Kanté implementation review (pirlo reviewer gate)  
+**Status:** APPROVED — ready to commit (merged to decisions.md)
+
+**Reviewed:** Startup save + per-message save of `chat_state.json`. Ensures `last_seen` survives restarts.
+
+**Key verification:** Placement correct (startup after seeding, step 7 before picante), guards safe (`.get()` + truthiness), best-effort resilience, privacy unchanged, atomic writes acceptable, suite green (1939 passed).
+
+**Verdict:** ✅ **APPROVE** — Minimal, correct, well-guarded change. Ship it.
