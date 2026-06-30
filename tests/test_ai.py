@@ -295,6 +295,14 @@ class TestBuildAiUserMessage:
         msg = build_ai_user_message(yesterday, [], [], [], "Europe/Madrid")
         assert "Spain 1-0 France" in msg
 
+    def test_results_block_includes_penalty_context(self):
+        from dataclasses import replace
+        m = _make_match("Germany", "Paraguay", 1, 1, "FINISHED", winner="AWAY_TEAM",
+                        home_tla="GER", away_tla="PAR")
+        m = replace(m, duration="PENALTY_SHOOTOUT", penalty_home=3, penalty_away=4)
+        msg = build_ai_user_message([m], [], [], [], "Europe/Madrid")
+        assert "Germany 1-1 Paraguay (penaltis 3-4, pasa Paraguay)" in msg
+
     def test_today_block_contains_fixture_with_key_and_kickoff(self):
         today = [_make_match("Germany", "Brazil", status="SCHEDULED", utc_date="2026-06-15T18:00:00Z", home_tla="GER", away_tla="BRA")]
         msg = build_ai_user_message([], today, [], [], "Europe/Madrid")
@@ -419,6 +427,22 @@ class TestRenderMessage:
         result = render_message([m], [], "Europe/Madrid", {}, "")
         assert "<b>Spain</b>" not in result
         assert "<b>France</b>" not in result
+
+    def test_penalty_shootout_shows_onpitch_and_parenthetical(self):
+        from dataclasses import replace
+        m = _make_match("Germany", "Paraguay", 1, 1, "FINISHED", winner="AWAY_TEAM",
+                        home_tla="GER", away_tla="PAR")
+        m = replace(m, duration="PENALTY_SHOOTOUT", penalty_home=3, penalty_away=4)
+        result = render_message([m], [], "Europe/Madrid", {}, "")
+        line = next(l for l in result.splitlines() if "Germany" in l)
+        assert "1-1" in line and "4-5" not in line          # on-pitch score
+        assert "(penaltis 3-4)" in line                     # shootout in parens
+        assert "<b>Paraguay</b>" in line                    # who advances stays bold
+
+    def test_normal_match_has_no_penalty_parenthetical(self):
+        m = _make_match("Spain", "France", 2, 1, "FINISHED", winner="HOME_TEAM")
+        result = render_message([m], [], "Europe/Madrid", {}, "")
+        assert "penaltis" not in result
 
     def test_today_both_teams_bold(self):
         m = _make_match("Germany", "Brazil", status="SCHEDULED", utc_date="2026-06-15T18:00:00Z", home_tla="GER", away_tla="BRA")

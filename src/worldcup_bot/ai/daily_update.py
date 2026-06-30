@@ -135,10 +135,19 @@ def build_ai_user_message(
     """Build the user message string sent to the AI model. Pure function — no I/O."""
     # Yesterday's results
     if yesterday:
-        results_lines = [
-            f"- {m.home_name} {m.home_score}-{m.away_score} {m.away_name}"
-            for m in yesterday
-        ]
+        results_lines = []
+        for m in yesterday:
+            line = f"- {m.home_name} {m.home_score}-{m.away_score} {m.away_name}"
+            # Give the AI the penalty result + who advanced so its commentary is correct.
+            if m.penalty_home is not None and m.penalty_away is not None:
+                winner_name = (
+                    m.home_name if m.winner == "HOME_TEAM"
+                    else m.away_name if m.winner == "AWAY_TEAM"
+                    else None
+                )
+                line += f" (penaltis {m.penalty_home}-{m.penalty_away}"
+                line += f", pasa {winner_name})" if winner_name else ")"
+            results_lines.append(line)
         results_block = "\n".join(results_lines)
     else:
         results_block = "Sin partidos ayer."
@@ -276,7 +285,11 @@ def render_message(
             else:  # DRAW or None
                 home_str = home_esc
                 away_str = away_esc
-            lines.append(f"{hf} {home_str} {hs}-{as_} {away_str} {af}")
+            line = f"{hf} {home_str} {hs}-{as_} {away_str} {af}"
+            # Penalty shootout: show the on-pitch score, then the shootout in parens.
+            if m.penalty_home is not None and m.penalty_away is not None:
+                line += f" (penaltis {m.penalty_home}-{m.penalty_away})"
+            lines.append(line)
         sections.append("\n".join(lines))
 
     # ── Section 2: today ──────────────────────────────────────────────────────
