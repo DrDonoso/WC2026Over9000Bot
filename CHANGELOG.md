@@ -5,6 +5,12 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260630.02] - 2026-06-30
+
+- render_message: append '(penaltis X-Y)' for shootout matches (home_score/ away_score are already the penalty-stripped on-pitch score).
+- build_ai_user_message: include the penalty result + who advanced so the AI commentary is correct.
+
+
 ## [20260630] - 2026-06-30
 
 - Match model: parse duration + penalties; home_score/away_score are now the on-pitch score (penalties stripped); add in_penalty_shootout.
