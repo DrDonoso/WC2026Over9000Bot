@@ -121,6 +121,20 @@ jobs:
       with:
         context: .
         push: true
+        # Single-platform deploy image — no SLSA attestation index (keeps the
+        # manifest plain so the server pulls only the changed layers).
+        provenance: false
+        # Reuse unchanged layers across builds so their digests stay stable and
+        # the server's `docker compose pull` only downloads the changed app layer
+        # instead of the whole image. `type=gha` is the fast same-repo cache;
+        # `type=registry,ref=...:latest` (inline) is the durable fallback that
+        # survives GitHub Actions cache eviction.
+        cache-from: |
+          type=gha
+          type=registry,ref=drdonoso/worldcup2026:latest
+        cache-to: |
+          type=gha,mode=max
+          type=inline
         tags: |
           drdonoso/worldcup2026:latest
           drdonoso/worldcup2026:${{ steps.calver.outputs.version }}

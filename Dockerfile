@@ -17,12 +17,15 @@ COPY pyproject.toml ./
 RUN mkdir -p src/worldcup_bot && touch src/worldcup_bot/__init__.py && \
     pip install --no-cache-dir .
 
-# Copy full source and reinstall package (deps already cached)
+# Create writable dirs for the data mount + state volume BEFORE copying source,
+# so this layer stays cached when only the app code changes — keeping each
+# update's pull down to just the small app layers.
+RUN mkdir -p /app/data /app/state && chown -R app:app /app/data /app/state
+
+# Copy full source and reinstall package (deps already cached).  These are the
+# only layers that change on a normal code update.
 COPY src/ ./src/
 RUN pip install --no-cache-dir --no-deps .
-
-# Create writable directories for the data mount + persistent state volume
-RUN mkdir -p /app/data /app/state && chown -R app:app /app/data /app/state
 
 USER app
 
