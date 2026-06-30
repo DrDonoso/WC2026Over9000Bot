@@ -75,7 +75,7 @@ from worldcup_bot.reddit.scanner import RedditMatchScanner, _teams_match
 from worldcup_bot.reddit.score_state import GoalDelta, diff_scores, load_scores, reconcile, save_scores
 from worldcup_bot.reddit.finished_state import load_finished, save_finished
 from worldcup_bot.chat.buffer import RingBuffer
-from worldcup_bot.chat.state import load_chat_state
+from worldcup_bot.chat.state import load_chat_state, save_chat_state
 from worldcup_bot.chat.listener import on_group_text
 from worldcup_bot.chat.revive import revive_inactive_job, schedule_next_revive
 from worldcup_bot.reddit.clip_finder import find_goal_clip
@@ -1781,6 +1781,7 @@ def build_app(settings: Settings) -> Application:
             if _uname and _uname not in chat_state.last_seen:
                 chat_state.last_seen[_uname] = _startup_iso
         app.bot_data["chat_state"] = chat_state
+        save_chat_state(chat_state_path, chat_state)
 
         # Single shared AI client for both chat features.
         if ai_enabled(settings):

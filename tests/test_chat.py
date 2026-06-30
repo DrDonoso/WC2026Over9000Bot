@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -409,4 +410,90 @@ class TestNextReviveDelay:
         # target = 14:00 + 3600s = 15:00 which is in quiet(14->17)
         # pushed to 17:00 same day → delay from 14:00 = 3*3600 = 10800s
         assert delay == pytest.approx(10800.0, abs=1.0)
+
+
+# ── ChatState eager persistence ───────────────────────────────────────────────
+
+
+def _make_listener_update_ctx(state_path: str):
+    """Minimal (update, context) for on_group_text listener tests."""
+    from worldcup_bot.config import Settings
+
+    msg = MagicMock()
+    msg.text = "Hola equipo!"
+    msg.chat_id = -1001234567890
+    msg.photo = msg.video = msg.animation = msg.sticker = None
+    msg.document = msg.voice = msg.video_note = msg.audio = None
+
+    user = MagicMock()
+    user.id = 42
+    user.username = "testuser"
+    user.full_name = "Test User"
+
+    update = MagicMock()
+    update.effective_message = msg
+    update.message = msg
+    update.effective_user = user
+
+    settings = Settings(
+        telegram_bot_token="tok",
+        football_data_api_key="key",
+        telegram_group_id="-1001234567890",
+    )
+
+    ctx = MagicMock()
+    ctx.bot.id = 999
+    ctx.bot_data = {
+        "settings": settings,
+        "chat_buffer": RingBuffer(maxlen=10),
+        "chat_state": ChatState(),
+        "chat_state_path": state_path,
+        "ai_client": None,
+    }
+    return update, ctx
+
+
+class TestChatStateEagerPersist:
+    """Listener writes chat_state.json on every qualifying message."""
+
+    @pytest.mark.asyncio
+    async def test_qualifying_message_writes_state_file(self, tmp_path):
+        """A qualifying message must write last_seen to chat_state.json."""
+        from worldcup_bot.chat.listener import on_group_text
+
+        state_file = str(tmp_path / "chat_state.json")
+        update, ctx = _make_listener_update_ctx(state_file)
+
+        await on_group_text(update, ctx)
+
+        loaded = load_chat_state(state_file)
+        assert "testuser" in loaded.last_seen
+        assert loaded.last_seen["testuser"]  # non-empty ISO timestamp
+
+    @pytest.mark.asyncio
+    async def test_missing_state_path_key_does_not_raise(self, tmp_path):
+        """If chat_state_path is absent from bot_data the save is skipped silently."""
+        from worldcup_bot.chat.listener import on_group_text
+
+        update, ctx = _make_listener_update_ctx(str(tmp_path / "chat_state.json"))
+        del ctx.bot_data["chat_state_path"]
+
+        await on_group_text(update, ctx)  # must not raise
+
+        # last_seen still updated in memory
+        assert "testuser" in ctx.bot_data["chat_state"].last_seen
+
+    def test_startup_save_writes_seeded_participants(self, tmp_path):
+        """Startup save_chat_state call persists seeded participants immediately."""
+        state_file = str(tmp_path / "chat_state.json")
+        state = ChatState()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        state.last_seen["alice"] = now_iso
+        state.last_seen["bob"] = now_iso
+
+        save_chat_state(state_file, state)
+
+        loaded = load_chat_state(state_file)
+        assert "alice" in loaded.last_seen
+        assert "bob" in loaded.last_seen
 

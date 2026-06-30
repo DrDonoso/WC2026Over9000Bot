@@ -20,7 +20,7 @@ from telegram.ext import ContextTypes
 
 from worldcup_bot.chat.buffer import RingBuffer
 from worldcup_bot.chat.picante import maybe_reply
-from worldcup_bot.chat.state import ChatState
+from worldcup_bot.chat.state import ChatState, save_chat_state
 from worldcup_bot.config import Settings, picante_enabled
 
 log = logging.getLogger(__name__)
@@ -88,14 +88,17 @@ async def on_group_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         timestamp=now_utc,
     )
 
-    # 7. Update last_seen in-memory (persisted on next picante/revive event)
+    # 7. Update last_seen and persist immediately so it survives restarts
     state: ChatState = context.bot_data["chat_state"]
     if username:
         state.last_seen[username] = now_utc.isoformat()
+        state_path = context.bot_data.get("chat_state_path")
+        if state_path:
+            save_chat_state(state_path, state)
 
     # 8. Maybe fire a picante reply
     if picante_enabled(settings):
         ai = context.bot_data.get("ai_client")
         if ai is not None:
-            state_path: str = context.bot_data["chat_state_path"]
-            await maybe_reply(update, context, buf, state, state_path, settings, ai)
+            state_path_picante: str = context.bot_data["chat_state_path"]
+            await maybe_reply(update, context, buf, state, state_path_picante, settings, ai)
