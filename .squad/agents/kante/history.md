@@ -4,6 +4,9 @@
 
 ## Current Sessions (2026-06-30)
 
+### ✅ Picante Prompt Refinement (SHIPPED, commit d964fbf)
+Rewrote `_SYSTEM` and `build_picante_user_message` so picante replies focus on the LAST (triggering) message rather than force-weaving all buffered messages. Two-section user prompt: optional CONTEXTO block (prior messages, use only if clearly related) + ÚLTIMO MENSAJE block (trigger, always reply to this). Language rule: mirror the last message's language (Catalan→Catalan, Castilian→Castilian). Updated 3 tests in `test_chat.py` to assert new structure.
+
 ### ✅ ChatState Eager Persistence (APPROVED)
 Startup + per-message persistence of `chat_state.json` (last_seen only, no message text). New guard: `.get()` + truthiness. Test suite: 1939 passed.
 

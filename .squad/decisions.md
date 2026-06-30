@@ -1,3 +1,50 @@
+# Decision: Picante Prompt Refinement (2026-06-30 SHIPPED)
+
+**Date:** 2026-06-30
+**Author:** Kanté (Backend Developer)
+**Status:** ✅ SHIPPED (commit d964fbf)
+
+---
+
+## Summary
+
+Refined the picante prompt and uild_picante_user_message function to reply exclusively to the LAST (triggering) message, use recent context only when clearly related, and mirror the language of the last message (Catalan→Catalan, else Castilian). Updated tests; suite 1939 green.
+
+---
+
+## Problem
+
+Picante was passing ALL buffered messages as a flat list to the AI. The model force-wove unrelated topics and people into replies, producing incoherent outputs.
+
+---
+
+## Changes
+
+### New _SYSTEM prompt
+
+Eres el asistente gamberro del grupo de Telegram de una porra del Mundial 2026 entre amigos.
+MISIÓN: Suelta UN comentario pícaro e ingenioso dirigido EXCLUSIVAMENTE al ÚLTIMO MENSAJE.
+REGLA DE CONTEXTO: El bloque 'CONTEXTO RECIENTE' es solo de apoyo. Úsalo ÚNICAMENTE si está claramente relacionado con el ÚLTIMO MENSAJE.
+IDIOMA: Responde SIEMPRE en el mismo idioma del ÚLTIMO MENSAJE. Si el último mensaje está en catalán → responde en catalán.
+TONO: Banter amigable con picardía — con chispa, pero nunca cruel.
+FORMATO: 1-2 frases cortas, directas. Sin saludos ni presentaciones.
+
+### Modified uild_picante_user_message(messages)
+
+- messages[-1] is always the triggering message
+- messages[:-1] is prior context (only included if present)
+- Sections separated by double newline
+- Empty case: "(sin contexto)"
+
+### Tests Updated
+
+All three tests in TestPicanteUserMessage pass:
+- 	est_last_message_is_trigger_prior_in_context ✅
+- 	est_empty_returns_placeholder ✅
+- 	est_single_message_no_context_block_username_fallback ✅
+
+---
+
 # Decision: ChatState Eager Persistence — Startup + Live Sync (2026-06-30 MERGED)
 
 **Date:** 2026-06-30  
@@ -1992,3 +2039,4 @@ Added 4 edge-case tests by Buffon:
 
 **PASS WITH ADDED TESTS (+4)**  
 1665 passed, 5 warnings (all pre-existing)
+
