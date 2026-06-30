@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import pytest
 
+from worldcup_bot.api.models import Match
 from worldcup_bot.bot.formatters import (
     bold_person_names,
     build_endirecto_goals_keyboard,
+    format_final_result,
     goal_button_label,
+    match_result_is_final,
     render_endirecto,
     set_beloved_teams,
     team_flag,
@@ -547,4 +550,60 @@ class TestBuildEndirectoGoalsKeyboard:
 
     def test_empty_goals_empty_keyboard(self):
         assert build_endirecto_goals_keyboard("tok", []) == []
+
+
+def _match(**kw):
+    base = dict(
+        id=1, utc_date="2026-06-29T18:00:00Z", status="FINISHED", stage="LAST_32",
+        group=None, home_tla="GER", away_tla="PAR", home_name="Germany", away_name="Paraguay",
+        home_score=1, away_score=1, winner="AWAY_TEAM",
+    )
+    base.update(kw)
+    return Match(**base)
+
+
+class TestFormatFinalResult:
+    def test_normal_match_bolds_winner_and_shows_score(self):
+        m = _match(home_tla="GER", away_tla="ESP", home_name="Germany", away_name="Spain",
+                   home_score=2, away_score=1, winner="HOME_TEAM", duration="", stage="GROUP_STAGE")
+        text = format_final_result(m)
+        assert "🏁" in text and "Final" in text
+        assert "<b>Germany</b>" in text and "2-1" in text
+        assert "Penaltis" not in text  # no shootout line for a normal match
+
+    def test_penalty_shootout_shows_onpitch_score_and_penalty_line(self):
+        m = _match(home_score=1, away_score=1, winner="AWAY_TEAM",
+                   duration="PENALTY_SHOOTOUT", penalty_home=3, penalty_away=4)
+        text = format_final_result(m)
+        lines = text.splitlines()
+        assert "1-1" in lines[1]               # on-pitch score, not 4-5
+        assert "<b>Paraguay</b>" in lines[1]   # winner bolded (from score.winner)
+        assert lines[2].startswith("🥅 Penaltis: 3-4")
+        assert "pasa" in lines[2] and "Paraguay" in lines[2]
+
+    def test_penalty_winner_home(self):
+        m = _match(winner="HOME_TEAM", duration="PENALTY_SHOOTOUT", penalty_home=5, penalty_away=4)
+        text = format_final_result(m)
+        assert "<b>Germany</b>" in text
+        assert "🥅 Penaltis: 5-4 — pasa" in text and "Germany" in text.splitlines()[2]
+
+
+class TestMatchResultIsFinal:
+    def test_normal_match_is_final(self):
+        assert match_result_is_final(_match(duration="", stage="GROUP_STAGE")) is True
+
+    def test_resolved_shootout_is_final(self):
+        assert match_result_is_final(
+            _match(duration="PENALTY_SHOOTOUT", penalty_home=3, penalty_away=4, winner="AWAY_TEAM")
+        ) is True
+
+    def test_pending_shootout_no_penalties_is_not_final(self):
+        assert match_result_is_final(
+            _match(duration="PENALTY_SHOOTOUT", penalty_home=None, penalty_away=None, winner="DRAW")
+        ) is False
+
+    def test_pending_shootout_draw_winner_is_not_final(self):
+        assert match_result_is_final(
+            _match(duration="PENALTY_SHOOTOUT", penalty_home=0, penalty_away=0, winner="DRAW")
+        ) is False
 

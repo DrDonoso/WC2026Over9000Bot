@@ -1576,3 +1576,51 @@ class TestEvictionEdgeCases:
             await poll_thread_goals_job(ctx)
 
         ctx.bot.send_message.assert_not_called()
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Penalty-shootout suppression — kicks must never be announced as goals
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _pen_match(mid: int = 30, status: str = "IN_PLAY") -> Match:
+    from dataclasses import replace
+    m = _make_match(mid, status, home_tla="GER", away_tla="PAR",
+                    home_name="Germany", away_name="Paraguay", home_score=1, away_score=1)
+    return replace(m, duration="PENALTY_SHOOTOUT", penalty_home=3, penalty_away=4)
+
+
+class TestPenaltyShootoutSuppression:
+    @pytest.mark.asyncio
+    async def test_poll_goals_job_ignores_shootout_match(self, tmp_path):
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(), seen_api={"30": {"home": 1, "away": 1}})
+        ctx.bot_data["live_scores"] = {"30": {"home": 1, "away": 1, "status": "IN_PLAY"}}
+        ctx.bot_data["clip_store"] = {}
+        match = _pen_match(30, "IN_PLAY")
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_poll_thread_goals_job_ignores_shootout_match(self, tmp_path):
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+        ctx.bot_data["live_scores"] = {"30": {"home": 1, "away": 1, "status": "IN_PLAY"}}
+        match = _pen_match(30, "IN_PLAY")
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()

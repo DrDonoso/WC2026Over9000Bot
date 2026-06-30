@@ -24,8 +24,10 @@ from worldcup_bot.ai.rich_image import run_rich_iteration
 from worldcup_bot.api.client import FootballAPIError
 from worldcup_bot.bot.formatters import (
     bold_person_names,
+    format_final_result,
     format_match_camps,
     format_match_start,
+    match_result_is_final,
     team_flag,
 )
 from worldcup_bot.bot.handlers import (
@@ -779,10 +781,12 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             save_scores(state_path, scores)
 
         # IN_PLAY/PAUSED are live; FINISHED matches already in state catch final goals + FT.
-        # Hard-exclude any match whose kickoff was >MATCH_OVER_AGE ago.
+        # Hard-exclude any match whose kickoff was >MATCH_OVER_AGE ago, and any match
+        # in a penalty shootout (its kicks must not be announced as goals).
         relevant = [
             m for m in all_matches
             if not _match_is_over(m, now_utc)
+            and not m.in_penalty_shootout
             and (
                 m.status in ("IN_PLAY", "PAUSED")
                 or (m.status == "FINISHED" and str(m.id) in scores)
@@ -980,9 +984,13 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         # Hard-exclude matches whose kickoff was >MATCH_OVER_AGE ago so a stuck
         # IN_PLAY entry (e.g. Egypt-Iran) can never keep generating spam from
-        # an oscillating Reddit thread.
+        # an oscillating Reddit thread.  Also exclude penalty-shootout matches so
+        # the thread's penalty kicks are never announced as goals.
         now_utc = datetime.now(timezone.utc)
-        live_matches = [m for m in live_matches if not _match_is_over(m, now_utc)]
+        live_matches = [
+            m for m in live_matches
+            if not _match_is_over(m, now_utc) and not m.in_penalty_shootout
+        ]
 
         if not live_matches:
             return
@@ -1570,6 +1578,17 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         live_path = f"{settings.state_dir}/porra_live.json"
 
         for match_id in new_ids:
+            # Defer a knockout match whose shootout result isn't settled yet:
+            # football-data can briefly flip to FINISHED mid-shootout with a
+            # transient score/winner.  Checked BEFORE the try so the finally
+            # block does not mark it announced — a later tick retries it.
+            _m = matches_by_id.get(match_id)
+            if _m is not None and not match_result_is_final(_m):
+                log.info(
+                    "poll_finished_matches_job: match %d FINISHED but shootout "
+                    "not settled yet — deferring recap", match_id,
+                )
+                continue
             try:
                 match = matches_by_id.get(match_id)
                 if match is None:
@@ -1637,21 +1656,8 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 except Exception as exc:
                     log.error("Part B failed for match %d: %s", match_id, exc)
 
-                # ── Section 1 (always): final result ─────────────────────────
-                h_flag = team_flag(match.home_tla)
-                a_flag = team_flag(match.away_tla)
-                hs = match.home_score if match.home_score is not None else 0
-                as_ = match.away_score if match.away_score is not None else 0
-                h_name = html.escape(match.home_name, quote=False)
-                a_name = html.escape(match.away_name, quote=False)
-                if match.winner == "HOME_TEAM":
-                    h_name = f"<b>{h_name}</b>"
-                elif match.winner == "AWAY_TEAM":
-                    a_name = f"<b>{a_name}</b>"
-                result_section = (
-                    f"🏁 <b>Final</b>\n"
-                    f"{h_flag} {h_name} {hs}-{as_} {a_name} {a_flag}"
-                )
+                # ── Section 1 (always): final result (penalty-shootout aware) ─
+                result_section = format_final_result(match)
 
                 # ── Section 2: porra face-off ("guerra de la porra") ─────────
                 camps_section: str | None = None

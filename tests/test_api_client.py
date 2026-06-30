@@ -335,6 +335,64 @@ class TestGetAllMatches:
         assert m.winner is None
         assert m.group is None
 
+    @resp_lib.activate
+    def test_penalty_shootout_score_excludes_penalties(self):
+        """fullTime aggregates regular+ET+penalties; home_score/away_score must be
+        the on-pitch score (penalties stripped)."""
+        resp_lib.add(
+            resp_lib.GET,
+            WC_MATCHES,
+            json={
+                "matches": [
+                    {
+                        "id": 7, "utcDate": "2026-06-29T18:00:00Z", "status": "FINISHED",
+                        "stage": "LAST_32", "group": None,
+                        "homeTeam": {"tla": "GER", "name": "Germany"},
+                        "awayTeam": {"tla": "PAR", "name": "Paraguay"},
+                        "score": {
+                            "winner": "AWAY_TEAM", "duration": "PENALTY_SHOOTOUT",
+                            "fullTime": {"home": 4, "away": 5},
+                            "regularTime": {"home": 1, "away": 1},
+                            "extraTime": {"home": 0, "away": 0},
+                            "penalties": {"home": 3, "away": 4},
+                        },
+                    }
+                ]
+            },
+            status=200,
+        )
+        client = _fresh_client()
+        m = client.get_all_matches()[0]
+        assert m.home_score == 1 and m.away_score == 1  # on-pitch, not 4-5
+        assert m.penalty_home == 3 and m.penalty_away == 4
+        assert m.duration == "PENALTY_SHOOTOUT"
+        assert m.winner == "AWAY_TEAM"
+        assert m.in_penalty_shootout is True
+
+    @resp_lib.activate
+    def test_normal_match_has_no_penalty_fields(self):
+        resp_lib.add(
+            resp_lib.GET,
+            WC_MATCHES,
+            json={
+                "matches": [
+                    {
+                        "id": 8, "utcDate": "2026-06-15T18:00:00Z", "status": "FINISHED",
+                        "stage": "GROUP_STAGE", "group": "GROUP_A",
+                        "homeTeam": {"tla": "GER", "name": "Germany"},
+                        "awayTeam": {"tla": "ESP", "name": "Spain"},
+                        "score": {"fullTime": {"home": 2, "away": 1}, "winner": "HOME_TEAM"},
+                    }
+                ]
+            },
+            status=200,
+        )
+        client = _fresh_client()
+        m = client.get_all_matches()[0]
+        assert m.home_score == 2 and m.away_score == 1
+        assert m.penalty_home is None and m.penalty_away is None
+        assert m.in_penalty_shootout is False
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FootballDataClient — stage results

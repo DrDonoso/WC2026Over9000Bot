@@ -16,9 +16,26 @@ class Match:
     away_tla: str
     home_name: str
     away_name: str
-    home_score: int | None
+    home_score: int | None  # on-pitch score (regular+ET); excludes penalty shootout
     away_score: int | None
     winner: str | None      # HOME_TEAM, AWAY_TEAM, DRAW, or None
+    duration: str = ""      # REGULAR, EXTRA_TIME, PENALTY_SHOOTOUT
+    penalty_home: int | None = None  # shootout score (None if no shootout)
+    penalty_away: int | None = None
+
+    @property
+    def in_penalty_shootout(self) -> bool:
+        """True once the match is in or past a penalty shootout.
+
+        Detected from any signal football-data exposes (``duration`` or a
+        populated ``penalties`` block), so goal detectors can stop treating
+        penalty kicks as goals.
+        """
+        return (
+            self.duration == "PENALTY_SHOOTOUT"
+            or self.penalty_home is not None
+            or self.penalty_away is not None
+        )
 
 
 @dataclass

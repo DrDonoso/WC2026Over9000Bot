@@ -284,6 +284,18 @@ class FootballDataClient:
         home_score = full_time.get("home")
         away_score = full_time.get("away")
 
+        # football-data's fullTime AGGREGATES the shootout (regular+ET+penalties),
+        # e.g. a 1-1 (pen 4-3) match reports fullTime 5-4.  Strip the penalties so
+        # home_score/away_score is the real on-pitch score and goal detectors never
+        # treat penalty kicks as goals.
+        penalties = score.get("penalties") or {}
+        pen_home = penalties.get("home")
+        pen_away = penalties.get("away")
+        if home_score is not None and pen_home is not None:
+            home_score = home_score - pen_home
+        if away_score is not None and pen_away is not None:
+            away_score = away_score - pen_away
+
         return Match(
             id=m.get("id", 0),
             utc_date=m.get("utcDate", ""),
@@ -297,4 +309,7 @@ class FootballDataClient:
             home_score=home_score,
             away_score=away_score,
             winner=score.get("winner"),
+            duration=score.get("duration", "") or "",
+            penalty_home=pen_home,
+            penalty_away=pen_away,
         )

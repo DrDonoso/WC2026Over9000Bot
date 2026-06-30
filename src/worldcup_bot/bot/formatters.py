@@ -507,6 +507,65 @@ def format_match_camps(
     )
 
 
+# ── match-finish result card ──────────────────────────────────────────────────
+
+
+def format_final_result(match: Match) -> str:
+    """Build the 🏁 Final card (HTML), penalty-shootout aware.
+
+    Normal match::
+        🏁 Final
+        🇩🇪 Germany 2-1 Paraguay 🇵🇾
+
+    Penalty shootout (the on-pitch score + a separate penalty line)::
+        🏁 Final
+        🇩🇪 Germany 1-1 Paraguay 🇵🇾
+        🥅 Penaltis: 3-4 — pasa 🇵🇾 Paraguay
+
+    The winner is taken from ``match.winner`` (correct even on penalties), never
+    inferred from the score.
+    """
+    h_flag = team_flag(match.home_tla)
+    a_flag = team_flag(match.away_tla)
+    hs = match.home_score if match.home_score is not None else 0
+    as_ = match.away_score if match.away_score is not None else 0
+    h_name = html.escape(match.home_name, quote=False)
+    a_name = html.escape(match.away_name, quote=False)
+    if match.winner == "HOME_TEAM":
+        h_name = f"<b>{h_name}</b>"
+    elif match.winner == "AWAY_TEAM":
+        a_name = f"<b>{a_name}</b>"
+
+    lines = ["🏁 <b>Final</b>", f"{h_flag} {h_name} {hs}-{as_} {a_name} {a_flag}"]
+
+    if match.penalty_home is not None and match.penalty_away is not None:
+        pen_line = f"🥅 Penaltis: {match.penalty_home}-{match.penalty_away}"
+        if match.winner == "HOME_TEAM":
+            pen_line += f" — pasa {h_flag} {html.escape(match.home_name, quote=False)}"
+        elif match.winner == "AWAY_TEAM":
+            pen_line += f" — pasa {a_flag} {html.escape(match.away_name, quote=False)}"
+        lines.append(pen_line)
+
+    return "\n".join(lines)
+
+
+def match_result_is_final(match: Match) -> bool:
+    """True when a FINISHED match's result is safe to announce.
+
+    A penalty shootout is only "final" once both penalty scores are present and a
+    decisive winner is set — football-data can briefly flip a knockout match to
+    FINISHED mid-shootout with a transient score, which is what produced the wrong
+    'Final' card.
+    """
+    if match.duration == "PENALTY_SHOOTOUT":
+        return (
+            match.penalty_home is not None
+            and match.penalty_away is not None
+            and match.winner in ("HOME_TEAM", "AWAY_TEAM")
+        )
+    return True
+
+
 # ── private helpers ───────────────────────────────────────────────────────────
 
 

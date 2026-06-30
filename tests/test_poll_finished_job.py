@@ -1596,3 +1596,53 @@ class TestFaceOffSection:
 
         text = ctx.bot.send_message.call_args_list[0][1]["text"]
         assert "⚔️" not in text
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Penalty-shootout Final card + premature-Final guard
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _pen_match(mid=1, winner="AWAY_TEAM", penalty_home=3, penalty_away=4, duration="PENALTY_SHOOTOUT"):
+    from dataclasses import replace
+    m = _make_match(mid, home_name="Germany", away_name="Paraguay",
+                    home_tla="GER", away_tla="PAR", winner=winner)
+    m = replace(m, stage="LAST_32", group=None, home_score=1, away_score=1,
+                duration=duration, penalty_home=penalty_home, penalty_away=penalty_away)
+    return m
+
+
+class TestPenaltyFinal:
+    @pytest.mark.asyncio
+    async def test_final_shows_onpitch_score_penalty_line_and_winner(self, tmp_path):
+        settings = _make_settings(tmp_path, ai=False)
+        match = _pen_match(1, winner="AWAY_TEAM", penalty_home=3, penalty_away=4)
+        ctx, mock_client = _ctx_for_result(settings, match)
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        text = ctx.bot.send_message.call_args_list[0][1]["text"]
+        assert "1-1" in text                       # on-pitch score, not 4-5
+        assert "<b>Paraguay</b>" in text           # winner from score.winner
+        assert "🥅 Penaltis: 3-4" in text and "pasa" in text
+
+    @pytest.mark.asyncio
+    async def test_pending_shootout_is_deferred_not_announced(self, tmp_path):
+        settings = _make_settings(tmp_path, ai=False)
+        # FINISHED mid-shootout: duration set but penalties not yet present, winner DRAW.
+        match = _pen_match(1, winner="DRAW", penalty_home=None, penalty_away=None)
+        ctx, mock_client = _ctx_for_result(settings, match)
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        assert 1 not in ctx.bot_data["finished_announced"]  # not marked done → retries later
