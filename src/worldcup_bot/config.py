@@ -46,6 +46,19 @@ class Settings:
     rich_image_hour: int = 0
     beloved_teams: tuple[str, ...] = ("PAN", "UZB", "CUW")
     tve_enabled: bool = True
+    # ── Chat features (picante + revive) ──────────────────────────────────────
+    chat_picante_enabled: bool = False
+    chat_revive_enabled: bool = False
+    chat_buffer_size: int = 30
+    picante_probability: float = 0.20
+    picante_cooldown_seconds: int = 300
+    picante_max_per_day: int = 30
+    picante_min_buffer: int = 5
+    picante_temperature: float = 0.9
+    revive_check_interval_seconds: int = 14400
+    revive_inactive_days: int = 3
+    revive_mention_cooldown_days: int = 2
+    revive_temperature: float = 0.8
 
 
 def _parse_bool(raw: str) -> bool:
@@ -60,6 +73,16 @@ def ai_enabled(settings: "Settings") -> bool:
         and settings.openai_base_url
         and settings.openai_model
     )
+
+
+def picante_enabled(settings: "Settings") -> bool:
+    """Return True when picante is explicitly enabled AND AI is configured."""
+    return settings.chat_picante_enabled and ai_enabled(settings)
+
+
+def revive_enabled(settings: "Settings") -> bool:
+    """Return True when revive is explicitly enabled AND AI is configured."""
+    return settings.chat_revive_enabled and ai_enabled(settings)
 
 
 def image_ai_enabled(settings: "Settings") -> bool:
@@ -132,4 +155,16 @@ def load_settings() -> Settings:
         rich_image_hour=int(os.getenv("RICH_IMAGE_HOUR", "0")),
         beloved_teams=_parse_tla_list(os.getenv("BELOVED_TEAMS", "PAN,UZB,CUW")),
         tve_enabled=_parse_bool(os.getenv("TVE_ENABLED", "1")),
+        chat_picante_enabled=_parse_bool(os.getenv("CHAT_PICANTE_ENABLED", "0")),
+        chat_revive_enabled=_parse_bool(os.getenv("CHAT_REVIVE_ENABLED", "0")),
+        chat_buffer_size=int(os.getenv("CHAT_BUFFER_SIZE", "30")),
+        picante_probability=float(os.getenv("PICANTE_PROBABILITY", "0.20")),
+        picante_cooldown_seconds=int(os.getenv("PICANTE_COOLDOWN_SECONDS", "300")),
+        picante_max_per_day=int(os.getenv("PICANTE_MAX_PER_DAY", "30")),
+        picante_min_buffer=int(os.getenv("PICANTE_MIN_BUFFER", "5")),
+        picante_temperature=float(os.getenv("PICANTE_TEMPERATURE", "0.9")),
+        revive_check_interval_seconds=int(os.getenv("REVIVE_CHECK_INTERVAL_SECONDS", "14400")),
+        revive_inactive_days=int(os.getenv("REVIVE_INACTIVE_DAYS", "3")),
+        revive_mention_cooldown_days=int(os.getenv("REVIVE_MENTION_COOLDOWN_DAYS", "2")),
+        revive_temperature=float(os.getenv("REVIVE_TEMPERATURE", "0.8")),
     )

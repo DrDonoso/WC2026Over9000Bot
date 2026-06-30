@@ -14,7 +14,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 import pytz
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from worldcup_bot.ai.client import AIClient
 from worldcup_bot.ai.commentators import generate_porra_commentary, pick_commentator
@@ -55,7 +55,7 @@ from worldcup_bot.bot.handlers import (
     cmd_ver_gol_callback,
     make_client,
 )
-from worldcup_bot.config import Settings, ai_enabled, image_ai_enabled, load_settings
+from worldcup_bot.config import Settings, ai_enabled, image_ai_enabled, load_settings, picante_enabled, revive_enabled
 from worldcup_bot.espn.client import ESPNClient
 from worldcup_bot.espn.formatter import format_match_stats
 from worldcup_bot.porra import predictions as pred_loader
@@ -74,6 +74,10 @@ from worldcup_bot.reddit.parser import parse_goal_events
 from worldcup_bot.reddit.scanner import RedditMatchScanner, _teams_match
 from worldcup_bot.reddit.score_state import GoalDelta, diff_scores, load_scores, reconcile, save_scores
 from worldcup_bot.reddit.finished_state import load_finished, save_finished
+from worldcup_bot.chat.buffer import RingBuffer
+from worldcup_bot.chat.state import load_chat_state
+from worldcup_bot.chat.listener import on_group_text
+from worldcup_bot.chat.revive import revive_inactive_job
 from worldcup_bot.reddit.clip_finder import find_goal_clip
 from worldcup_bot.reddit.clip_store import (
     add_entry as _cs_add_entry,
@@ -1749,6 +1753,45 @@ def build_app(settings: Settings) -> Application:
     # False until first poll_kickoff_job run completes its seed pass.
     app.bot_data["kickoff_seeded"] = False
 
+    # ── Chat features (picante + revive) ──────────────────────────────────────
+    # Skip entirely when both features are off — true zero overhead.
+    if picante_enabled(settings) or revive_enabled(settings):
+        chat_state_path = f"{settings.state_dir}/chat_state.json"
+        app.bot_data["chat_state_path"] = chat_state_path
+        app.bot_data["chat_buffer"] = RingBuffer(maxlen=settings.chat_buffer_size)
+
+        # Load porra participant list — used for revive candidate set and last_seen seeding.
+        # The predictions dict key IS the Telegram @username (lowercase, no @) per the YAML schema.
+        try:
+            _porra = pred_loader.load(settings.predictions_path)
+            _participants = _porra.get("participants", {})
+        except Exception:
+            _participants = {}
+        app.bot_data["porra_usernames"] = list(_participants.keys())
+        app.bot_data["porra_display_names"] = {
+            uname: (udata.get("display_name") or f"@{uname}")
+            for uname, udata in _participants.items()
+        }
+
+        # Load (or create fresh) chat state; seed porra participants not yet present
+        # so nobody is pinged for inactivity on the very first deploy.
+        chat_state = load_chat_state(chat_state_path)
+        _startup_iso = datetime.now(timezone.utc).isoformat()
+        for _uname in app.bot_data["porra_usernames"]:
+            if _uname and _uname not in chat_state.last_seen:
+                chat_state.last_seen[_uname] = _startup_iso
+        app.bot_data["chat_state"] = chat_state
+
+        # Single shared AI client for both chat features.
+        if ai_enabled(settings):
+            app.bot_data["ai_client"] = AIClient(
+                settings.openai_api_key,
+                settings.openai_base_url,
+                settings.openai_model,
+            )
+        else:
+            app.bot_data["ai_client"] = None
+
     handlers = [
         CommandHandler("start", cmd_start),
         CommandHandler("clasificacion", cmd_clasificacion),
@@ -1780,6 +1823,16 @@ def build_app(settings: Settings) -> Application:
 
     for handler in handlers:
         app.add_handler(handler)
+
+    # Group-text listener — only register when at least one chat feature is active
+    # so disabled = zero overhead on every incoming message.
+    if picante_enabled(settings) or revive_enabled(settings):
+        app.add_handler(
+            MessageHandler(
+                filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
+                on_group_text,
+            )
+        )
 
     return app
 
@@ -1881,6 +1934,39 @@ def main() -> None:
         log.info(
             "Rich image evolution DISABLED — set OPENAI_IMAGE_API_KEY/OPENAI_IMAGE_BASE_URL "
             "(or OPENAI_API_KEY/OPENAI_BASE_URL) + OPENAI_IMAGE_MODEL to enable."
+        )
+
+    if picante_enabled(settings):
+        log.info(
+            "Picante chat replies ENABLED — probability=%.2f, cooldown=%ds, "
+            "max/day=%d, group=%s",
+            settings.picante_probability,
+            settings.picante_cooldown_seconds,
+            settings.picante_max_per_day,
+            settings.telegram_group_id,
+        )
+    else:
+        log.info(
+            "Picante chat replies DISABLED — "
+            "set CHAT_PICANTE_ENABLED=1 (and OPENAI_* vars) to enable."
+        )
+
+    if revive_enabled(settings):
+        app.job_queue.run_repeating(
+            revive_inactive_job,
+            interval=settings.revive_check_interval_seconds,
+            first=settings.revive_check_interval_seconds,
+            name="revive_inactive",
+        )
+        log.info(
+            "Revive inactive users ENABLED — checking every %ds for group %s",
+            settings.revive_check_interval_seconds,
+            settings.telegram_group_id,
+        )
+    else:
+        log.info(
+            "Revive inactive users DISABLED — "
+            "set CHAT_REVIVE_ENABLED=1 (and OPENAI_* vars) to enable."
         )
 
     if settings.telegram_group_id:

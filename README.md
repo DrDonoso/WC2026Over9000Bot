@@ -22,7 +22,8 @@ docker compose -f docker-compose.local.yml up --build
    FOOTBALL_DATA_API_KEY=...
    ```
 2. Put participant picks in `./data/predictions.yml` (see [Predictions format](#predictions-format)).
-3. Start the bot (pulls `drdonoso/worldcup2026` from Docker Hub):
+3. **[Required for chat features] Enable Telegram privacy mode** (see [Telegram privacy mode](#telegram-privacy-mode-required-for-chat-features) below).
+4. Start the bot (pulls `drdonoso/worldcup2026` from Docker Hub):
    ```bash
    docker compose up -d
    ```
@@ -51,7 +52,7 @@ users:                        # Overrides por persona (clave = @username en min�
 - `data/TongoUsers.yml` is git-ignored (runtime file — edit it on the server).
 - `data/TongoUsers.template.yml` is committed — copy it to `data/TongoUsers.yml` as starting point.
 - `data/predictions.template.yml` is the committed template for `data/predictions.yml`.
-- If `phrases:` is absent or empty, the bot uses the built-in `FRASES` fallback automatically.
+- ⚠️ **`data/TongoUsers.yml` is REQUIRED.** If the file is missing or has a YAML error, `/tongo` replies with `❌ No puedo cargar las frases de /tongo…` and does nothing else. Use `/tongocheck` to diagnose.
 - Invalid fields are silently ignored (logged at WARNING). An absent `users:` entry preserves the original behaviour (1/3 Sanchez, global phrase pool).
 - Override the file path with `TONGO_USERS_PATH` in `.env`.
 
@@ -71,6 +72,36 @@ Phrases support 10 template variables substituted at render time:
 | `{{reply_to_id}}` | Replied-to user's Telegram user ID |
 
 **Reply-targeting** — if a phrase uses any `{{reply_to_*}}` variable AND the `/tongo` command is sent as a reply to another message, the bot enters *reply-targeted mode*: only reply phrases are picked, and the "Sanchez ens roba" 1/3 check is skipped. On plain `/tongo` (no reply), or when no reply phrases exist in the pool, the normal 1/3 Sanchez / 2/3 phrase pool logic applies. Reply targeting works even when the replied-to message is from a bot.
+
+**Update the image** — the GitHub Action builds and pushes on every push to `main` (needs repo secrets `DOCKER_USERNAME` / `DOCKER_PASSWORD`). To pull the latest on the server:
+```bash
+docker compose pull && docker compose up -d
+```
+
+---
+
+### Telegram privacy mode (required for chat features)
+
+The new **picante** (random spicy replies) and **revive** (inactive-user engagement) features require the bot to receive all group text messages, not just `/commands` and replies.
+
+By default, Telegram's privacy mode restricts bots to receiving only `/commands` and replies. You must **disable privacy mode** for each bot:
+
+1. Open Telegram with BotFather (`@BotFather`).
+2. Send `/setprivacy`
+3. Select the bot you want to configure.
+4. Choose **Disable** (allow bot to receive all group messages).
+5. **Important:** Remove the bot from the group and **re-add it**. The privacy change only applies to new group memberships; the bot will not receive historical messages from before the change.
+
+After re-adding the bot, you can enable the chat features in `.env`:
+
+```
+CHAT_PICANTE_ENABLED=1   # Random spicy replies
+CHAT_REVIVE_ENABLED=1    # Revive inactive users
+```
+
+Both features are **disabled by default** for safety and remain opt-in via env flags.
+
+---
 
 **Update the image** — the GitHub Action builds and pushes on every push to `main` (needs repo secrets `DOCKER_USERNAME` / `DOCKER_PASSWORD`). To pull the latest on the server:
 ```bash
@@ -154,3 +185,4 @@ Both ranking commands send a **Telegram photo album** with the photos of the top
 - **Image:** `drdonoso/worldcup2026` on Docker Hub.
 - **Volume mount:** `./data` is mounted read-only into `/app/data` inside the container. The `PREDICTIONS_PATH` env var defaults to `/app/data/predictions.yml`.
 - **TVE broadcast markers (📺):** `/hoy`, `/siguiente`, and the daily AI update automatically mark World Cup fixtures broadcast on Spanish public TV (La 1 / Teledeporte) with 📺, fetched from the RTVE schedule API. Disable with `TVE_ENABLED=false` in `.env`.
+- **Match-start notices:** the bot posts a `🟢 ¡Empieza el partido!` message to the group at each scheduled kickoff time (within ~30 s). Restart-safe: a container restart never re-announces matches that already kicked off.
