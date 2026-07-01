@@ -1,8 +1,12 @@
 """Podium image renderer for ranking commands.
 
-Generates a single composite PNG showing the top-3 ranked participants
-on a classic podium layout with circular photo tiles, a real crown asset
-(Noto Emoji crown, Apache-2.0) and tie-aware position numbers.
+Generates a single composite PNG showing the top-3 ranked participants on a
+classic podium layout.  Each participant is rendered as a vertical stack:
+  crown (emoji asset or drawn fallback)
+    ↓ overlaps photo top
+  circular photo (or initials placeholder)
+    ↓ rests on block top with slight overlap
+  podium block (coloured pedestal with position number)
 
 Usage (from an async handler)::
 
@@ -24,36 +28,62 @@ from PIL import Image, ImageDraw, ImageFont
 
 log = logging.getLogger(__name__)
 
-# ── Visual constants ──────────────────────────────────────────────────────────
+# ── Tunable layout constants ──────────────────────────────────────────────────
+# All magic numbers live here so they can be adjusted after a visual preview.
 
-_CANVAS_W = 720
-_CANVAS_H = 400
+# Canvas
+_CANVAS_W = 760
+_CANVAS_H = 560
+_BG = (22, 27, 34)           # dark navy background
 
-_TILE_D = 180            # circle diameter (px)
-_TILE_R = _TILE_D // 2   # circle radius
-
-# Y-center of each tile (from canvas top) per competition position
-_TILE_CY: dict[int, int] = {1: 205, 2: 237, 3: 257}
-_TILE_CY_DEFAULT = 257
-
-# Column x-centers keyed by participant count
-_COL_X: dict[int, list[int]] = {
-    1: [360],
-    2: [240, 480],
-    3: [180, 360, 540],
+# Podium blocks
+_BLOCK_W = 200               # width of every block column (px)
+_BLOCK_GAP = 8               # horizontal gap between blocks (px)
+_BLOCK_HEIGHT = {1: 175, 2: 120, 3: 85}   # height by competition position
+_BLOCK_HEIGHT_DEFAULT = 85
+_BLOCK_COLOR = {
+    1: (230, 184, 0),        # gold   ~#E6B800
+    2: (192, 192, 192),      # silver ~#C0C0C0
+    3: (205, 127, 50),       # bronze ~#CD7F32
 }
+_BLOCK_COLOR_DEFAULT = (205, 127, 50)
+_BLOCK_DARK_COLOR = {        # darker shade for the top-edge depth strip
+    1: (178, 140, 0),
+    2: (148, 148, 148),
+    3: (152, 95, 28),
+}
+_BLOCK_DARK_COLOR_DEFAULT = (152, 95, 28)
+_BLOCK_TOP_INSET = 5         # height of the darker top-edge strip (px)
+_FLOOR_Y = 420               # y-coordinate where all block bottoms sit
 
-# Crown geometry
-_CROWN_ASSET_SIZE = 56   # target size (px) when scaling the emoji crown asset
-_CROWN_H = 40            # height of the fallback drawn crown
-_CROWN_GAP = 22          # gap between crown bottom and tile top; position label drawn here
-_CROWN_HW = 40           # half-width of fallback drawn crown
+# Position number drawn on the block front
+_BLOCK_NUM_FONT_SIZE = 60
+_BLOCK_NUM_COLOR = (30, 25, 20)   # dark — readable on bright blocks
 
-# Colors
-_BG = (22, 27, 34)
+# Photo circle (the "head")
+_PHOTO_D = 150               # circle diameter (px)
+_PHOTO_R = _PHOTO_D // 2
+_PHOTO_OVERLAP = 10          # px the photo's bottom edge dips into the block top
+
+# Crown — emoji asset path
+_CROWN_ASSET_SIZE = 105      # target size when scaling the crown asset (≈ 0.7 × _PHOTO_D)
+_CROWN_OVERLAP = 30          # px the asset crown's bottom overlaps the photo top
+
+# Crown — programmatic drawn fallback
+_CROWN_H = 40                # height of the drawn-crown polygon
+_CROWN_HW = 40               # half-width of the drawn-crown polygon
+_DRAWN_CROWN_OVERLAP = 10    # px the drawn crown's bottom overlaps the photo top
+
+# Other crown colors (used by drawn fallback)
 _CROWN_GOLD = (255, 215, 0)
 _CROWN_DARK = (160, 128, 0)
 _JEWEL = (220, 80, 50)
+
+# Participant name label
+_NAME_FONT_SIZE = 16
+_NAME_Y_OFFSET = 28          # px below _FLOOR_Y to the name text centre
+
+# General colors
 _TEXT_WHITE = (255, 255, 255)
 _TEXT_GREY = (200, 200, 200)
 
@@ -111,7 +141,7 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 def _text_centered(
     draw: ImageDraw.ImageDraw, cx: int, cy: int, text: str, font, color
 ) -> None:
-    """Draw *text* with its visual center at *(cx, cy)*."""
+    """Draw *text* with its visual centre at *(cx, cy)*."""
     try:
         bbox = draw.textbbox((0, 0), text, font=font)
         x = cx - (bbox[2] - bbox[0]) // 2 - bbox[0]
@@ -138,7 +168,7 @@ def _initials(display_name: str) -> str:
 
 
 def _placeholder_tile(display_name: str, diameter: int, color_idx: int) -> Image.Image:
-    """Solid colored circle with the participant's initials centered."""
+    """Solid coloured circle with the participant's initials centred."""
     color = _PLACEHOLDER_PALETTE[color_idx % len(_PLACEHOLDER_PALETTE)]
     img = Image.new("RGBA", (diameter, diameter), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -148,15 +178,15 @@ def _placeholder_tile(display_name: str, diameter: int, color_idx: int) -> Image
     return img
 
 
-def _paste_crown_asset(canvas: Image.Image, cx: int, tile_y: int) -> None:
-    """Scale and alpha-composite the real crown asset above the tile.
+def _paste_crown_asset(canvas: Image.Image, cx: int, photo_top_y: int) -> None:
+    """Alpha-composite the crown asset onto the canvas, worn on the photo's head.
 
-    The crown is centered at *cx* with its bottom edge ``_CROWN_GAP`` px above
-    *tile_y* (the tile's top edge), leaving room for the position-number label.
+    The crown is centred at *cx*; its bottom edge overlaps the photo's top
+    edge by ``_CROWN_OVERLAP`` px, giving the "crown on head" look.
     """
     crown = _CROWN_IMG.resize((_CROWN_ASSET_SIZE, _CROWN_ASSET_SIZE), Image.LANCZOS)
     x = cx - _CROWN_ASSET_SIZE // 2
-    y = tile_y - _CROWN_GAP - _CROWN_ASSET_SIZE
+    y = photo_top_y + _CROWN_OVERLAP - _CROWN_ASSET_SIZE
     canvas.paste(crown, (x, y), crown)
 
 
@@ -199,7 +229,7 @@ def _draw_crown(draw: ImageDraw.ImageDraw, cx: int, y_top: int) -> None:
 def _fetch_tile(
     username: str, display_name: str, base_url: str, diameter: int, color_idx: int
 ) -> Image.Image:
-    """Return a circular photo tile, or an initials placeholder if the photo is unavailable."""
+    """Return a circular photo tile, or an initials placeholder if unavailable."""
     url = f"{base_url.rstrip('/')}/{username}.png"
     try:
         resp = requests.get(url, timeout=4)
@@ -214,63 +244,77 @@ def _fetch_tile(
 # ── Layout ────────────────────────────────────────────────────────────────────
 
 
+def _col_x_starts(n: int) -> list[int]:
+    """Return the left x-coordinate of each block column for *n* participants."""
+    total_w = n * _BLOCK_W + (n - 1) * _BLOCK_GAP
+    left_margin = (_CANVAS_W - total_w) // 2
+    return [left_margin + i * (_BLOCK_W + _BLOCK_GAP) for i in range(n)]
+
+
 def _render_podium(participants: list[dict], settings) -> io.BytesIO:
     n = min(len(participants), 3)
     participants = participants[:n]
 
+    # Fetch photo tiles (circular crop or initials placeholder)
     tiles = [
-        _fetch_tile(
-            p["username"], p["display_name"], settings.photo_base_url, _TILE_D, i
-        )
+        _fetch_tile(p["username"], p["display_name"], settings.photo_base_url, _PHOTO_D, i)
         for i, p in enumerate(participants)
     ]
 
     canvas = Image.new("RGB", (_CANVAS_W, _CANVAS_H), _BG)
     draw = ImageDraw.Draw(canvas)
 
-    col_xs = _COL_X.get(n, _COL_X[3])
-
     # Classic podium column assignment for 3 participants:
-    #   left column   → index 1 (2nd place)
-    #   center column → index 0 (1st place, raised)
-    #   right column  → index 2 (3rd place)
-    # For ties (e.g. 1,1,3): tied participants share the same tile height.
-    # For n<3: keep input order left-to-right.
+    #   left column   → participants[1] (2nd place)
+    #   centre column → participants[0] (1st place — tallest block)
+    #   right column  → participants[2] (3rd place)
+    # For n < 3: left-to-right in input order.
     display_order = [1, 0, 2] if n == 3 else list(range(n))
 
-    fnt_pos = _font(22)
-    fnt_name = _font(16)
+    x_starts = _col_x_starts(n)
+    fnt_block_num = _font(_BLOCK_NUM_FONT_SIZE)
+    fnt_name = _font(_NAME_FONT_SIZE)
 
     for col_idx, p_idx in enumerate(display_order):
         p = participants[p_idx]
         tile = tiles[p_idx]
-        cx = col_xs[col_idx]
         pos = p.get("position", col_idx + 1)
+        cx = x_starts[col_idx] + _BLOCK_W // 2
+        x0 = x_starts[col_idx]
+        x1 = x0 + _BLOCK_W
 
-        tile_cy = _TILE_CY.get(pos, _TILE_CY_DEFAULT)
-        tile_x = cx - _TILE_R
-        tile_y = tile_cy - _TILE_R
+        # ── 1. Podium block ───────────────────────────────────────────────────
+        block_h = _BLOCK_HEIGHT.get(pos, _BLOCK_HEIGHT_DEFAULT)
+        block_top = _FLOOR_Y - block_h
+        block_color = _BLOCK_COLOR.get(pos, _BLOCK_COLOR_DEFAULT)
+        block_dark = _BLOCK_DARK_COLOR.get(pos, _BLOCK_DARK_COLOR_DEFAULT)
 
-        # Crown above tile: asset if available, drawn fallback otherwise
+        draw.rectangle([x0, block_top, x1, _FLOOR_Y], fill=block_color)
+        # Subtle darker top-edge for depth
+        draw.rectangle([x0, block_top, x1, block_top + _BLOCK_TOP_INSET], fill=block_dark)
+
+        # Position number centred on block front
+        block_mid_y = (block_top + _FLOOR_Y) // 2
+        _text_centered(draw, cx, block_mid_y, str(pos), fnt_block_num, _BLOCK_NUM_COLOR)
+
+        # ── 2. Photo circle resting on block top ──────────────────────────────
+        # photo_bottom overlaps slightly into the block top (_PHOTO_OVERLAP px)
+        photo_bottom = block_top + _PHOTO_OVERLAP
+        photo_top = photo_bottom - _PHOTO_D
+        canvas.paste(tile, (cx - _PHOTO_R, photo_top), tile)
+
+        # ── 3. Crown worn on the photo's head ─────────────────────────────────
         if _CROWN_IMG is not None:
-            _paste_crown_asset(canvas, cx, tile_y)
+            _paste_crown_asset(canvas, cx, photo_top)
         else:
-            crown_top = tile_y - _CROWN_H - _CROWN_GAP
-            _draw_crown(draw, cx, crown_top)
+            drawn_crown_top = photo_top + _DRAWN_CROWN_OVERLAP - _CROWN_H
+            _draw_crown(draw, cx, drawn_crown_top)
 
-        # Position number centered in the gap between crown bottom and tile top
-        pos_label_y = tile_y - _CROWN_GAP // 2
-        _text_centered(draw, cx, pos_label_y, str(pos), fnt_pos, _TEXT_WHITE)
-
-        # Paste circular photo tile (RGBA with circular mask) onto RGB canvas
-        canvas.paste(tile, (tile_x, tile_y), tile)
-
-        # Participant name below tile
+        # ── 4. Participant name below the floor ───────────────────────────────
         name = p.get("display_name", "")
         if len(name) > 14:
             name = name[:13] + "…"
-        name_y = tile_y + _TILE_D + 14
-        _text_centered(draw, cx, name_y, name, fnt_name, _TEXT_GREY)
+        _text_centered(draw, cx, _FLOOR_Y + _NAME_Y_OFFSET, name, fnt_name, _TEXT_GREY)
 
     buf = io.BytesIO()
     canvas.convert("RGB").save(buf, format="PNG")
@@ -287,7 +331,7 @@ def render_podium(participants: list[dict], settings) -> io.BytesIO | None:
     Args:
         participants: list of dicts, each with:
             - ``"username"`` (str): used to build photo URL
-            - ``"display_name"`` (str): shown below the tile
+            - ``"display_name"`` (str): shown below the block
             - ``"position"`` (int): tie-aware competition position (e.g. 1, 1, 3)
         settings: Settings instance with ``photo_base_url``.
 

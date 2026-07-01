@@ -191,8 +191,8 @@ class TestRenderPodiumSmoke:
         assert result is not None
         assert result.tell() == 0
 
-    def test_canvas_dimensions_720x400(self):
-        """The output image must be exactly 720×400 pixels."""
+    def test_canvas_dimensions_760x560(self):
+        """The output image must be exactly 760×560 pixels."""
         participants = [_p("u1", "A", 1), _p("u2", "B", 2), _p("u3", "C", 3)]
         with patch(
             "worldcup_bot.bot.podium_image.requests.get",
@@ -201,7 +201,7 @@ class TestRenderPodiumSmoke:
             result = render_podium(participants, _settings())
 
         img = Image.open(result)
-        assert img.size == (720, 400)
+        assert img.size == (760, 560)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -228,7 +228,7 @@ class TestCrownAsset:
         assert result is not None
         img = Image.open(result)
         assert img.format == "PNG"
-        assert img.size == (720, 400)
+        assert img.size == (760, 560)
 
     def test_fallback_drawn_crown_tie_case(self):
         """Drawn crown fallback handles ties (1,1,3) without crashing."""
@@ -257,7 +257,7 @@ class TestCrownAsset:
         """With the real crown asset, crown pixels appear on the canvas."""
         from worldcup_bot.bot.podium_image import _paste_crown_asset, _BG
         canvas = Image.new("RGB", (_pmod._CANVAS_W, _pmod._CANVAS_H), _BG)
-        _paste_crown_asset(canvas, cx=360, tile_y=115)
+        _paste_crown_asset(canvas, cx=360, photo_top_y=115)
         pixels = list(canvas.get_flattened_data() if hasattr(canvas, "get_flattened_data") else canvas.getdata())
         non_bg = [p for p in pixels if p != _BG]
         assert len(non_bg) > 0
