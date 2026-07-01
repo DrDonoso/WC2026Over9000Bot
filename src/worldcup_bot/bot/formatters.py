@@ -161,15 +161,42 @@ def participant_photo_url(username: str, base_url: str) -> str:
     return f"{base_url.rstrip('/')}/{username}.png"
 
 
+def standard_competition_positions(rows: list) -> list[int]:
+    """Return 1224-style (standard competition) positions for pre-sorted-descending rows.
+
+    Two rows are considered tied when their scores are equal after rounding to one
+    decimal place — matching the ``{:.1f}`` display precision used in the ranking.
+    Tied rows share the same position; the next distinct score jumps to (index + 1).
+
+    Examples::
+
+        scores [31.0, 31.0, 30.0, 29.0, 29.0, 28.5] → [1, 1, 3, 4, 4, 6]
+        scores [10.0, 8.0, 6.0]                      → [1, 2, 3]
+        scores [5.0, 5.0, 5.0]                        → [1, 1, 1]
+    """
+    if not rows:
+        return []
+    positions: list[int] = []
+    current_pos = 1
+    for i, row in enumerate(rows):
+        if i == 0:
+            current_pos = 1
+        elif round(row.total_score, 1) != round(rows[i - 1].total_score, 1):
+            current_pos = i + 1
+        positions.append(current_pos)
+    return positions
+
+
 def format_general_ranking(rows: list, title: str = "🏆 Ranking General:") -> str:
     """Format a list of UserRankEntry into an HTML message string."""
     if not rows:
         return "No hay datos de ranking aún."
 
+    positions = standard_competition_positions(rows)
     lines = [title, ""]
-    for i, row in enumerate(rows, start=1):
+    for pos, row in zip(positions, rows):
         dname_esc = html.escape(row.display_name, quote=False)
-        lines.append(f"{i}. <b>{dname_esc}</b>: {row.total_score:.1f} pts")
+        lines.append(f"{pos}. <b>{dname_esc}</b>: {row.total_score:.1f} pts")
 
     top_score = rows[0].total_score
     leaders = [r for r in rows if r.total_score == top_score]

@@ -5,16 +5,25 @@ from __future__ import annotations
 import pytest
 
 from worldcup_bot.api.models import Match
+from types import SimpleNamespace
+
 from worldcup_bot.bot.formatters import (
     bold_person_names,
     build_endirecto_goals_keyboard,
     format_final_result,
+    format_general_ranking,
     goal_button_label,
     match_result_is_final,
     render_endirecto,
     set_beloved_teams,
+    standard_competition_positions,
     team_flag,
 )
+
+
+def _row(name: str, score: float) -> SimpleNamespace:
+    """Minimal duck-typed row for ranking tests."""
+    return SimpleNamespace(display_name=name, total_score=score, username=name.lower())
 
 
 class TestTeamFlagBelovedTeams:
@@ -607,3 +616,90 @@ class TestMatchResultIsFinal:
             _match(duration="PENALTY_SHOOTOUT", penalty_home=0, penalty_away=0, winner="DRAW")
         ) is False
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# standard_competition_positions
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestStandardCompetitionPositions:
+    """standard_competition_positions must return 1224-style positions."""
+
+    def test_exact_example_from_spec(self):
+        rows = [
+            _row("David Santos", 31.0),
+            _row("Pilar Freixas", 31.0),
+            _row("Miquel Llagostera", 30.0),
+            _row("Jordi Suñé", 29.0),
+            _row("Amalia Ortiz", 29.0),
+            _row("Víctor Sáez", 28.5),
+        ]
+        assert standard_competition_positions(rows) == [1, 1, 3, 4, 4, 6]
+
+    def test_no_ties(self):
+        rows = [_row("A", 10.0), _row("B", 8.0), _row("C", 6.0)]
+        assert standard_competition_positions(rows) == [1, 2, 3]
+
+    def test_all_tied(self):
+        rows = [_row("A", 5.0), _row("B", 5.0), _row("C", 5.0)]
+        assert standard_competition_positions(rows) == [1, 1, 1]
+
+    def test_tie_at_the_end(self):
+        rows = [_row("A", 10.0), _row("B", 8.0), _row("C", 6.0), _row("D", 6.0)]
+        assert standard_competition_positions(rows) == [1, 2, 3, 3]
+
+    def test_single_row(self):
+        assert standard_competition_positions([_row("Solo", 42.0)]) == [1]
+
+    def test_empty(self):
+        assert standard_competition_positions([]) == []
+
+    def test_float_noise_tie(self):
+        """29.0 and 29.04 both display as '29.0' → must tie (position 1 each)."""
+        rows = [_row("A", 29.04), _row("B", 29.0)]
+        assert standard_competition_positions(rows) == [1, 1]
+
+    def test_float_noise_no_tie(self):
+        """29.1 and 29.0 display as different values → no tie."""
+        rows = [_row("A", 29.1), _row("B", 29.0)]
+        assert standard_competition_positions(rows) == [1, 2]
+
+    def test_three_groups_with_ties(self):
+        rows = [
+            _row("A", 20.0), _row("B", 20.0),
+            _row("C", 15.0),
+            _row("D", 10.0), _row("E", 10.0), _row("F", 10.0),
+        ]
+        assert standard_competition_positions(rows) == [1, 1, 3, 4, 4, 4]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# format_general_ranking — tie-aware numbering
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFormatGeneralRankingTieAwareNumbering:
+    """format_general_ranking must use standard competition positions."""
+
+    def test_two_leaders_both_shown_as_1_and_third_as_3(self):
+        rows = [
+            _row("David Santos", 31.0),
+            _row("Pilar Freixas", 31.0),
+            _row("Miquel Llagostera", 30.0),
+        ]
+        text = format_general_ranking(rows, title="Test")
+        lines = text.splitlines()
+        assert lines[2].startswith("1.")
+        assert lines[3].startswith("1.")
+        assert lines[4].startswith("3.")
+
+    def test_no_ties_sequential(self):
+        rows = [_row("A", 10.0), _row("B", 8.0), _row("C", 6.0)]
+        text = format_general_ranking(rows, title="Test")
+        lines = text.splitlines()
+        assert lines[2].startswith("1.")
+        assert lines[3].startswith("2.")
+        assert lines[4].startswith("3.")
+
+    def test_empty_returns_no_data_message(self):
+        assert format_general_ranking([]) == "No hay datos de ranking aún."
