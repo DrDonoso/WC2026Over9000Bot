@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260701] - 2026-07-01
+
+- fix(porra): standard competition ranking for tied points
+
+
 ## [20260630.06] - 2026-06-30
 
 - refine(chat): picante replies to triggering message, mirrors its language
