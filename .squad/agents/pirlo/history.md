@@ -5,20 +5,7 @@
 - **Stack:** Python (Telegram bot), football-data.org API for fixtures & results, Docker + docker-compose, GitHub Actions → Docker Hub.
 - **Created:** 2026-06-15
 
-## Learnings
-
-<!-- Append new learnings below. Each entry is something lasting about the project. -->
-
-### 2026-06-15 — Initial Architecture Decision
-
-- **Package:** `worldcup_bot`, image `drdonoso/worldcup2026`, entry `python -m worldcup_bot`
-- **Layout:** src-layout mirroring RedditSoccerGoals. Modules: `bot/`, `api/`, `porra/`, `storage/`, `config.py`.
-- **Deps:** httpx, aiosqlite, python-telegram-bot (same stack as sibling repo minus yt-dlp).
-- **football-data.org:** Free tier, 10 req/min, competition code `WC` (id 2000). Poll results every 2 min during matches, daily fixture sync.
-- **Scoring default:** 3 exact / 1 outcome / 0 wrong. Locks at kickoff.
-- **Env vars:** TELEGRAM_BOT_TOKEN, FOOTBALL_DATA_API_KEY, TELEGRAM_GROUP_ID, ADMIN_TELEGRAM_IDS, POLL_INTERVAL_SECONDS, FIXTURE_SYNC_HOUR_UTC, DB_PATH.
-- **CI:** CalVer tags, Buildx, Docker Hub push (:latest + :calver), GH release. Mirrors sibling exactly.
-- **Key seam:** `porra/scoring.py` is pure (no I/O) — trivially testable and mockable.
+## Recent Sessions (2026-06-26 onwards)
 
 ### 2026-06-26 — TVE 📺 Label Fix — Review Gate (APPROVED)
 
@@ -38,25 +25,6 @@
 - **All legacy commands preserved.** Added `/ronda32`, `/semis`, `/final`. Renamed `/euroPorraDiaria` → `/porra`.
 - **`/listaaciertos` now auto-detects caller** by Telegram username (no arg needed for own predictions).
 - **Key learning:** User wants simplicity — YAML file editable live on host, no DB, no complex flows. The bot is a *reader* of pre-submitted predictions, not a prediction submission system.
-
-### 2026-06-15 — Consolidation + Cross-Agent Learnings
-
-- **Contract clarity enabled parallel work:** Public API signatures locked early (section 3 of decisions.md) allowed Buffon to write tests before Kanté finished implementation. Zero API mismatches.
-- **Architecture decisions locked:** All meaningful choices documented in `.squad/decisions.md` (merged from 5 inbox docs). Future changes require team consensus.
-- **Silent failures are dangerous:** Group normalization bug (API "Group A" → "GROUP_A") was invisible in unit tests (fixtures used canonical form) but caused all users to score 0 in production. Only Buffon's end-to-end testing caught it. Lesson: **mock third-party APIs with real response shapes**.
-- **Module decoupling worked:** Pure scoring function + separate API client normalization layer + data-driven configuration = easy testing, high confidence, maintainability.
-- **Team operated autonomously:** Pirlo specified contract → Maldini scaffolded → Kanté implemented → Buffon tested → bugs found and fixed pre-ship. No blocking; clear handoffs.
-- **Lesson for future sessions:** Architectural contracts (defining public APIs, dependencies, error handling) are worth the upfront effort.
-
-### 2026-06-19 — Per-User Tongo Config Design
-
-- **Feature request:** Make `/tongo` SANCHEZ ratio and phrase pool configurable per user (identified by Telegram username).
-- **Recommended approach:** Dedicated `data/TongoUsers.yml` file (Option B) over extending `predictions.yml` or in-band syntax. Clean separation, familiar pattern, operator-controlled commit/ignore.
-- **Key design choice:** Extract selection logic into a pure `choose_tongo_response()` function — keeps handler thin, enables comprehensive unit testing.
-- **Backward compat:** Unconfigured users must get exact current 1/3 SANCHEZ behavior. Missing config file = all global.
-- **Learning:** Easter-egg config should not couple with core porra data. Separate files allow independent versioning decisions.
-
-### 2026-06-26 — Architecture Review: WC2026 Best-Thirds Qualifying Scoring
 
 **Role:** Lead reviewer for Kanté's best-thirds implementation.
 
@@ -211,3 +179,40 @@
 **Key verification:** Placement correct (startup after seeding, step 7 before picante), guards safe (`.get()` + truthiness), best-effort resilience, privacy unchanged, atomic writes acceptable, suite green (1939 passed).
 
 **Verdict:** ✅ **APPROVE** — Minimal, correct, well-guarded change. Ship it.
+
+---
+
+### 2026-07-01 — Podium Photo Feature: Feasibility + Implementation Review
+
+**Session:** podium-feasibility (design) → podium-implementation (review)  
+**Status:** ✅ FEASIBILITY APPROVED → ✅ IMPLEMENTATION APPROVED (committed 4343ddb)
+
+**Pirlo roles:**
+1. **Feasibility Assessment:** Evaluated merging tied photos (Option A, album-based) vs. single podium image (Option B, Pillow canvas). Recommendation: Option B — visually impactful, tie-aware layout, lower complexity than expected.
+2. **Implementation Review Gate:** Verified Kanté's render_podium module + handlers integration.
+
+**Key Design Decisions (Locked):**
+- Single podium image always (replaces album, no branching on ties)
+- Missing photos → placeholder (solid color + initials) ensuring image always renders
+- Crown drawn programmatically with Pillow (no external PNG asset)
+- Font from matplotlib `findfont` (no new deps, Docker-safe)
+- Fallback chain: podium → album → text (graceful degradation)
+- Tie-aware y-offsets: positions 1→205px, 2→237px, 3→257px
+
+**Review Checklist (8/8 PASS):**
+1. ✅ Fallback chain correct and tested
+2. ✅ Non-blocking (asyncio.to_thread)
+3. ✅ Never raises (all exceptions caught)
+4. ✅ Tie-aware via standard_competition_positions
+5. ✅ Caption handling (1024-char limit + overflow)
+6. ✅ No new deps / no external assets
+7. ✅ Missing-photo fallback robust
+8. ✅ Test suite green (1968 baseline + 45 edge cases by Buffon = 2013 total)
+
+**Verdict:** ✅ **APPROVE** — Implementation matches spec exactly. Tie logic correct. Fallback chain robust. Buffon's 45 edge-case tests all pass. Ready to ship.
+
+**Design lessons:**
+- Crown asset decision (draw vs. bundle PNG) was right call — reduced repo bloat, copyright-safe
+- Font resolution pattern (matplotlib findfont + fallback) is reusable for future text-rendering needs
+- Separating render_podium as pure sync function (called via asyncio.to_thread) allows deterministic testing without mocking async machinery
+

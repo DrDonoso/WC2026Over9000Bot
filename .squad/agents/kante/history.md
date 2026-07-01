@@ -1,8 +1,17 @@
 # Kanté — Backend Developer
 
-**Project:** WorldCup2026Over9000TelegramBot | **Stack:** Python, PTB, football-data.org, Reddit scanner, LLM | **Current:** 1939 tests ✅
+**Project:** WorldCup2026Over9000TelegramBot | **Stack:** Python, PTB, football-data.org, Reddit scanner, LLM | **Current:** 1968 tests ✅
 
-## Current Sessions (2026-06-30)
+## Current Sessions (2026-07-01)
+
+### ✅ Podium Image Feature (IMPLEMENTED + APPROVED, committed 4343ddb)
+New module `src/worldcup_bot/bot/podium_image.py` — `render_podium(participants, settings) → BytesIO | None`. Sync function; caller uses `asyncio.to_thread`. 720×400 dark-navy canvas; 180px circular-cropped tiles; programmatic gold crown (single filled polygon + jewel circles, no assets); position number drawn between crown and tile; initials placeholder when photo missing. Fallback chain in `_send_ranking_with_top3_photos`: podium → album → text. Added autouse `_stub_render_podium` to `TestCmdActual`, `TestCmdGeneral`, and `TestSendRankingWithTop3Photos` (album tests stay clean). 17 new tests; 1968 total + 45 edge-case tests by Buffon (all pass). Pirlo reviewed and approved. Committed to main. Decision docs merged to `decisions.md`.
+
+### ✅ Standard Competition Ranking (tied positions / 1224 style, committed 8987262)
+Added `standard_competition_positions(rows) -> list[int]` pure helper in `formatters.py`. Uses `round(score, 1)` equality. Updated `format_general_ranking` to replace `enumerate` counter. 12 new tests; 1951 total. Committed to main. Decision doc merged to `decisions.md`.
+
+
+## Previous Sessions (2026-06-30)
 
 ### ✅ Picante Prompt Refinement (SHIPPED, commit d964fbf)
 Rewrote `_SYSTEM` and `build_picante_user_message` so picante replies focus on the LAST (triggering) message rather than force-weaving all buffered messages. Two-section user prompt: optional CONTEXTO block (prior messages, use only if clearly related) + ÚLTIMO MENSAJE block (trigger, always reply to this). Language rule: mirror the last message's language (Catalan→Catalan, Castilian→Castilian). Updated 3 tests in `test_chat.py` to assert new structure.

@@ -2040,3 +2040,152 @@ Added 4 edge-case tests by Buffon:
 **PASS WITH ADDED TESTS (+4)**  
 1665 passed, 5 warnings (all pre-existing)
 
+---
+
+# Decision: Standard Competition Ranking (1224 style)
+
+**Date:** 2026-07-01  
+**Author:** Kanté (backend)  
+**Status:** Implemented, committed in 8987262
+
+## Summary
+Added `standard_competition_positions` helper to formatters.py that implements "1224 style" tie-aware ranking: tied participants share the same position and the next position skips accordingly. E.g., scores [31, 31, 30] → positions [1, 1, 3].
+
+## Key Details
+- **Input:** Pre-sorted list of ranking rows with `.total_score` attribute
+- **Output:** List of 1-based competition positions
+- **Tie rule:** Two rows are tied if `round(score_a, 1) == round(score_b, 1)`
+- **Used by:** `/porra`, `/general`, `/clasificacion` commands and podium image feature
+- **Test count:** 1951 passed (added 12 new tests)
+
+## Files Changed
+- `src/worldcup_bot/bot/formatters.py`: Added `standard_competition_positions` helper; updated `format_general_ranking`
+- `tests/test_formatters.py`: Added `TestStandardCompetitionPositions` (9 cases) + `TestFormatGeneralRankingTieAwareNumbering` (3 cases)
+
+---
+
+# Decision: Podium Photo Compositing Feasibility & Approach
+
+**Author:** Pirlo (Lead)  
+**Date:** 2026-07-01  
+**Status:** Proposal approved, implementation completed
+
+## Feasibility Verdict
+✅ **Merging tied photos into one combined image:** Fully feasible with Pillow 12.2.0  
+✅ **Single podium image with crowns + position numbers:** Fully feasible with Pillow canvas + ImageDraw
+
+## Recommended Approach (Option B — Single Podium Image)
+- **Canvas:** Fixed 700 × 350 px, dark background
+- **Tiles:** Uniform 200×200 px, circular crop optional, LANCZOS resize
+- **Crown:** Single overlay per tile with position number inside/below
+- **Placeholders:** Missing photos render as solid-color circles + initials (first letter of display name)
+- **Layout:** Tie-aware positioning — tied positions share same y-height on canvas
+- **Fallback chain:** Podium image → album (old code) → plain text
+
+## Assets Needed
+- `crown.png`: ~5 KB, 64×64 px, transparent background (or hand-drawn)
+- `podium_font.ttf`: DejaVu Sans Bold (~700 KB, SIL OFL licensed) — required for Docker consistency
+
+## Key Decisions
+- **Missing photos:** Always generate placeholder (ensures podium always renders)
+- **Crown rendering:** Bundle PNG asset (cleanest option)
+- **Font:** Bundle TTF in assets (Docker slim images don't have system fonts reliably)
+- **Layout adaptability:** Use `standard_competition_positions` to determine tie-aware heights
+- **Always-on mode:** Replace album with podium image always (no branching on ties)
+
+## Risk Level
+Low — graceful fallback to text if anything fails. Effort estimate: ~1 working day.
+
+## Prerequisite
+`standard_competition_positions` helper must land first.
+
+---
+
+# Decision: Podium Image Feature Implementation
+
+**Author:** Kanté (backend)  
+**Status:** Implemented, committed in 4343ddb
+
+## Summary
+Completed implementation of single composite podium image for ranking commands (`/porra`, `/general`), replacing plain URL album. Missing photos use initials placeholders. Falls back to old album if rendering fails.
+
+## `render_podium` Signature
+```python
+def render_podium(participants: list[dict], settings) -> io.BytesIO | None
+```
+- **participants:** List of up to 3 dicts with `username`, `display_name`, `position` (tie-aware from `standard_competition_positions`)
+- **settings:** Settings instance; only `settings.photo_base_url` used
+- **Returns:** PNG BytesIO seeked to 0, or None on failure
+- **Threading:** Synchronous; call with `asyncio.to_thread`
+
+## Fallback Chain in `_send_ranking_with_top3_photos`
+```
+podium image (render_podium → BytesIO)
+    ↓ None
+album (send_media_group with valid photo URLs)
+    ↓ no valid URLs or send_media_group raises
+plain text (reply_text)
+```
+
+## Visual Design
+| Property | Value |
+|----------|-------|
+| Canvas | 720 × 400 px, dark navy `(22, 27, 34)` |
+| Tile shape | Circle, diameter 180 px, LANCZOS resize |
+| Tile missing | Solid-color circle + initials (first + last initial) |
+| Placeholder colours | Steel blue / sea green / firebrick (by index) |
+| Crown | Filled gold polygon (11 vertices) + 3 jewel circles; **drawn with Pillow, no external assets** |
+| Position number | 22 pt DejaVu Sans Bold, white |
+| Participant name | 16 pt light grey, below tile; truncated at 14 chars |
+| Classic podium | 3 participants: centre = 1st, left = 2nd, right = 3rd |
+| Tie-aware heights | Position 1→205 px, 2→237 px, 3→257 px |
+
+## Crown Drawing
+Entirely drawn with Pillow `ImageDraw.polygon` + `ImageDraw.ellipse`:
+- Single filled polygon: band + 3 spikes (11 vertices)
+- Three jewel circles at spike tips
+- Copyright-safe, requires zero new asset files
+
+## Font Resolution
+`matplotlib.font_manager.findfont(FontProperties(family="DejaVu Sans", weight="bold"))` → resolves to bundled `DejaVuSans-Bold.ttf` inside matplotlib package. Fallback: `ImageFont.load_default()`. No new deps (matplotlib already a project dependency).
+
+## Changes
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/bot/podium_image.py` | New module with `render_podium`, `_render_podium`, `_draw_crown`, `_fetch_tile`, `_circular_crop`, `_placeholder_tile` |
+| `src/worldcup_bot/bot/handlers.py` | Imports + `_send_ranking_with_top3_photos` rewrite with fallback chain |
+| `tests/test_handlers.py` | `TestSendRankingWithPodium` (5 tests) + `_stub_render_podium` autouse fixture |
+| `tests/test_podium_image.py` | New — 12 smoke tests for `render_podium` |
+
+## Test Count
+1968 passed (0 regressions)
+
+---
+
+# Decision: Podium Image Review — APPROVED
+
+**Reviewer:** Pirlo (Lead)  
+**PR Scope:** `src/worldcup_bot/bot/podium_image.py` + `handlers.py` diff  
+**Test Suite:** 1968 passed ✅
+
+## Review Checklist Results
+
+| Criterion | Status |
+|-----------|--------|
+| Fallback Chain (podium → album → text) | ✅ PASS |
+| Non-blocking (asyncio.to_thread) | ✅ PASS |
+| Never Raises contract | ✅ PASS |
+| Tie-Awareness (positions via `standard_competition_positions`) | ✅ PASS |
+| Caption handling (1024 limit + overflow) | ✅ PASS |
+| No new deps / no bundled art | ✅ PASS |
+| Missing-photo fallback (initials placeholders) | ✅ PASS |
+| Test suite green | ✅ PASS (1968 passed, 5 pre-existing warnings) |
+
+## Verdict
+✅ **APPROVE** — Clean, well-structured implementation. Fallback chain robust. Tie logic correct. No regressions. Ready to ship.
+
+## Minor Observations (non-blocking)
+1. **Serial photo fetches:** Only 3 requests, acceptable. Future `ThreadPoolExecutor` optimization not needed now.
+2. **Font path cached at import:** Fine — matplotlib's font cache is fast. Fallback covers edge cases.
+3. **`r.display_name` assumption:** Correct — `UserRankEntry` includes it.
+
