@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260701.03] - 2026-07-01
+
+- feat(porra): use bundled crown image for podium
+
+
 ## [20260701.02] - 2026-07-01
 
 - feat(porra): podium image for top-3 rankings with crowns
