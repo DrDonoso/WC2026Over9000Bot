@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260701.05] - 2026-07-01
+
+- feat(rich-image): theme daily image by yesterday's winners
+
+
 ## [20260701.04] - 2026-07-01
 
 - kante-podium-drawn-base.md: Drawn 3-block podium layout (gold/silver/bronze, tie-aware, crown asset)
