@@ -12,6 +12,7 @@ import glob as _glob
 import json
 import logging
 import os
+import random
 import re
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +42,7 @@ RICH_EDIT_PROMPT = (
     "fully clothed. "
     "You MAY occasionally add tasteful accessories such as elegant sunglasses or a stylish hat "
     "(vary it; not every time). "
-    "Give them a new confident pose with hands in view. "
+    "Vary the pose and activity every iteration — avoid repeating the same position. "
     "Place them in a new opulent setting and add a few varied signs of wealth "
     "(an elegant entourage, a luxury car, a yacht, a private jet, fine jewellery) — "
     "a few new touches each time, growing gradually. "
@@ -73,6 +74,46 @@ RICH_CAPTION_PROMPT = (
     "Menos de 600 caracteres."
 )
 
+# ── Wealth-themes prompt (country-themed opulent props for yesterday's winners) ─
+
+RICH_THEME_PROMPT = (
+    "Given the following list of yesterday's football match winning countries, return a SHORT "
+    "comma-separated list of opulent, funny, SPECIFIC luxury VISUAL elements — "
+    "exactly ONE element per country, themed on that country's icons, culture, food, or "
+    "landmarks — luxurious, tasteful and visual. "
+    "IMPORTANT: do NOT default to gold/golden for every element — vary the type of luxury: "
+    "use diamonds, platinum, marble, silk, crystal, caviar, designer furs, exotic woods, "
+    "haute couture, precious jewels, rare materials, etc. Only use gold occasionally. "
+    "Return ONLY the comma-separated list with NO extra text whatsoever. "
+    "Examples of the vibe: "
+    "Norway → a diamond-encrusted Viking longship; "
+    "France → a caviar-topped artisan baguette on a marble tray; "
+    "Mexico → a crystal platter of truffle nachos; "
+    "England → a silk-lined tea set with hand-painted porcelain cups; "
+    "Belgium → a private parliament building filled with Belgian chocolate sculptures; "
+    "USA → surrounded by piles of platinum-banded US dollar bills. "
+    "Now do the same for these countries:"
+)
+
+# ── Pose/activity pool (one picked at random each iteration) ──────────────────
+
+POSE_ACTIVITIES = [
+    "dancing at a lavish party",
+    "standing confidently on a red carpet",
+    "lounging on a chaise longue",
+    "getting a spa massage",
+    "partying with a glamorous crowd",
+    "napping in an opulent king-size bed",
+    "embracing an elegant companion",
+    "walking a red carpet with an entourage",
+    "posing with a glamorous entourage",
+    "relaxing in an infinity pool",
+    "being served by attentive staff",
+    "laughing mid-celebration",
+    "striding through a luxury penthouse",
+    "being pampered at a private salon",
+]
+
 # ── History constants ─────────────────────────────────────────────────────────
 
 RICH_HISTORY_FILE = "rich_history.txt"
@@ -82,13 +123,17 @@ RICH_CAPTIONS_FILE = "rich_captions.txt"
 RICH_CAPTIONS_MAX = 6
 
 
-def build_rich_prompt(history: str = "", anchor: bool = False) -> str:
+def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "", pose: str = "") -> str:
     """Return the full editing prompt for one wealth-escalation iteration.
 
     Richness escalation is implicit: each run takes the previous output as input,
     so the model only needs to add a few new touches on top of what is already there.
     When ``history`` is non-empty, a no-repeat clause is appended so the model
     introduces NEW luxuries/scenes rather than repeating past days.
+    When ``themes`` is non-empty (opulent country-themed props from yesterday's winners),
+    a clause is added asking the model to incorporate those elements tastefully.
+    When ``pose`` is non-empty (one entry from :data:`POSE_ACTIVITIES`), a clause forces
+    the model to show the person in that specific activity so poses vary each iteration.
     When ``anchor`` is True, appends :data:`RICH_FACE_ANCHOR_CLAUSE` instructing the
     model that a second reference image (the original) is provided to lock the face.
     """
@@ -97,6 +142,17 @@ def build_rich_prompt(history: str = "", anchor: bool = False) -> str:
         base += (
             " Things already shown in previous days (choose DIFFERENT new elements"
             f" / a different location; do NOT repeat these): {history}"
+        )
+    if themes:
+        base += (
+            " ALSO incorporate a few of these opulent, country-themed luxury elements"
+            " into the scene, worked in tastefully (inspired by yesterday's winning"
+            f" countries): {themes}."
+        )
+    if pose:
+        base += (
+            f" In THIS image, show the person {pose}."
+            " VARY the pose and activity each time — do NOT default to sitting and toasting with champagne."
         )
     if anchor:
         base += RICH_FACE_ANCHOR_CLAUSE
@@ -455,6 +511,39 @@ async def generate_rich_caption(
 # ── high-level orchestration ──────────────────────────────────────────────────
 
 
+async def generate_wealth_themes(
+    api_key: str,
+    base_url: str,
+    model: str,
+    winners: list[str],
+    *,
+    _client: object | None = None,
+) -> str:
+    """Return a comma-separated string of opulent, country-themed luxury props for yesterday's winners.
+
+    Calls the chat model with :data:`RICH_THEME_PROMPT` + the winner country names.
+    Best-effort: never raises. Returns ``""`` if *winners* is empty.
+    Falls back to ``"opulent luxury {country}-themed elements"`` per country on any error.
+    """
+    if not winners:
+        return ""
+    fallback = ", ".join(f"opulent luxury {c}-themed elements" for c in winners)
+    try:
+        client = _client or AsyncOpenAI(api_key=api_key, base_url=base_url)
+        user_text = RICH_THEME_PROMPT + " " + ", ".join(winners)
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": user_text}],
+            max_completion_tokens=150,
+            temperature=0.8,
+        )
+        result = resp.choices[0].message.content.strip()
+        return result if result else fallback
+    except Exception:
+        log.warning("generate_wealth_themes: failed, using fallback for winners=%s", winners)
+        return fallback
+
+
 async def run_rich_iteration(
     settings: Settings,
     *,
@@ -462,6 +551,7 @@ async def run_rich_iteration(
     _caption_client: object | None = None,
     _data_dir: str = "/app/data",
     _now: datetime | None = None,
+    winners: list[str] | None = None,
 ) -> tuple[str, int, str]:
     """Run one wealth-escalation iteration and return (output_path, iteration, caption).
 
@@ -473,8 +563,11 @@ async def run_rich_iteration(
 
     The chaining is natural: on the next call, select_base_image returns the file
     we just wrote.  ``_data_dir`` is injectable for tests (default ``/app/data``).
-    ``_client`` drives image editing; ``_caption_client`` drives caption generation.
+    ``_client`` drives image editing; ``_caption_client`` drives caption generation
+    (and also theme generation, which reuses the same chat model).
     ``_now`` overrides the current datetime (for tests).
+    ``winners`` (optional): list of winning country names from yesterday's matches;
+    used to generate opulent country-themed props that are woven into the scene.
     """
     api_key = _effective_image_api_key(settings)
     base_url = _effective_image_base_url(settings)
@@ -499,9 +592,21 @@ async def run_rich_iteration(
         original = base_image  # no distinct original → force single-image mode
     using_anchor = os.path.abspath(base_image) != os.path.abspath(original)
 
-    prompt = build_rich_prompt(history=image_history, anchor=using_anchor)
+    # Compute country-themed opulent props from yesterday's winners — best-effort
+    themes = ""
+    if winners and settings.openai_api_key and settings.openai_base_url and settings.openai_model:
+        themes = await generate_wealth_themes(
+            settings.openai_api_key,
+            settings.openai_base_url,
+            settings.openai_model,
+            winners,
+            _client=_caption_client,
+        )
+    log.info("run_rich_iteration: iter=%d, base=%s, anchor=%s, winners=%s, themes=%r",
+             level, base_image, using_anchor, winners, themes)
 
-    log.info("run_rich_iteration: iter=%d, base=%s, anchor=%s", level, base_image, using_anchor)
+    pose = random.choice(POSE_ACTIVITIES)
+    prompt = build_rich_prompt(history=image_history, anchor=using_anchor, themes=themes, pose=pose)
 
     png_bytes = await edit_rich_image(
         api_key=api_key,

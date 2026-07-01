@@ -181,8 +181,31 @@ async def rich_image_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not image_ai_enabled(settings):
         log.info("rich_image_job: image AI not configured, skipping")
         return
+
+    # Fetch yesterday's winners — best-effort, never fatal
+    winners: list[str] = []
     try:
-        out_path, level, caption = await run_rich_iteration(settings)
+        client = make_client(settings)
+        matches = client.get_football_day_matches(
+            settings.timezone, day_offset=-1, anchor_hour=settings.football_day_start_hour
+        )
+        winners = [
+            name
+            for m in matches
+            if m.status == "FINISHED"
+            for name in [
+                m.home_name if m.winner == "HOME_TEAM"
+                else m.away_name if m.winner == "AWAY_TEAM"
+                else None
+            ]
+            if name
+        ]
+        log.info("rich_image_job: yesterday's winners=%s", winners)
+    except Exception:
+        log.exception("rich_image_job: could not fetch yesterday's winners (non-fatal)")
+
+    try:
+        out_path, level, caption = await run_rich_iteration(settings, winners=winners)
         log.info("rich image iteration %d -> %s", level, out_path)
         if settings.telegram_group_id:
             with open(out_path, "rb") as photo_fh:

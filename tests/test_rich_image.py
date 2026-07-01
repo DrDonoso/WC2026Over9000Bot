@@ -21,6 +21,8 @@ from worldcup_bot.ai.rich_image import (
     RICH_EDIT_PROMPT,
     RICH_FACE_ANCHOR_CLAUSE,
     RICH_HISTORY_MAX_LINES,
+    RICH_THEME_PROMPT,
+    POSE_ACTIVITIES,
     _normalize_caption,
     append_caption,
     append_history,
@@ -30,6 +32,7 @@ from worldcup_bot.ai.rich_image import (
     format_captions_for_prompt,
     format_history_for_prompt,
     generate_rich_caption,
+    generate_wealth_themes,
     load_captions,
     load_history_lines,
     load_level,
@@ -276,7 +279,7 @@ class TestRichEditPromptContent:
 
     def test_allows_hands_and_gestures(self):
         lower = RICH_EDIT_PROMPT.lower()
-        assert "hands" in lower or "gestures" in lower
+        assert "hands" in lower or "gestures" in lower or "vary" in lower
 
     def test_allows_other_people_around_subject(self):
         lower = RICH_EDIT_PROMPT.lower()
@@ -2074,3 +2077,679 @@ class TestRichFaceAnchorClauseRicherEmphasis:
     def test_still_preserves_face_exactly(self):
         assert "exactly" in RICH_FACE_ANCHOR_CLAUSE.lower()
         assert "original" in RICH_FACE_ANCHOR_CLAUSE.lower()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# build_rich_prompt — themes parameter
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBuildRichPromptThemes:
+    def test_themes_nonempty_adds_clause_to_prompt(self):
+        themes = "golden Viking helmet, jewel-encrusted baguette"
+        p = build_rich_prompt(themes=themes)
+        assert themes in p
+        assert "opulent" in p.lower() or "country-themed" in p.lower() or "luxury" in p.lower()
+
+    def test_themes_empty_string_no_clause(self):
+        p = build_rich_prompt(themes="")
+        assert "country-themed" not in p
+        assert "yesterday" not in p.lower()
+
+    def test_themes_none_equivalent_empty(self):
+        """Default (no themes arg) produces same result as themes=''."""
+        assert build_rich_prompt() == build_rich_prompt(themes="")
+
+    def test_themes_clause_appended_after_base(self):
+        themes = "golden tea cup"
+        p = build_rich_prompt(themes=themes)
+        assert p.startswith(RICH_EDIT_PROMPT)
+
+    def test_themes_with_history_both_present(self):
+        history = "- iter 1 | Rolls-Royce"
+        themes = "golden tea cup"
+        p = build_rich_prompt(history=history, themes=themes)
+        assert history in p
+        assert themes in p
+
+    def test_themes_with_anchor_both_present(self):
+        themes = "platter of nachos"
+        p = build_rich_prompt(anchor=True, themes=themes)
+        assert themes in p
+        assert RICH_FACE_ANCHOR_CLAUSE in p
+
+    def test_themes_clause_comes_before_anchor_clause(self):
+        themes = "golden Viking helmet"
+        p = build_rich_prompt(anchor=True, themes=themes)
+        themes_pos = p.index(themes)
+        anchor_pos = p.index(RICH_FACE_ANCHOR_CLAUSE)
+        assert themes_pos < anchor_pos
+
+    def test_history_anchor_themes_all_present(self):
+        history = "- iter 1 | yacht"
+        themes = "golden baguette"
+        p = build_rich_prompt(history=history, anchor=True, themes=themes)
+        assert history in p
+        assert themes in p
+        assert RICH_FACE_ANCHOR_CLAUSE in p
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RICH_THEME_PROMPT — content checks
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichThemePrompt:
+    def test_constant_exists(self):
+        assert RICH_THEME_PROMPT is not None
+        assert isinstance(RICH_THEME_PROMPT, str)
+
+    def test_mentions_comma_separated(self):
+        assert "comma-separated" in RICH_THEME_PROMPT.lower()
+
+    def test_mentions_one_element_per_country(self):
+        lower = RICH_THEME_PROMPT.lower()
+        assert "one element" in lower or "one per" in lower or "exactly one" in lower
+
+    def test_includes_norway_example(self):
+        assert "Norway" in RICH_THEME_PROMPT
+
+    def test_includes_france_example(self):
+        assert "France" in RICH_THEME_PROMPT
+
+    def test_includes_usa_example(self):
+        assert "USA" in RICH_THEME_PROMPT
+
+    def test_no_extra_text_instruction(self):
+        lower = RICH_THEME_PROMPT.lower()
+        assert "no extra text" in lower or "only" in lower
+
+    def test_instructs_not_always_gold(self):
+        lower = RICH_THEME_PROMPT.lower()
+        assert "not" in lower and ("gold" in lower or "golden" in lower)
+
+    def test_mentions_varied_luxury_materials(self):
+        lower = RICH_THEME_PROMPT.lower()
+        materials = ["diamond", "platinum", "marble", "silk", "crystal", "caviar"]
+        assert any(m in lower for m in materials)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# generate_wealth_themes
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGenerateWealthThemes:
+    async def test_returns_model_output(self):
+        fake = _fake_caption_client("golden Viking helmet, jewel-encrusted baguette")
+        result = await generate_wealth_themes(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            winners=["Norway", "France"],
+            _client=fake,
+        )
+        assert result == "golden Viking helmet, jewel-encrusted baguette"
+
+    async def test_empty_winners_returns_empty_string(self):
+        result = await generate_wealth_themes(
+            api_key="k", base_url="http://x", model="gpt-4", winners=[]
+        )
+        assert result == ""
+
+    async def test_client_raises_returns_fallback_string(self):
+        bad = MagicMock()
+        bad.chat.completions.create = AsyncMock(side_effect=Exception("API down"))
+        result = await generate_wealth_themes(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            winners=["Norway", "France"],
+            _client=bad,
+        )
+        assert "Norway" in result
+        assert "France" in result
+
+    async def test_fallback_format_one_per_country(self):
+        bad = MagicMock()
+        bad.chat.completions.create = AsyncMock(side_effect=RuntimeError("boom"))
+        result = await generate_wealth_themes(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            winners=["Mexico"],
+            _client=bad,
+        )
+        assert "Mexico" in result
+        assert "opulent" in result.lower() or "luxury" in result.lower()
+
+    async def test_model_empty_response_returns_fallback(self):
+        fake = _fake_caption_client("   ")  # whitespace-only → stripped to ""
+        result = await generate_wealth_themes(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            winners=["England"],
+            _client=fake,
+        )
+        assert "England" in result
+
+    async def test_single_winner_returns_single_element(self):
+        fake = _fake_caption_client("golden tea cup")
+        result = await generate_wealth_themes(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            winners=["England"],
+            _client=fake,
+        )
+        assert result == "golden tea cup"
+
+    async def test_winners_list_sent_to_client(self):
+        fake = _fake_caption_client("golden helmet")
+        await generate_wealth_themes(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            winners=["Norway", "Mexico"],
+            _client=fake,
+        )
+        call_kwargs = fake.chat.completions.create.call_args.kwargs
+        messages = call_kwargs["messages"]
+        assert any("Norway" in str(m.get("content", "")) and "Mexico" in str(m.get("content", ""))
+                   for m in messages)
+
+    async def test_never_raises(self):
+        bad = MagicMock()
+        bad.chat.completions.create = AsyncMock(side_effect=Exception("nuclear"))
+        # Must not raise regardless of the exception
+        result = await generate_wealth_themes(
+            api_key="k", base_url="http://x", model="gpt-4", winners=["USA"], _client=bad
+        )
+        assert isinstance(result, str)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# run_rich_iteration — winners/themes flow
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRunRichIterationWinners:
+    async def test_winners_causes_themes_clause_in_image_prompt(self, tmp_path):
+        """When winners are provided and themes resolved, the image prompt contains the themes clause."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("caption")
+        themes_value = "golden Viking helmet, gourmet nachos"
+
+        with patch(
+            "worldcup_bot.ai.rich_image.generate_wealth_themes",
+            new=AsyncMock(return_value=themes_value),
+        ):
+            await run_rich_iteration(
+                settings,
+                _client=fake_img,
+                _caption_client=fake_cap,
+                _data_dir=str(data_dir),
+                winners=["Norway", "Mexico"],
+            )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        assert themes_value in img_prompt
+        assert "country-themed" in img_prompt.lower() or "opulent" in img_prompt.lower()
+
+    async def test_winners_none_no_themes_clause(self, tmp_path):
+        """When winners=None, no themes clause is added to the image prompt."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("caption")
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            winners=None,
+        )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        assert "country-themed" not in img_prompt.lower()
+        assert "yesterday" not in img_prompt.lower()
+
+    async def test_winners_empty_list_no_themes_clause(self, tmp_path):
+        """When winners=[], generate_wealth_themes returns '' and no clause is added."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("caption")
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            winners=[],
+        )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        assert "country-themed" not in img_prompt.lower()
+
+    async def test_themes_not_injected_into_caption_messages(self, tmp_path):
+        """Themes must NOT appear in the caption request (caption reverted to rude-only)."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("caption")
+        themes_value = "silk-lined tea set, crystal nachos platter"
+
+        with patch(
+            "worldcup_bot.ai.rich_image.generate_wealth_themes",
+            new=AsyncMock(return_value=themes_value),
+        ):
+            await run_rich_iteration(
+                settings,
+                _client=fake_img,
+                _caption_client=fake_cap,
+                _data_dir=str(data_dir),
+                winners=["England", "Mexico"],
+            )
+
+        messages = fake_cap.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        # Themes text must NOT be present in the caption request
+        assert themes_value not in combined
+        assert "países que ganaron ayer" not in combined
+
+    async def test_pose_injected_into_image_prompt(self, tmp_path):
+        """run_rich_iteration must inject the randomly chosen pose into the image prompt."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("caption")
+        chosen_pose = "relaxing in an infinity pool"
+
+        with patch("worldcup_bot.ai.rich_image.random.choice", return_value=chosen_pose):
+            await run_rich_iteration(
+                settings,
+                _client=fake_img,
+                _caption_client=fake_cap,
+                _data_dir=str(data_dir),
+            )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        assert chosen_pose in img_prompt
+
+    async def test_pose_not_injected_into_caption(self, tmp_path):
+        """The randomly chosen pose must NOT appear in the caption request messages."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("caption")
+        chosen_pose = "getting a spa massage"
+
+        with patch("worldcup_bot.ai.rich_image.random.choice", return_value=chosen_pose):
+            await run_rich_iteration(
+                settings,
+                _client=fake_img,
+                _caption_client=fake_cap,
+                _data_dir=str(data_dir),
+            )
+
+        messages = fake_cap.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        assert chosen_pose not in combined
+
+    async def test_winners_no_chat_config_no_themes(self, tmp_path):
+        """When chat model is not configured, themes='' (no LLM call)."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(
+            tmp_path,
+            state_dir=str(state_dir),
+            openai_api_key="",
+            openai_base_url="",
+            openai_model="",
+        )
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+
+        with patch(
+            "worldcup_bot.ai.rich_image.generate_wealth_themes",
+        ) as mock_themes:
+            await run_rich_iteration(
+                settings,
+                _client=fake_img,
+                _data_dir=str(data_dir),
+                winners=["Norway"],
+            )
+        mock_themes.assert_not_called()
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        assert "country-themed" not in img_prompt.lower()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# rich_image_job — winner derivation
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_mock_match(status: str, winner: str | None, home_name: str, away_name: str):
+    m = MagicMock()
+    m.status = status
+    m.winner = winner
+    m.home_name = home_name
+    m.away_name = away_name
+    return m
+
+
+class TestRichImageJobWinners:
+    async def test_home_team_winner_extracted(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-100")
+        ctx = _make_context(settings)
+
+        match = _make_mock_match("FINISHED", "HOME_TEAM", "Norway", "Sweden")
+        mock_fc = MagicMock()
+        mock_fc.get_football_day_matches.return_value = [match]
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_fc),
+            patch(
+                "worldcup_bot.__main__.run_rich_iteration",
+                new=AsyncMock(return_value=(str(out_file), 1, "cap")),
+            ) as mock_run,
+        ):
+            await main_mod.rich_image_job(ctx)
+
+        mock_run.assert_awaited_once()
+        call_kwargs = mock_run.call_args
+        assert call_kwargs.kwargs["winners"] == ["Norway"]
+
+    async def test_away_team_winner_extracted(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-100")
+        ctx = _make_context(settings)
+
+        match = _make_mock_match("FINISHED", "AWAY_TEAM", "Norway", "France")
+        mock_fc = MagicMock()
+        mock_fc.get_football_day_matches.return_value = [match]
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_fc),
+            patch(
+                "worldcup_bot.__main__.run_rich_iteration",
+                new=AsyncMock(return_value=(str(out_file), 1, "cap")),
+            ) as mock_run,
+        ):
+            await main_mod.rich_image_job(ctx)
+
+        call_kwargs = mock_run.call_args
+        assert call_kwargs.kwargs["winners"] == ["France"]
+
+    async def test_draw_excluded_from_winners(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-100")
+        ctx = _make_context(settings)
+
+        match = _make_mock_match("FINISHED", "DRAW", "Spain", "Portugal")
+        mock_fc = MagicMock()
+        mock_fc.get_football_day_matches.return_value = [match]
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_fc),
+            patch(
+                "worldcup_bot.__main__.run_rich_iteration",
+                new=AsyncMock(return_value=(str(out_file), 1, "cap")),
+            ) as mock_run,
+        ):
+            await main_mod.rich_image_job(ctx)
+
+        call_kwargs = mock_run.call_args
+        assert call_kwargs.kwargs["winners"] == []
+
+    async def test_non_finished_excluded(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-100")
+        ctx = _make_context(settings)
+
+        in_play = _make_mock_match("IN_PLAY", "HOME_TEAM", "Brazil", "Argentina")
+        mock_fc = MagicMock()
+        mock_fc.get_football_day_matches.return_value = [in_play]
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_fc),
+            patch(
+                "worldcup_bot.__main__.run_rich_iteration",
+                new=AsyncMock(return_value=(str(out_file), 1, "cap")),
+            ) as mock_run,
+        ):
+            await main_mod.rich_image_job(ctx)
+
+        call_kwargs = mock_run.call_args
+        assert call_kwargs.kwargs["winners"] == []
+
+    async def test_multiple_matches_all_winners_collected(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-100")
+        ctx = _make_context(settings)
+
+        matches = [
+            _make_mock_match("FINISHED", "HOME_TEAM", "Norway", "Sweden"),
+            _make_mock_match("FINISHED", "AWAY_TEAM", "Germany", "France"),
+            _make_mock_match("FINISHED", "DRAW", "Spain", "Italy"),
+        ]
+        mock_fc = MagicMock()
+        mock_fc.get_football_day_matches.return_value = matches
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_fc),
+            patch(
+                "worldcup_bot.__main__.run_rich_iteration",
+                new=AsyncMock(return_value=(str(out_file), 1, "cap")),
+            ) as mock_run,
+        ):
+            await main_mod.rich_image_job(ctx)
+
+        call_kwargs = mock_run.call_args
+        assert call_kwargs.kwargs["winners"] == ["Norway", "France"]
+
+    async def test_football_client_error_winners_empty_job_still_runs(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-100")
+        ctx = _make_context(settings)
+
+        mock_fc = MagicMock()
+        mock_fc.get_football_day_matches.side_effect = Exception("API down")
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_fc),
+            patch(
+                "worldcup_bot.__main__.run_rich_iteration",
+                new=AsyncMock(return_value=(str(out_file), 1, "cap")),
+            ) as mock_run,
+        ):
+            await main_mod.rich_image_job(ctx)
+
+        mock_run.assert_awaited_once()
+        call_kwargs = mock_run.call_args
+        assert call_kwargs.kwargs["winners"] == []
+
+    async def test_football_client_error_job_does_not_raise(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-100")
+        ctx = _make_context(settings)
+
+        mock_fc = MagicMock()
+        mock_fc.get_football_day_matches.side_effect = Exception("network error")
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_fc),
+            patch(
+                "worldcup_bot.__main__.run_rich_iteration",
+                new=AsyncMock(return_value=(str(out_file), 1, "cap")),
+            ),
+        ):
+            await main_mod.rich_image_job(ctx)  # must not raise
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POSE_ACTIVITIES constant
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPoseActivities:
+    def test_is_a_list(self):
+        assert isinstance(POSE_ACTIVITIES, list)
+
+    def test_has_at_least_ten_entries(self):
+        assert len(POSE_ACTIVITIES) >= 10
+
+    def test_all_entries_are_strings(self):
+        assert all(isinstance(p, str) for p in POSE_ACTIVITIES)
+
+    def test_all_entries_non_empty(self):
+        assert all(p.strip() for p in POSE_ACTIVITIES)
+
+    def test_no_champagne_toast_as_entry(self):
+        """Champagne toast must not be one of the pose options (it was the repetitive default)."""
+        combined = " ".join(POSE_ACTIVITIES).lower()
+        assert "champagne" not in combined or "toast" not in combined
+
+    def test_contains_variety_of_activities(self):
+        """Should cover at least 3 distinct activity categories."""
+        combined = " ".join(POSE_ACTIVITIES).lower()
+        active = any(w in combined for w in ["danc", "walk", "laugh", "party"])
+        relaxed = any(w in combined for w in ["loung", "nap", "relax", "spa", "massage"])
+        social = any(w in combined for w in ["entourage", "crowd", "companion", "staff", "embrac"])
+        assert active and relaxed and social
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# build_rich_prompt — pose parameter
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBuildRichPromptPose:
+    def test_pose_nonempty_adds_clause(self):
+        pose = "dancing at a lavish party"
+        p = build_rich_prompt(pose=pose)
+        assert pose in p
+
+    def test_pose_empty_no_clause(self):
+        p = build_rich_prompt(pose="")
+        assert "champagne" not in p.lower()
+        assert "In THIS image" not in p
+
+    def test_pose_default_no_clause(self):
+        p = build_rich_prompt()
+        assert "In THIS image" not in p
+
+    def test_pose_clause_starts_with_pose_intro(self):
+        pose = "relaxing in an infinity pool"
+        p = build_rich_prompt(pose=pose)
+        assert f"In THIS image, show the person {pose}" in p
+
+    def test_pose_clause_includes_vary_instruction(self):
+        pose = "getting a spa massage"
+        p = build_rich_prompt(pose=pose)
+        lower = p.lower()
+        assert "vary" in lower and "pose" in lower
+
+    def test_pose_with_history_themes_anchor_all_present(self):
+        history = "- iter 1 | yacht"
+        themes = "silk-lined tea set"
+        pose = "striding through a luxury penthouse"
+        p = build_rich_prompt(history=history, themes=themes, pose=pose, anchor=True)
+        assert history in p
+        assert themes in p
+        assert pose in p
+        assert RICH_FACE_ANCHOR_CLAUSE in p
+
+    def test_pose_clause_before_anchor(self):
+        pose = "napping in an opulent king-size bed"
+        p = build_rich_prompt(anchor=True, pose=pose)
+        pose_pos = p.index(pose)
+        anchor_pos = p.index(RICH_FACE_ANCHOR_CLAUSE)
+        assert pose_pos < anchor_pos
+
+    def test_pose_clause_after_themes_clause(self):
+        themes = "diamond-encrusted longship"
+        pose = "lounging on a chaise longue"
+        p = build_rich_prompt(themes=themes, pose=pose)
+        themes_pos = p.index(themes)
+        pose_pos = p.index(pose)
+        assert themes_pos < pose_pos
