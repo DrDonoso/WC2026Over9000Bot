@@ -1,3 +1,115 @@
+# Decision: Crown Asset Integration (2026-07-01 SHIPPED)
+
+**Date:** 2026-07-01  
+**Authors:** Kanté (Backend), Maldini (DevOps), Pirlo (Lead Review)  
+**Status:** ✅ SHIPPED (commit e53b8a5)
+
+---
+
+## MERGED DECISIONS (3 files → 1 entry)
+
+This entry consolidates the crown asset integration:
+1. `kante-crown-asset.md` — Asset loader implementation
+2. `maldini-crown-packaging.md` — Packaging & attribution
+3. `pirlo-crown-asset-review.md` — Lead review (APPROVED)
+
+---
+
+## Summary
+
+Swapped hand-drawn gold crown for Noto Emoji crown asset (128×128 RGBA, Apache-2.0). Asset loader prefers bundled PNG; falls back to drawn crown if missing. Packaging fix ensures asset ships in wheel/Docker image.
+
+---
+
+## Asset Loader
+
+```python
+# src/worldcup_bot/bot/podium_image.py
+
+from importlib.resources import files
+
+def _load_crown_asset() -> Image.Image | None:
+    try:
+        resource = files("worldcup_bot") / "assets" / "crown.png"
+        return Image.open(io.BytesIO(resource.read_bytes())).convert("RGBA")
+    except Exception:
+        return None
+
+_CROWN_IMG: Image.Image | None = _load_crown_asset()
+```
+
+**Why `importlib.resources.files`?**  
+Works identically from source checkout and pip-installed package in Docker, as long as `pyproject.toml` ships the PNG via `package-data`. PEP 451-compliant for Python 3.9+.
+
+---
+
+## Crown Rendering
+
+```python
+def _paste_crown_asset(canvas: Image.Image, cx: int, tile_y: int) -> None:
+    crown = _CROWN_IMG.resize((_CROWN_ASSET_SIZE, _CROWN_ASSET_SIZE), Image.LANCZOS)
+    x = cx - _CROWN_ASSET_SIZE // 2
+    y = tile_y - _CROWN_GAP - _CROWN_ASSET_SIZE
+    canvas.paste(crown, (x, y), crown)  # uses RGBA alpha channel as mask
+```
+
+- `_CROWN_ASSET_SIZE = 56` px
+- Crown bottom edge = `tile_y - _CROWN_GAP` = 22 px above tile top
+- Alpha-composite via RGBA mask
+
+**Fallback dispatch in `_render_podium`:**
+
+```python
+if _CROWN_IMG is not None:
+    _paste_crown_asset(canvas, cx, tile_y)
+else:
+    crown_top = tile_y - _CROWN_H - _CROWN_GAP
+    _draw_crown(draw, cx, crown_top)
+```
+
+Original 11-vertex drawn crown remains as fallback.
+
+---
+
+## Packaging (Maldini)
+
+**pyproject.toml changes:**
+
+```toml
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+worldcup_bot = ["assets/*.png", "assets/*.md"]
+```
+
+**Attribution:** `src/worldcup_bot/assets/ATTRIBUTION.md` created (Noto Emoji, Google, Apache 2.0)
+
+**Verification:** Wheel built successfully; `worldcup_bot/assets/crown.png` confirmed present in wheel zip.
+
+---
+
+## Testing
+
+- 5 new tests in `TestCrownAsset`: asset loaded; fallback with asset=None; fallback tie case; draw_crown and paste mutate canvas
+- 12 smoke tests in `TestRenderPodiumSmoke` pass unchanged
+- **Total: 2018 tests passed** ✅
+
+---
+
+## Pirlo Lead Review (2026-07-01 APPROVED)
+
+✅ **Verdict: APPROVE**
+
+**Checklist results:**
+- ✅ Asset loading correct (`importlib.resources.files` PEP 451)
+- ✅ Fallback dispatch works (asset preferred, drawn as silent backup)
+- ✅ Packaging verified (wheel inspection confirms PNG + ATTRIBUTION.md present)
+- ✅ Attribution satisfies Apache 2.0
+- ✅ No regression (2018 tests passed)
+
+---
+
 # Decision: Picante Prompt Refinement (2026-06-30 SHIPPED)
 
 **Date:** 2026-06-30

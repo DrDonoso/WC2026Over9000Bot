@@ -216,3 +216,10 @@
 - Font resolution pattern (matplotlib findfont + fallback) is reusable for future text-rendering needs
 - Separating render_podium as pure sync function (called via asyncio.to_thread) allows deterministic testing without mocking async machinery
 
+### 2026-07-01 — Crown Asset Integration Review (APPROVED)
+
+**Session:** Crown asset swap (hand-drawn → Noto Emoji bundled PNG)  
+**Status:** ✅ APPROVED (shipped commit e53b8a5)
+
+**Pirlo lead review:** Verified asset loader (importlib.resources PEP 451), fallback dispatch, packaging (wheel verified), attribution (Apache 2.0), test suite green (2018 passed, 5 new crown tests). **Verdict: APPROVE** — ship it.
+

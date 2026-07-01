@@ -1,8 +1,11 @@
 # Kanté — Backend Developer
 
-**Project:** WorldCup2026Over9000TelegramBot | **Stack:** Python, PTB, football-data.org, Reddit scanner, LLM | **Current:** 1968 tests ✅
+**Project:** WorldCup2026Over9000TelegramBot | **Stack:** Python, PTB, football-data.org, Reddit scanner, LLM | **Current:** 2018 tests ✅
 
 ## Current Sessions (2026-07-01)
+
+### ✅ Crown Asset Integration (awaiting commit)
+Swapped podium crown from hand-drawn polygon to real Noto Emoji crown (`src/worldcup_bot/assets/crown.png`, 128×128 RGBA, Apache-2.0). Loaded at module init via `importlib.resources.files("worldcup_bot") / "assets" / "crown.png"`, cached in `_CROWN_IMG`. Scaled to 56×56 px and alpha-composited; position number drawn in the same 22 px gap below crown. `_draw_crown` kept as fallback when `_CROWN_IMG is None`. Updated `test_podium_image_edge_cases.py::test_draw_crown_exception_mid_render_returns_none` to also patch `_CROWN_IMG = None`. 5 new tests in `TestCrownAsset`. Decision doc: `.squad/decisions/inbox/kante-crown-asset.md`. **No commit** — David handles.
 
 ### ✅ Podium Image Feature (IMPLEMENTED + APPROVED, committed 4343ddb)
 New module `src/worldcup_bot/bot/podium_image.py` — `render_podium(participants, settings) → BytesIO | None`. Sync function; caller uses `asyncio.to_thread`. 720×400 dark-navy canvas; 180px circular-cropped tiles; programmatic gold crown (single filled polygon + jewel circles, no assets); position number drawn between crown and tile; initials placeholder when photo missing. Fallback chain in `_send_ranking_with_top3_photos`: podium → album → text. Added autouse `_stub_render_podium` to `TestCmdActual`, `TestCmdGeneral`, and `TestSendRankingWithTop3Photos` (album tests stay clean). 17 new tests; 1968 total + 45 edge-case tests by Buffon (all pass). Pirlo reviewed and approved. Committed to main. Decision docs merged to `decisions.md`.
