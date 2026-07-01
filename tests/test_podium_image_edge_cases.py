@@ -353,10 +353,15 @@ class TestTotalFailureVariants:
         assert result is None
 
     def test_draw_crown_exception_mid_render_returns_none(self):
-        """ValueError raised inside _draw_crown is caught → render_podium returns None."""
-        with patch("worldcup_bot.bot.podium_image._draw_crown", side_effect=ValueError("geometry")):
-            with patch("worldcup_bot.bot.podium_image.requests.get", side_effect=OSError()):
-                result = render_podium([_p("u", "Test", 1)], _settings())
+        """ValueError raised inside _draw_crown is caught → render_podium returns None.
+
+        _CROWN_IMG must be patched to None so the fallback drawn-crown path is taken
+        (when the real asset is loaded, _draw_crown is never called).
+        """
+        with patch("worldcup_bot.bot.podium_image._CROWN_IMG", None):
+            with patch("worldcup_bot.bot.podium_image._draw_crown", side_effect=ValueError("geometry")):
+                with patch("worldcup_bot.bot.podium_image.requests.get", side_effect=OSError()):
+                    result = render_podium([_p("u", "Test", 1)], _settings())
         assert result is None
 
     def test_canvas_save_raises_returns_none(self):

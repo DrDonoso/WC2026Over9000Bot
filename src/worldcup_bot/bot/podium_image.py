@@ -1,8 +1,8 @@
 """Podium image renderer for ranking commands.
 
 Generates a single composite PNG showing the top-3 ranked participants
-on a classic podium layout with circular photo tiles, programmatically-drawn
-gold crowns, and tie-aware position numbers.
+on a classic podium layout with circular photo tiles, a real crown asset
+(Noto Emoji crown, Apache-2.0) and tie-aware position numbers.
 
 Usage (from an async handler)::
 
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import logging
+from importlib.resources import files
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
@@ -42,10 +43,11 @@ _COL_X: dict[int, list[int]] = {
     3: [180, 360, 540],
 }
 
-# Crown geometry (height, gap below crown where position number is drawn)
-_CROWN_H = 40
-_CROWN_GAP = 22          # gap between crown bottom and tile top; pos label drawn here
-_CROWN_HW = 40           # half-width of crown
+# Crown geometry
+_CROWN_ASSET_SIZE = 56   # target size (px) when scaling the emoji crown asset
+_CROWN_H = 40            # height of the fallback drawn crown
+_CROWN_GAP = 22          # gap between crown bottom and tile top; position label drawn here
+_CROWN_HW = 40           # half-width of fallback drawn crown
 
 # Colors
 _BG = (22, 27, 34)
@@ -60,6 +62,25 @@ _PLACEHOLDER_PALETTE = [
     (46, 139, 87),
     (178, 34, 34),
 ]
+
+# ── Crown asset loader ────────────────────────────────────────────────────────
+
+
+def _load_crown_asset() -> Image.Image | None:
+    """Load crown.png from the worldcup_bot package assets.
+
+    Uses ``importlib.resources.files`` so it works from both a source checkout
+    and a pip-installed (Docker) package.  Returns ``None`` on any failure so
+    the hand-drawn crown is used as fallback.
+    """
+    try:
+        resource = files("worldcup_bot") / "assets" / "crown.png"
+        return Image.open(io.BytesIO(resource.read_bytes())).convert("RGBA")
+    except Exception:
+        return None
+
+
+_CROWN_IMG: Image.Image | None = _load_crown_asset()
 
 # ── Font loading ──────────────────────────────────────────────────────────────
 
@@ -127,37 +148,46 @@ def _placeholder_tile(display_name: str, diameter: int, color_idx: int) -> Image
     return img
 
 
+def _paste_crown_asset(canvas: Image.Image, cx: int, tile_y: int) -> None:
+    """Scale and alpha-composite the real crown asset above the tile.
+
+    The crown is centered at *cx* with its bottom edge ``_CROWN_GAP`` px above
+    *tile_y* (the tile's top edge), leaving room for the position-number label.
+    """
+    crown = _CROWN_IMG.resize((_CROWN_ASSET_SIZE, _CROWN_ASSET_SIZE), Image.LANCZOS)
+    x = cx - _CROWN_ASSET_SIZE // 2
+    y = tile_y - _CROWN_GAP - _CROWN_ASSET_SIZE
+    canvas.paste(crown, (x, y), crown)
+
+
 def _draw_crown(draw: ImageDraw.ImageDraw, cx: int, y_top: int) -> None:
-    """Draw a filled gold crown whose top-left bounding box corner is (cx-HW, y_top).
+    """Fallback: draw a filled gold crown programmatically (no asset required).
 
     The crown is a single filled polygon (band + 3 upward spikes) with small
-    jewel circles at the spike tips.  No external assets are used.
+    jewel circles at the spike tips.
     """
     hw = _CROWN_HW
     h = _CROWN_H
-    # Key y-levels (measured down from y_top)
-    y0 = y_top                   # center spike tip (highest point)
-    y1 = y_top + h * 2 // 5     # left / right spike tips
-    y2 = y_top + h * 3 // 5     # top of band / base of all spikes
-    y3 = y_top + h               # bottom of band
+    y0 = y_top
+    y1 = y_top + h * 2 // 5
+    y2 = y_top + h * 3 // 5
+    y3 = y_top + h
 
-    # Single outline polygon: band + 3 spikes
     pts = [
-        (cx - hw, y3),           # bottom-left of band
-        (cx - hw, y2),           # top-left of band
-        (cx - hw // 2, y1),      # left spike tip
-        (cx - hw // 4, y2),      # left spike right base
-        (cx - hw // 5, y2),      # center spike left base
-        (cx, y0),                # center spike tip
-        (cx + hw // 5, y2),      # center spike right base
-        (cx + hw // 4, y2),      # right spike left base
-        (cx + hw // 2, y1),      # right spike tip
-        (cx + hw, y2),           # top-right of band
-        (cx + hw, y3),           # bottom-right of band
+        (cx - hw, y3),
+        (cx - hw, y2),
+        (cx - hw // 2, y1),
+        (cx - hw // 4, y2),
+        (cx - hw // 5, y2),
+        (cx, y0),
+        (cx + hw // 5, y2),
+        (cx + hw // 4, y2),
+        (cx + hw // 2, y1),
+        (cx + hw, y2),
+        (cx + hw, y3),
     ]
     draw.polygon(pts, fill=_CROWN_GOLD, outline=_CROWN_DARK)
 
-    # Jewels at spike tips
     for jx, jy, r in [
         (cx - hw // 2, y1, 3),
         (cx, y0, 4),
@@ -201,9 +231,9 @@ def _render_podium(participants: list[dict], settings) -> io.BytesIO:
     col_xs = _COL_X.get(n, _COL_X[3])
 
     # Classic podium column assignment for 3 participants:
-    #   left column  → index 1 (2nd place)
+    #   left column   → index 1 (2nd place)
     #   center column → index 0 (1st place, raised)
-    #   right column → index 2 (3rd place)
+    #   right column  → index 2 (3rd place)
     # For ties (e.g. 1,1,3): tied participants share the same tile height.
     # For n<3: keep input order left-to-right.
     display_order = [1, 0, 2] if n == 3 else list(range(n))
@@ -221,9 +251,12 @@ def _render_podium(participants: list[dict], settings) -> io.BytesIO:
         tile_x = cx - _TILE_R
         tile_y = tile_cy - _TILE_R
 
-        # Crown drawn above tile
-        crown_top = tile_y - _CROWN_H - _CROWN_GAP
-        _draw_crown(draw, cx, crown_top)
+        # Crown above tile: asset if available, drawn fallback otherwise
+        if _CROWN_IMG is not None:
+            _paste_crown_asset(canvas, cx, tile_y)
+        else:
+            crown_top = tile_y - _CROWN_H - _CROWN_GAP
+            _draw_crown(draw, cx, crown_top)
 
         # Position number centered in the gap between crown bottom and tile top
         pos_label_y = tile_y - _CROWN_GAP // 2

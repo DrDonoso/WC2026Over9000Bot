@@ -30,5 +30,11 @@ test = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+worldcup_bot = ["assets/*.png", "assets/*.md"]

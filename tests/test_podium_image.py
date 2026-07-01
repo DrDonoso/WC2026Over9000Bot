@@ -8,7 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
-from worldcup_bot.bot.podium_image import render_podium, _render_podium
+import worldcup_bot.bot.podium_image as _pmod
+from worldcup_bot.bot.podium_image import render_podium, _render_podium, _draw_crown, _CROWN_IMG
 from worldcup_bot.config import Settings
 
 
@@ -201,3 +202,62 @@ class TestRenderPodiumSmoke:
 
         img = Image.open(result)
         assert img.size == (720, 400)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Crown asset and fallback
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCrownAsset:
+    def test_crown_asset_loaded_at_module_level(self):
+        """_CROWN_IMG must be loaded (not None) when the asset file is present."""
+        assert _CROWN_IMG is not None
+        assert _CROWN_IMG.mode == "RGBA"
+
+    def test_fallback_drawn_crown_when_asset_missing(self):
+        """When _CROWN_IMG is patched to None the drawn crown is used and render succeeds."""
+        participants = [_p("u1", "Alpha", 1), _p("u2", "Beta", 2), _p("u3", "Gamma", 3)]
+        with patch("worldcup_bot.bot.podium_image._CROWN_IMG", None):
+            with patch(
+                "worldcup_bot.bot.podium_image.requests.get",
+                return_value=_photo_resp(_tiny_png()),
+            ):
+                result = render_podium(participants, _settings())
+
+        assert result is not None
+        img = Image.open(result)
+        assert img.format == "PNG"
+        assert img.size == (720, 400)
+
+    def test_fallback_drawn_crown_tie_case(self):
+        """Drawn crown fallback handles ties (1,1,3) without crashing."""
+        participants = [_p("u1", "David", 1), _p("u2", "Pilar", 1), _p("u3", "Miquel", 3)]
+        with patch("worldcup_bot.bot.podium_image._CROWN_IMG", None):
+            with patch(
+                "worldcup_bot.bot.podium_image.requests.get",
+                return_value=_photo_resp(_tiny_png()),
+            ):
+                result = render_podium(participants, _settings())
+
+        assert result is not None
+
+    def test_draw_crown_produces_polygon_on_canvas(self):
+        """_draw_crown (fallback) draws something — the canvas is mutated."""
+        from PIL import ImageDraw as _ID
+        canvas = Image.new("RGB", (200, 200), (0, 0, 0))
+        draw = _ID.Draw(canvas)
+        _draw_crown(draw, cx=100, y_top=20)
+        # At least one pixel in the crown area should be gold (non-black)
+        pixels = list(canvas.get_flattened_data() if hasattr(canvas, "get_flattened_data") else canvas.getdata())
+        non_black = [p for p in pixels if p != (0, 0, 0)]
+        assert len(non_black) > 0
+
+    def test_asset_crown_pastes_non_background_pixels(self):
+        """With the real crown asset, crown pixels appear on the canvas."""
+        from worldcup_bot.bot.podium_image import _paste_crown_asset, _BG
+        canvas = Image.new("RGB", (_pmod._CANVAS_W, _pmod._CANVAS_H), _BG)
+        _paste_crown_asset(canvas, cx=360, tile_y=115)
+        pixels = list(canvas.get_flattened_data() if hasattr(canvas, "get_flattened_data") else canvas.getdata())
+        non_bg = [p for p in pixels if p != _BG]
+        assert len(non_bg) > 0
