@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260701.02] - 2026-07-01
+
+- feat(porra): podium image for top-3 rankings with crowns
+
+
 ## [20260701] - 2026-07-01
 
 - fix(porra): standard competition ranking for tied points
