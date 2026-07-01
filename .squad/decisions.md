@@ -2349,6 +2349,156 @@ Low — graceful fallback to text if anything fails. Effort estimate: ~1 working
 
 ---
 
+# Decision: Rich Image — Country-Themed Winners (2026-07-01 SHIPPED)
+
+**Date:** 2026-07-01  
+**Author:** Kanté (Backend)  
+**Status:** ✅ SHIPPED (commit 47b7e41)
+
+---
+
+## Summary
+
+Extended the daily `rich_image` feature: each day's image now incorporates opulent, country-themed luxury props inspired by yesterday's football-day winners — while the day-over-day wealth escalation continues unchanged.
+
+---
+
+## New / Changed Signatures
+
+### `RICH_THEME_PROMPT` (module-level constant in `rich_image.py`)
+A tunable prompt string instructing the chat model to return one opulent/funny/specific luxury visual element per winning country — comma-separated, no extra text. Bakes in David's vibe examples: Norway→golden Viking helmet; France→jewel-encrusted baguette; Mexico→gourmet nachos with truffle; England→tea in a solid gold cup; Belgium→a parliament building they bought outright; USA→surrounded by piles of US dollar bills.
+
+### `generate_wealth_themes`
+```python
+async def generate_wealth_themes(
+    api_key: str,
+    base_url: str,
+    model: str,
+    winners: list[str],
+    *,
+    _client: object | None = None,   # inject for tests
+) -> str
+```
+- Returns `""` immediately when `winners` is empty.
+- Calls `client.chat.completions.create` with `RICH_THEME_PROMPT + " " + ", ".join(winners)`.
+- **Best-effort / never raises**: on any exception returns `", ".join(f"opulent luxury {c}-themed elements" for c in winners)`.
+- `_client` injectable (same pattern as `generate_rich_caption`).
+
+### `build_rich_prompt`
+```python
+def build_rich_prompt(
+    history: str = "",
+    anchor: bool = False,
+    themes: str = "",   # NEW — comma-sep opulent props
+    pose: str = "",     # NEW — random activity
+) -> str
+```
+When `themes` is non-empty appends:  
+`" ALSO incorporate a few of these opulent, country-themed luxury elements into the scene, worked in tastefully (inspired by yesterday's winning countries): {themes}."`  
+
+When `pose` is non-empty appends:  
+`" In THIS image, show the person {pose}. VARY the pose and activity each time — do NOT default to sitting and toasting with champagne."`  
+
+Insertion order: `history clause → themes clause → pose clause → anchor clause`.
+
+### `POSE_ACTIVITIES` (module-level list, 14 entries)
+Covering: dancing, standing on red carpet, lounging on a chaise longue, spa massage, partying with a crowd, napping in opulent bed, embracing a companion, walking a red carpet, posing with entourage, relaxing in infinity pool, being served by staff, laughing mid-celebration, striding through a luxury penthouse, being pampered at a private salon.
+
+### `run_rich_iteration`
+```python
+async def run_rich_iteration(
+    settings: Settings,
+    *,
+    _client: object | None = None,
+    _caption_client: object | None = None,
+    _data_dir: str = "/app/data",
+    _now: datetime | None = None,
+    winners: list[str] | None = None,   # NEW
+) -> tuple[str, int, str]
+```
+- Computes themes: calls `generate_wealth_themes(... _client=_caption_client)` when `winners` is truthy and all three chat-model settings are non-empty; otherwise `themes = ""`.
+- Picks random pose from `POSE_ACTIVITIES`.
+- Passes `themes` and `pose` to `build_rich_prompt`.
+- Does NOT pass `themes` to `generate_rich_caption` (caption uses original rude tone only).
+- Logs `winners` and `themes`.
+
+---
+
+## Winners → Themes → Pose Flow
+
+```
+rich_image_job
+    │
+    ├─ make_client(settings)
+    │       ↓
+    │   client.get_football_day_matches(timezone, day_offset=-1, anchor_hour=...)
+    │       ↓
+    │   [FINISHED matches only; HOME_TEAM / AWAY_TEAM winners; DRAW skipped]
+    │       ↓
+    │   winners = ["Norway", "France", ...]   (or [] on error)
+    │
+    └─ run_rich_iteration(settings, winners=winners)
+            │
+            ├─ generate_wealth_themes(api_key, base_url, model, winners, _client=_caption_client)
+            │       → "golden Viking helmet, jewel-encrusted baguette"  (or fallback)
+            │
+            ├─ random.choice(POSE_ACTIVITIES)
+            │       → "dancing with champagne"
+            │
+            ├─ build_rich_prompt(history, anchor, themes=..., pose=...)
+            │       → image-edit prompt with themes + pose clauses woven in
+            │
+            ├─ edit_rich_image(... prompt=prompt ...)
+            │
+            └─ generate_rich_caption(...)
+                    → caption (themes NOT mentioned; original rude tone only)
+```
+
+Error-handling at every level:
+- `get_football_day_matches` failure → `winners = []`, job continues.
+- `generate_wealth_themes` exception → fallback string, never propagates.
+- `generate_rich_caption` exception → default fallback caption, never propagates.
+
+---
+
+## Refinements Applied (2026-07-01, live-test feedback)
+
+### 1. Too Much Gold → Varied Luxury
+
+`RICH_THEME_PROMPT` now explicitly instructs the model NOT to default to gold/golden for every element and lists varied luxury materials: diamonds, platinum, marble, silk, crystal, caviar, designer furs, exotic woods, haute couture, precious jewels, rare materials. Examples reworked:
+- Norway → a diamond-encrusted Viking longship
+- France → a caviar-topped artisan baguette on a marble tray
+- Mexico → a crystal platter of truffle nachos
+- England → a silk-lined tea set with hand-painted porcelain cups
+- Belgium → a private parliament building filled with Belgian chocolate sculptures
+- USA → surrounded by piles of platinum-banded US dollar bills
+
+### 2. Repeated Pose → Random Pose/Activity
+
+`POSE_ACTIVITIES` list added with 14 varied entries. `build_rich_prompt` gained `pose` parameter. `run_rich_iteration` picks with `random.choice(POSE_ACTIVITIES)` each iteration. `RICH_EDIT_PROMPT` softened to encourage variation.
+
+### 3. Caption Reverted (Themes OUT of Caption)
+
+The rude/chulesco caption (`RICH_CAPTION_PROMPT`) is UNCHANGED and does NOT mention themes. Themes appear only in the image prompt (`build_rich_prompt`).
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/ai/rich_image.py` | `RICH_THEME_PROMPT`, `POSE_ACTIVITIES` consts; `generate_wealth_themes` func; extended `build_rich_prompt`, `run_rich_iteration` |
+| `src/worldcup_bot/__main__.py` | `rich_image_job`: fetch yesterday's winners before calling `run_rich_iteration(settings, winners=winners)` |
+| `tests/test_rich_image.py` | 53 new tests (35 initial + 18 refinements) |
+
+---
+
+## Test Count
+
+**2071 passed** (+53 new tests, up from 2018). All green. Live-tested by coordinator: 2 runs of 5 iterations each sent to Telegram chat 3041850; David reviewed and approved.
+
+---
+
 # Decision: Podium Image Feature Implementation
 
 **Author:** Kanté (backend)  
