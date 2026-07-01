@@ -7,6 +7,10 @@
 
 ## Recent Sessions (2026-06-26 onwards)
 
+### 2026-07-01 — Schedule-Live Seeding Fix — APPROVED
+
+**Review gate:** 6 concurrency/correctness checks (double-announce, false-disallowed, window consistency, over-inclusion, null-safety, no regression). All PASS.
+
 ### 2026-06-26 — TVE 📺 Label Fix — Review Gate (APPROVED)
 
 **Session:** TVE daily-update fix, kante-2 implementation  

@@ -1,3 +1,278 @@
+# Decision: Schedule-Live Decoupling — Live Match / Goal Notification Bug Fix (2026-07-01 SHIPPED)
+
+**Date:** 2026-07-01
+**Authors:** Kanté (Backend Implementation), Pirlo (Lead Review)
+**Status:** ✅ SHIPPED (commit b2e9a71)
+
+---
+
+## MERGED DECISIONS (2 files → 1 entry)
+
+This entry consolidates the schedule-live seeding fix:
+1. kante-live-seeding-fix.md — Implementation details
+2. pirlo-live-seeding-review.md — Lead review (APPROVED)
+
+---
+
+# Decision: Schedule-Live Decoupling — Live Match / Goal Notification Bug Fix
+
+**Author:** Kanté  
+**Date:** 2026-07-01  
+**Status:** Implemented, awaiting commit
+
+---
+
+## Root Cause
+
+football-data.org free tier updates live match status/scores with a **~1 h delay**. During that window a match that is already playing is still reported as `TIMED`. The entire goal pipeline was gated behind `IN_PLAY/PAUSED`:
+
+- `get_live_matches()` → `[m for m in ... if m.status in ("IN_PLAY","PAUSED")]`
+- `poll_goals_job` `relevant` filter → only `IN_PLAY/PAUSED` or `FINISHED+in scores`
+- `poll_thread_goals_job` calls `get_live_matches()` and only processes seeded matches
+
+Net effect: during the ~1 h API lag, nothing seeds `live_scores`, the Reddit real-time poller never looks at the thread, and `/endirecto` returns "No hay partidos en directo". Goals are announced ~1 h late when the API finally catches up.
+
+---
+
+## The Fix
+
+### 1. Schedule-Live Predicate
+
+New function `match_is_schedule_live(match: Match, now_utc: datetime) -> bool` added to **`api/client.py`** (module-level, importable with no circular-import risk).
+
+Returns `True` when **all** of:
+- `match.status` not in `_TERMINAL_STATUSES = {"FINISHED","POSTPONED","SUSPENDED","CANCELLED","AWARDED"}`
+- `kickoff <= now_utc` (match has started per schedule)
+- `now_utc - kickoff <= MATCH_LIVE_WINDOW` (4 h — same ceiling as `MATCH_OVER_AGE` in `__main__.py`)
+
+New constants also in `api/client.py`:
+```python
+MATCH_LIVE_WINDOW = timedelta(hours=4)
+_TERMINAL_STATUSES = frozenset({"FINISHED", "POSTPONED", "SUSPENDED", "CANCELLED", "AWARDED"})
+```
+
+**Cross-reference:** `MATCH_LIVE_WINDOW` (4 h) must stay in sync with `MATCH_OVER_AGE` (4 h) in `__main__.py`. Both define the same ceiling for "could still be live".
+
+### 2. `get_live_matches()` Fix (`api/client.py`)
+
+```python
+def get_live_matches(self) -> list[Match]:
+    matches = self.get_all_matches()
+    now_utc = datetime.now(timezone.utc)
+    return [
+        m for m in matches
+        if m.status in ("IN_PLAY", "PAUSED") or match_is_schedule_live(m, now_utc)
+    ]
+```
+
+Fixes `/endirecto` (cmd_en_directo) and the standings live-highlight (cmd_clasificacion) with no changes to handlers.
+
+### 3. `poll_goals_job` Relevant Filter (`__main__.py`)
+
+Added `or match_is_schedule_live(m, now_utc)` to the `relevant` filter:
+
+```python
+relevant = [
+    m for m in all_matches
+    if not _match_is_over(m, now_utc)
+    and not m.in_penalty_shootout
+    and (
+        m.status in ("IN_PLAY", "PAUSED")
+        or (m.status == "FINISHED" and str(m.id) in scores)
+        or match_is_schedule_live(m, now_utc)   # NEW: catches API-lagged TIMED
+    )
+]
+```
+
+**Seeding TIMED at 0-0:** When a TIMED match has null API scores (`home_score=None`, `away_score=None`):
+- `curr_home = curr_away = 0`
+- `reconcile(None, None, 0, 0)` → `([], {"home":0,"away":0}, {"home":0,"away":0})`
+- `stored is None` → enters seeding branch
+- `curr_home > 0 or curr_away > 0` → `False` → **no catch-up delta, no announce**
+- Seeds `live_scores[match_key] = {"home":0,"away":0,"status":"TIMED"}` ✓
+
+**Invariants preserved:**
+- `goal_lock` atomic claim: unchanged
+- `reconcile()`/per-source `seen` dedup: unchanged
+- No-double-announce guarantee: seed is at 0-0; subsequent delta uses same reconcile path
+- Disallowed/VAR handling: unchanged (only triggered when same source's own value drops)
+- POSTPONED/SUSPENDED eviction: executed before `relevant` filter, evicts even newly-seeded TIMED entries
+- Over-match (4h) prune: still runs first; TIMED match >4h is evicted AND not schedule-live
+
+### 4. Reddit Thread Matching (`reddit/scanner.py`)
+
+**Findings:** `WC_TEAM_ALIASES` already handled the key Congo DR variants:
+- `"dr congo"` → `"congo dr"` ✓
+- `"d r congo"` → `"congo dr"` (D.R.Congo after dot→space) ✓
+- `"democratic republic of congo"` → `"congo dr"` ✓
+- `"dem rep congo"` → `"congo dr"` ✓
+
+**Gap found:** `"democratic republic of the congo"` (official UN name, includes "the") was missing.
+
+**Fix:** Added one alias:
+```python
+"democratic republic of the congo": "congo dr",  # official UN name variant
+```
+
+The `_normalize_team` / `_teams_match` / `_find_matching_fixture` / `scan_live_matches` pipeline was already robust. No structural changes needed.
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/api/client.py` | Added `MATCH_LIVE_WINDOW`, `_TERMINAL_STATUSES`, `match_is_schedule_live()`; updated `get_live_matches()` |
+| `src/worldcup_bot/__main__.py` | Imported `match_is_schedule_live`; extended `relevant` filter in `poll_goals_job` |
+| `src/worldcup_bot/reddit/scanner.py` | Added `"democratic republic of the congo"` alias |
+| `tests/test_api_client.py` | Added `TestScheduleLivePredicate` (13 tests) + `TestGetLiveMatchesScheduleLive` (5 tests) |
+| `tests/test_poll_goals_job.py` | Added `TestScheduleLiveSeeding` (4 tests); fixed `test_no_relevant_matches_returns_early` (future kickoff) |
+| `tests/test_poll_thread_goals_job.py` | Added `TestPollThreadGoalsJobScheduleLive` (2 tests) |
+| `tests/test_handlers.py` | Added `TestCmdEnDirectoScheduleLive` (2 tests) |
+| `tests/test_reddit_scanner.py` | Added `TestCongoDRAlias` (6 tests) |
+
+**Full suite: 2102 passed, 0 failures.**
+
+
+---
+
+## Lead Review — Pirlo (APPROVED)
+
+# Review: Schedule-Live Seeding Fix (Goal Pipeline)
+
+**Reviewer:** Pirlo (Lead)  
+**Date:** 2026-07-01  
+**Scope:** `api/client.py` (new predicate + get_live_matches), `__main__.py` (relevant filter), `reddit/scanner.py` (alias)  
+**Test suite:** 2102 passed ✅  
+
+---
+
+## Checklist
+
+### 1. No Double Announce ✅ PASS
+
+Traced both orderings through `reconcile()` + `goal_lock`:
+
+**Thread-first-then-API-catchup (primary real-world path):**
+
+1. `poll_goals_job` seeds match at 0-0 (API scores are None → 0):  
+   `reconcile(None, None, 0, 0)` → `([], {0,0}, {0,0})` — seeds `scores[key]={0,0}`, no announce.  
+   Sets `seen_api[key] = {0,0}`.
+
+2. `poll_thread_goals_job` reads 0-1 from Reddit thread:  
+   `reconcile(None, {0,0}, 0, 1)` — seen=None, announced≠None, `_ahead({0,1},{0,0})` → True → emits ONE catchup delta.  
+   Claims `scores[key] = {0,1}` under `goal_lock`. Announces. ✓
+
+3. `poll_goals_job` ~1h later, API now reports 0-1:  
+   `reconcile({0,0}, {0,1}, 0, 1)` — new={0,1} != seen={0,0} → proceed.  
+   `_ahead({0,1}, {0,1})` → False (equal, not strictly ahead).  
+   Step 5: `([], {0,1}, {0,1})`. **No delta, no announce.** ✓
+
+**API-first (rare — API catches up before thread):**
+
+1. API reports 1-0: `reconcile({0,0}, {0,0}, 1, 0)` → `_ahead({1,0},{0,0})` → True → goal delta. Claims `scores[key]={1,0}`. Announces. ✓
+
+2. Thread later reads 1-0: `reconcile(None, {1,0}, 1, 0)` — seen=None, `_ahead({1,0},{1,0})` → False → `([], {1,0}, {1,0})`. **No delta.** ✓
+
+The `goal_lock` ensures the "read announced → reconcile → claim" is atomic between
+both pollers. The per-source `seen` baselines prevent a lagging source from interpreting
+the other source's already-announced delta as new.
+
+### 2. No False Disallowed ✅ PASS
+
+The disallowed path in `reconcile` (line 243–266) only fires when:
+- `_ahead(ann, new)` (announced > new) — announced is strictly higher
+- AND `_ahead(seen, new)` (source's own prior > new) — this source itself dropped
+
+With a 0-0 seed baseline:
+- Thread reads 0-1: `_ahead({0,0}, {0,1})` → False (ann not ahead of new) → disallowed branch NEVER entered.
+- API reads 0-1 after thread claimed {0,1}: `_ahead({0,1}, {0,1})` → False → not entered.
+
+The only way to trigger disallowed is if the SAME source's own `seen` was higher than
+its current reading — which is genuine VAR/goal reversal. The 0-0 seed cannot produce
+a false disallowed because any forward movement from 0-0 is strictly "ahead" by definition.
+
+### 3. Window Consistency ✅ PASS — No Oscillation
+
+| Elapsed | `match_is_schedule_live` | `_match_is_over` | Net status |
+|---------|--------------------------|-------------------|-----------|
+| < 4h    | True (`<=`)              | False (`>`)       | Live ✓    |
+| = 4h    | True (`<=`)              | False (`>`)       | Live ✓    |
+| > 4h    | False                    | True              | Evicted ✓ |
+
+The operators are complementary: `<=` (schedule-live) and `>` (over). At the exact
+boundary (4h), the match is still considered live. At 4h+ε it transitions to "over"
+and is both evicted AND excluded from `relevant`. No gap, no overlap, no thrash.
+
+Both constants are 4h: `MATCH_LIVE_WINDOW = timedelta(hours=4)` in `client.py` and
+`MATCH_OVER_AGE = timedelta(hours=4)` in `__main__.py`. The comment on `MATCH_LIVE_WINDOW`
+explicitly notes "Must match MATCH_OVER_AGE in __main__.py".
+
+### 4. Over-Inclusion Prevention ✅ PASS
+
+`match_is_schedule_live` returns False when:
+- Status is FINISHED/POSTPONED/SUSPENDED/CANCELLED/AWARDED (checked first, line 48)
+- Kickoff is in the future (`elapsed < 0`)
+- Kickoff was >4h ago (`elapsed > MATCH_LIVE_WINDOW`)
+- `utc_date` parsing fails (returns False on any Exception)
+
+POSTPONED/SUSPENDED eviction (lines 794-808) runs BEFORE the `relevant` filter and
+evicts seeded entries. A re-seeding is impossible because `match_is_schedule_live`
+returns False for terminal statuses → the match is NOT in `relevant`.
+
+Order of operations in `poll_goals_job`:
+1. Over-match eviction (>4h)
+2. POSTPONED/SUSPENDED eviction  
+3. Build `relevant` list (won't include evicted or terminal matches)
+
+No stale match can re-seed after eviction. ✓
+
+### 5. Null Scores ✅ PASS
+
+```python
+curr_home = int(match.home_score) if match.home_score is not None else 0
+curr_away = int(match.away_score) if match.away_score is not None else 0
+```
+
+None → 0 (no crash). Then `reconcile(None, None, 0, 0)` → seeds at 0-0, announces
+nothing. Subsequent ticks with still-null scores: `reconcile({0,0}, {0,0}, 0, 0)` →
+`new == seen` → no-op (step 2). Correct and safe.
+
+### 6. No Regression ✅ PASS
+
+- Normal IN_PLAY matches: still hit the `m.status in ("IN_PLAY", "PAUSED")` branch
+  first — unchanged logic path.
+- VAR/disallowed: reconcile logic untouched; disallowed tests still pass.
+- FINISHED catch-up: `m.status == "FINISHED" and str(m.id) in scores` branch untouched.
+- FT recap (`poll_finished_job`): uses its own `finished_announced` set — completely
+  independent of this change.
+- `get_live_matches()`: OR-expanded, not replaced. IN_PLAY/PAUSED matches are still
+  included unconditionally.
+
+Full suite: **2102 passed**, 5 warnings (pre-existing deprecation).
+
+---
+
+## Additional Notes
+
+- The Congo alias addition (`"democratic republic of the congo": "congo dr"`) is a
+  trivial dictionary entry with 6 passing tests. No risk.
+- The `match_is_schedule_live` function is conservative by design: it returns False on
+  any parsing error, uses a try/except, and is gated by terminal-status exclusion. It
+  cannot widen the pipeline dangerously even with malformed API data.
+
+---
+
+## VERDICT: ✅ APPROVE
+
+The fix is sound. The concurrency guarantees (no double announce, no false disallowed)
+are preserved by the unchanged `reconcile` + `goal_lock` mechanism — the change only
+widens WHICH matches enter the pipeline, not HOW goals are detected/claimed. The window
+arithmetic is tight with no oscillation risk. 2102 tests pass. Ship it.
+
+
+---
+
 # Decision: Podium Drawn-Base Layout Rewrite (2026-07-01 SHIPPED)
 
 **Date:** 2026-07-01  
@@ -2586,4 +2861,5 @@ Entirely drawn with Pillow `ImageDraw.polygon` + `ImageDraw.ellipse`:
 1. **Serial photo fetches:** Only 3 requests, acceptable. Future `ThreadPoolExecutor` optimization not needed now.
 2. **Font path cached at import:** Fine — matplotlib's font cache is fast. Fallback covers edge cases.
 3. **`r.display_name` assumption:** Correct — `UserRankEntry` includes it.
+
 
