@@ -5,6 +5,16 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260701.04] - 2026-07-01
+
+- kante-podium-drawn-base.md: Drawn 3-block podium layout (gold/silver/bronze, tie-aware, crown asset)
+- pirlo-podium-drawn-review.md: Lead review (APPROVED)
+- decisions.md: Prepended merged podium decision
+- agents/pirlo/history.md: Added note on podium-drawn-base review
+- Deleted inbox files
+- feat(porra): draw podium base under photos, crown worn on head
+
+
 ## [20260701.03] - 2026-07-01
 
 - feat(porra): use bundled crown image for podium
