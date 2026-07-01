@@ -3373,3 +3373,71 @@ class TestCmdHoy:
         assert 2 not in call_offsets, "Should have stopped at offset 1, not queried offset 2"
         assert 0 in call_offsets
         assert 1 in call_offsets
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_en_directo — schedule-live TIMED match now visible
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCmdEnDirectoScheduleLive:
+    """cmd_en_directo must show a schedule-live TIMED match (get_live_matches fix)."""
+
+    def _make_timed_match(self) -> "Match":
+        from datetime import datetime, timedelta, timezone
+        from worldcup_bot.api.models import Match
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        return Match(
+            id=101,
+            utc_date=utc_date,
+            status="TIMED",
+            stage="GROUP_STAGE",
+            group="GROUP_A",
+            home_tla="ENG",
+            away_tla="COD",
+            home_name="England",
+            away_name="Congo DR",
+            home_score=None,
+            away_score=None,
+            winner=None,
+        )
+
+    async def test_schedule_live_timed_match_shows_reply(self, fake_settings):
+        """get_live_matches returns a TIMED schedule-live match → cmd_en_directo replies (not empty)."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        # Simulate the fixed get_live_matches returning a TIMED schedule-live match
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = [self._make_timed_match()]
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_thread_permalink = MagicMock(return_value=None)
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+        context.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client),
+            patch("worldcup_bot.bot.handlers.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.bot.handlers.ai_enabled", return_value=False),
+        ):
+            await cmd_en_directo(update, context)
+
+        # Must reply with match info — not the "no hay partidos" message
+        update.message.reply_text.assert_called()
+        text = update.message.reply_text.call_args_list[0][0][0]
+        assert "No hay partidos" not in text
+
+    async def test_empty_live_returns_no_partidos(self, fake_settings):
+        """When get_live_matches is empty, cmd_en_directo says 'no hay partidos'."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        mock_client = MagicMock()
+        mock_client.get_live_matches.return_value = []
+
+        with patch("worldcup_bot.bot.handlers.make_client", return_value=mock_client):
+            await cmd_en_directo(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "No hay partidos" in text

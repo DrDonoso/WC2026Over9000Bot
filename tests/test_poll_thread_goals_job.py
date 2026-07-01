@@ -1587,3 +1587,119 @@ class TestPostFTEvictionDedup:
 
         ctx.bot.send_message.assert_not_called()
         mock_save.assert_not_called()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Schedule-live matches: thread poller processes seeded TIMED match
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPollThreadGoalsJobScheduleLive:
+    """poll_thread_goals_job must handle seeded schedule-live (TIMED) matches."""
+
+    @pytest.mark.asyncio
+    async def test_seeded_timed_match_processes_goal_from_thread(self, tmp_path):
+        """
+        A TIMED schedule-live match that was already seeded at 0-0 (by poll_goals_job)
+        should be processed by poll_thread_goals_job when the Reddit thread shows 1-0.
+
+        This is the core real-time flow:
+        1. poll_goals_job seeds the TIMED match at 0-0 (new schedule-live path).
+        2. get_live_matches() now includes the TIMED match (fixed).
+        3. poll_thread_goals_job finds the seeded entry and announces the goal.
+        """
+        settings = _make_settings(tmp_path)
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        match = Match(
+            id=99,
+            utc_date=utc_date,
+            status="TIMED",
+            stage="GROUP_STAGE",
+            group="GROUP_A",
+            home_tla="ENG",
+            away_tla="COD",
+            home_name="England",
+            away_name="Congo DR",
+            home_score=None,
+            away_score=None,
+            winner=None,
+        )
+
+        # Match is seeded at 0-0 (done by poll_goals_job on the schedule-live path)
+        live_scores = {"99": {"home": 0, "away": 0, "status": "TIMED"}}
+        ctx = _make_context(settings, live_scores=live_scores, seen_thread={"99": {"home": 0, "away": 0}})
+
+        event = _make_goal_event(
+            scorer="Harry Kane", scoring_team="England",
+            home_score=1, away_score=0, minute_text="12",
+            minute_sort=12.0,
+            home_team="England", away_team="Congo DR",
+        )
+        result = _make_thread_result("ENG", "COD", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            # get_live_matches returns the TIMED schedule-live match (fixed behaviour)
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        # Goal announced in real time
+        ctx.bot.send_message.assert_called_once()
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "⚽" in text
+
+        # Shared state updated
+        assert live_scores["99"]["home"] == 1
+
+    @pytest.mark.asyncio
+    async def test_unseeded_timed_match_still_skipped(self, tmp_path):
+        """A TIMED schedule-live match that is NOT yet seeded should be skipped."""
+        settings = _make_settings(tmp_path)
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        match = Match(
+            id=77,
+            utc_date=utc_date,
+            status="TIMED",
+            stage="GROUP_STAGE",
+            group="GROUP_B",
+            home_tla="FRA",
+            away_tla="ARG",
+            home_name="France",
+            away_name="Argentina",
+            home_score=None,
+            away_score=None,
+            winner=None,
+        )
+
+        # live_scores is empty → match not seeded
+        ctx = _make_context(settings, live_scores={})
+
+        event = _make_goal_event(
+            scorer="Mbappe", scoring_team="France",
+            home_score=1, away_score=0, minute_text="5",
+            home_team="France", away_team="Argentina",
+        )
+        result = _make_thread_result("FRA", "ARG", [event])
+        mock_scanner = MagicMock()
+        mock_scanner.scan_live_matches = MagicMock(return_value=[result])
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match]
+            await poll_thread_goals_job(ctx)
+
+        # Not seeded → skipped → no announcement
+        ctx.bot.send_message.assert_not_called()

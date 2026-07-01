@@ -21,6 +21,41 @@ log = logging.getLogger(__name__)
 
 BASE_URL = "https://api.football-data.org/v4"
 
+# Window used by match_is_schedule_live().  Must match MATCH_OVER_AGE in __main__.py
+# (both 4 h) so the "live window" and the "over" ceiling are in sync.
+MATCH_LIVE_WINDOW = timedelta(hours=4)
+
+# Statuses that definitively mean a match is no longer (or never will be) live.
+_TERMINAL_STATUSES = frozenset(
+    {"FINISHED", "POSTPONED", "SUSPENDED", "CANCELLED", "AWARDED"}
+)
+
+
+def match_is_schedule_live(match: Match, now_utc: datetime) -> bool:
+    """True when a match is within its expected live window, based on schedule alone.
+
+    Decouples live detection from the ~1 h-delayed football-data.org free-tier
+    status so matches that are still reported TIMED/SCHEDULED after kickoff are
+    treated as live.
+
+    Returns True when ALL of the following hold:
+    - ``match.status`` is not a terminal status (FINISHED / POSTPONED / SUSPENDED /
+      CANCELLED / AWARDED).
+    - Scheduled kickoff <= ``now_utc`` (the match has started per schedule).
+    - ``now_utc - kickoff <= MATCH_LIVE_WINDOW`` (4 h — same ceiling as
+      ``_MATCH_OVER_AGE`` in __main__.py; covers 90 min + ET + penalties safely).
+    """
+    if match.status in _TERMINAL_STATUSES:
+        return False
+    try:
+        kickoff = datetime.strptime(match.utc_date, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        elapsed = now_utc - kickoff
+        return timedelta(0) <= elapsed <= MATCH_LIVE_WINDOW
+    except Exception:
+        return False
+
 
 class FootballAPIError(Exception):
     """Raised on any non-200 response from football-data.org."""
@@ -199,9 +234,19 @@ class FootballDataClient:
         return None
 
     def get_live_matches(self) -> list[Match]:
-        """Return matches currently IN_PLAY or PAUSED."""
+        """Return matches that are currently live.
+
+        Includes matches with status IN_PLAY or PAUSED (authoritative API signal)
+        AND matches that are within their scheduled live window (``match_is_schedule_live``),
+        which catches the ~1 h free-tier API lag where a live match is still
+        reported as TIMED/SCHEDULED after kickoff.
+        """
         matches = self.get_all_matches()
-        return [m for m in matches if m.status in ("IN_PLAY", "PAUSED")]
+        now_utc = datetime.now(timezone.utc)
+        return [
+            m for m in matches
+            if m.status in ("IN_PLAY", "PAUSED") or match_is_schedule_live(m, now_utc)
+        ]
 
     def get_knockout_results(self) -> dict[str, list[str]]:
         """Return a dict of stage → list of winner TLAs for all knockout stages."""

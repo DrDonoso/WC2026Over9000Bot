@@ -85,6 +85,7 @@ WC_TEAM_ALIASES: dict[str, str] = {
     "dr congo": "congo dr",
     "d r congo": "congo dr",  # "D.R. Congo" / "D.R.Congo" after dot→space normalization
     "democratic republic of congo": "congo dr",
+    "democratic republic of the congo": "congo dr",  # official UN name variant
     "dem. rep. congo": "congo dr",
     "dem rep congo": "congo dr",  # "Dem. Rep. Congo" after dot→space normalization
     # Czech Republic: r/soccer and ESPN use "Czech Republic" but football-data uses "Czechia"

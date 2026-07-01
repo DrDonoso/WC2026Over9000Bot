@@ -289,6 +289,34 @@ class TestCzechiaAlias:
         assert _teams_match("Czech Rep.", "Czechia") is True
 
 
+class TestCongoDRAlias:
+    """Test Democratic Republic of Congo name variants map to 'congo dr'."""
+
+    def test_normalize_democratic_republic_of_the_congo(self):
+        """Official UN name variant (with 'the') normalizes to 'congo dr'."""
+        assert _normalize_team("Democratic Republic of the Congo") == "congo dr"
+
+    def test_normalize_dr_congo_plain(self):
+        assert _normalize_team("DR Congo") == "congo dr"
+
+    def test_normalize_dotted_dr_congo(self):
+        assert _normalize_team("D.R. Congo") == "congo dr"
+
+    def test_teams_match_democratic_republic_of_the_congo_vs_fixture(self):
+        """r/soccer thread 'Democratic Republic of the Congo' matches football-data 'Congo DR'."""
+        assert _teams_match("Democratic Republic of the Congo", "Congo DR") is True
+
+    def test_teams_match_reversed(self):
+        assert _teams_match("Congo DR", "Democratic Republic of the Congo") is True
+
+    def test_find_fixture_with_the_variant(self):
+        """_find_matching_fixture handles 'Democratic Republic of the Congo' in thread title."""
+        matches = [_live_match("England", "Congo DR", "ENG", "COD")]
+        result = _find_matching_fixture("England", "Democratic Republic of the Congo", matches)
+        assert result is not None
+        assert result.away_tla == "COD"
+
+
 
 
 class TestScannerJsonPath:

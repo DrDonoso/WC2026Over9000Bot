@@ -240,8 +240,11 @@ class TestSeedingBehaviour:
         settings = _make_settings(tmp_path)
         ctx = _make_context(settings, _no_enrichment_scanner())
 
-        # TIMED matches are not relevant
-        match = _make_match(1, "SCHEDULED")
+        # Future SCHEDULED match — kickoff hasn't arrived yet, so NOT schedule-live.
+        future_date = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        match = _make_match(1, "SCHEDULED", utc_date=future_date)
 
         with (
             patch("worldcup_bot.__main__.make_client") as mock_client,
@@ -1624,3 +1627,164 @@ class TestPenaltyShootoutSuppression:
             await poll_thread_goals_job(ctx)
 
         ctx.bot.send_message.assert_not_called()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Schedule-live seeding — TIMED match within live window, null API score
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestScheduleLiveSeeding:
+    """poll_goals_job must seed TIMED matches within their live window at 0-0 without announcing."""
+
+    def _timed_match_now(
+        self,
+        mid: int = 42,
+        minutes_ago: float = 30,
+        home_score: int | None = None,
+        away_score: int | None = None,
+    ):
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        return _make_match(
+            mid, "TIMED",
+            home_name="England", away_name="Congo DR",
+            home_tla="ENG", away_tla="COD",
+            home_score=home_score,
+            away_score=away_score,
+            utc_date=utc_date,
+        )
+
+    @pytest.mark.asyncio
+    async def test_timed_match_seeded_at_zero_zero_no_announce(self, tmp_path):
+        """TIMED match 30min ago with null API scores is seeded at 0-0; nothing announced."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+        match = self._timed_match_now(home_score=None, away_score=None)
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+        mock_save.assert_called_once()
+        saved = mock_save.call_args[0][1]
+        assert "42" in saved
+        assert saved["42"]["home"] == 0
+        assert saved["42"]["away"] == 0
+        assert saved["42"]["status"] == "TIMED"
+
+    @pytest.mark.asyncio
+    async def test_timed_future_kickoff_not_seeded(self, tmp_path):
+        """TIMED match with future kickoff is NOT schedule-live → not seeded."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+
+        future_date = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        match = _make_match(
+            99, "TIMED",
+            home_name="France", away_name="Brazil",
+            home_tla="FRA", away_tla="BRA",
+            home_score=None, away_score=None,
+            utc_date=future_date,
+        )
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value={}),
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+        mock_save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_timed_seeded_then_goal_announced_once(self, tmp_path):
+        """
+        When a schedule-live TIMED match is pre-seeded at 0-0 and the API then
+        reports IN_PLAY at 1-0, exactly ONE goal notification is sent.
+
+        This validates the second half of the real-time flow:
+        - Tick 1 (seeds at 0-0): covered by test_timed_match_seeded_at_zero_zero_no_announce.
+        - Tick 2 (API catches up to IN_PLAY 1-0): goal announced exactly once here.
+        """
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner(),
+                            seen_api={"42": {"home": 0, "away": 0}})
+        ctx.bot_data["clip_store"] = {}
+
+        fake_sent = MagicMock()
+        fake_sent.message_id = 77
+        ctx.bot.send_message = AsyncMock(return_value=fake_sent)
+
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        # API has caught up: now IN_PLAY at 1-0
+        match_in_play = _make_match(
+            42, "IN_PLAY",
+            home_name="England", away_name="Congo DR",
+            home_tla="ENG", away_tla="COD",
+            home_score=1, away_score=0,
+            utc_date=utc_date,
+        )
+
+        # Simulate the already-seeded state from tick 1
+        stored_state = {"42": {"home": 0, "away": 0, "status": "TIMED"}}
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match_in_play]
+            await poll_goals_job(ctx)
+
+        # Exactly ONE goal notification
+        assert ctx.bot.send_message.await_count == 1
+        text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "⚽" in text
+
+    @pytest.mark.asyncio
+    async def test_postponed_timed_seed_evicted(self, tmp_path):
+        """A previously seeded TIMED match that flips to POSTPONED is evicted cleanly."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings, _no_enrichment_scanner())
+
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        match = _make_match(
+            55, "POSTPONED",
+            home_name="Italy", away_name="Spain",
+            home_tla="ITA", away_tla="ESP",
+            home_score=None, away_score=None,
+            utc_date=utc_date,
+        )
+
+        # Already seeded at 0-0 from a prior tick
+        stored_state = {"55": {"home": 0, "away": 0, "status": "TIMED"}}
+
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.load_scores", return_value=stored_state),
+            patch("worldcup_bot.__main__.save_scores") as mock_save,
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match]
+            await poll_goals_job(ctx)
+
+        ctx.bot.send_message.assert_not_called()
+        mock_save.assert_called()
+        saved = mock_save.call_args[0][1]
+        # Evicted
+        assert "55" not in saved

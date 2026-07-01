@@ -6,16 +6,46 @@ All HTTP is mocked with the `responses` library — no real network calls.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import responses as resp_lib
 
 from worldcup_bot.api.cache import TTLCache
-from worldcup_bot.api.client import FootballAPIError, FootballDataClient
+from worldcup_bot.api.client import FootballAPIError, FootballDataClient, match_is_schedule_live
+from worldcup_bot.api.models import Match
 
 BASE = "https://api.football-data.org/v4"
 WC_STANDINGS = f"{BASE}/competitions/WC/standings"
 WC_MATCHES = f"{BASE}/competitions/WC/matches"
+
+
+def _make_match_for_predicate(
+    status: str = "TIMED",
+    minutes_ago: float | None = 30,
+    home_score: int | None = None,
+    away_score: int | None = None,
+) -> Match:
+    if minutes_ago is None:
+        utc_date = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    return Match(
+        id=1,
+        utc_date=utc_date,
+        status=status,
+        stage="GROUP_STAGE",
+        group="GROUP_A",
+        home_tla="ENG",
+        away_tla="COD",
+        home_name="England",
+        away_name="Congo DR",
+        home_score=home_score,
+        away_score=away_score,
+        winner=None,
+    )
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -1445,3 +1475,172 @@ class TestGetFootballDayMatches:
                 result = client.get_football_day_matches("Europe/Madrid", 0, 9)
 
         assert result == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# match_is_schedule_live — schedule-based live predicate
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestScheduleLivePredicate:
+    """Unit tests for the match_is_schedule_live() helper."""
+
+    def _now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def test_timed_30min_ago_is_live(self):
+        """TIMED match with kickoff 30 min ago → schedule-live."""
+        m = _make_match_for_predicate(status="TIMED", minutes_ago=30)
+        assert match_is_schedule_live(m, self._now()) is True
+
+    def test_timed_4h_ago_is_not_live(self):
+        """TIMED match with kickoff 4h+ ago → outside MATCH_LIVE_WINDOW → NOT live."""
+        m = _make_match_for_predicate(status="TIMED", minutes_ago=241)
+        assert match_is_schedule_live(m, self._now()) is False
+
+    def test_timed_exactly_at_window_edge_is_live(self):
+        """TIMED match just under MATCH_LIVE_WINDOW (3h 59min) → still live."""
+        m = _make_match_for_predicate(status="TIMED", minutes_ago=239)
+        assert match_is_schedule_live(m, self._now()) is True
+
+    def test_timed_future_kickoff_not_live(self):
+        """TIMED match with kickoff in the future → not yet started → NOT live."""
+        m = _make_match_for_predicate(status="TIMED", minutes_ago=None)
+        assert match_is_schedule_live(m, self._now()) is False
+
+    def test_finished_not_live(self):
+        """FINISHED match → terminal status → NOT live."""
+        m = _make_match_for_predicate(status="FINISHED", minutes_ago=90)
+        assert match_is_schedule_live(m, self._now()) is False
+
+    def test_postponed_not_live(self):
+        """POSTPONED match → terminal status → NOT live."""
+        m = _make_match_for_predicate(status="POSTPONED", minutes_ago=30)
+        assert match_is_schedule_live(m, self._now()) is False
+
+    def test_suspended_not_live(self):
+        """SUSPENDED match → terminal status → NOT live."""
+        m = _make_match_for_predicate(status="SUSPENDED", minutes_ago=60)
+        assert match_is_schedule_live(m, self._now()) is False
+
+    def test_cancelled_not_live(self):
+        m = _make_match_for_predicate(status="CANCELLED", minutes_ago=30)
+        assert match_is_schedule_live(m, self._now()) is False
+
+    def test_in_play_within_window_is_live(self):
+        """IN_PLAY match 30min ago → not terminal, within window → live."""
+        m = _make_match_for_predicate(status="IN_PLAY", minutes_ago=30)
+        assert match_is_schedule_live(m, self._now()) is True
+
+    def test_paused_within_window_is_live(self):
+        """PAUSED match 45min ago (halftime) → live."""
+        m = _make_match_for_predicate(status="PAUSED", minutes_ago=45)
+        assert match_is_schedule_live(m, self._now()) is True
+
+    def test_scheduled_past_kickoff_is_live(self):
+        """SCHEDULED match whose kickoff was 10min ago (API lag) → schedule-live."""
+        m = _make_match_for_predicate(status="SCHEDULED", minutes_ago=10)
+        assert match_is_schedule_live(m, self._now()) is True
+
+    def test_bad_utc_date_returns_false(self):
+        """Unparseable utc_date → returns False (never raises)."""
+        m = _make_match_for_predicate(status="TIMED", minutes_ago=30)
+        m = Match(
+            id=m.id, utc_date="not-a-date", status="TIMED",
+            stage=m.stage, group=m.group,
+            home_tla=m.home_tla, away_tla=m.away_tla,
+            home_name=m.home_name, away_name=m.away_name,
+            home_score=None, away_score=None, winner=None,
+        )
+        assert match_is_schedule_live(m, self._now()) is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FootballDataClient — get_live_matches includes schedule-live matches
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetLiveMatchesScheduleLive:
+    """get_live_matches() must return TIMED matches within the live window."""
+
+    def _make_raw_match(
+        self,
+        mid: int,
+        status: str,
+        minutes_ago: float,
+        home_tla: str = "ENG",
+        away_tla: str = "COD",
+    ) -> dict:
+        utc_date = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        return {
+            "id": mid,
+            "utcDate": utc_date,
+            "status": status,
+            "stage": "GROUP_STAGE",
+            "group": "GROUP_A",
+            "homeTeam": {"tla": home_tla, "name": "England"},
+            "awayTeam": {"tla": away_tla, "name": "Congo DR"},
+            "score": {"fullTime": {"home": None, "away": None}, "winner": None},
+        }
+
+    @resp_lib.activate
+    def test_timed_match_30min_ago_included(self):
+        """TIMED match with kickoff 30 min ago → returned by get_live_matches."""
+        raw = self._make_raw_match(1, "TIMED", minutes_ago=30)
+        resp_lib.add(resp_lib.GET, WC_MATCHES, json={"matches": [raw]}, status=200)
+        client = _fresh_client()
+        live = client.get_live_matches()
+        assert len(live) == 1
+        assert live[0].id == 1
+
+    @resp_lib.activate
+    def test_timed_match_future_kickoff_excluded(self):
+        """TIMED match with future kickoff → not yet schedule-live → excluded."""
+        future = (datetime.now(timezone.utc) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw = {
+            "id": 2,
+            "utcDate": future,
+            "status": "TIMED",
+            "stage": "GROUP_STAGE",
+            "group": "GROUP_B",
+            "homeTeam": {"tla": "FRA", "name": "France"},
+            "awayTeam": {"tla": "ARG", "name": "Argentina"},
+            "score": {"fullTime": {"home": None, "away": None}, "winner": None},
+        }
+        resp_lib.add(resp_lib.GET, WC_MATCHES, json={"matches": [raw]}, status=200)
+        client = _fresh_client()
+        assert client.get_live_matches() == []
+
+    @resp_lib.activate
+    def test_in_play_and_timed_both_returned(self):
+        """Both IN_PLAY and schedule-live TIMED matches are returned."""
+        in_play = self._make_raw_match(1, "IN_PLAY", minutes_ago=45, home_tla="ESP", away_tla="GER")
+        in_play["score"] = {"fullTime": {"home": 1, "away": 0}, "winner": None}
+        timed = self._make_raw_match(2, "TIMED", minutes_ago=10, home_tla="ENG", away_tla="COD")
+        resp_lib.add(
+            resp_lib.GET, WC_MATCHES, json={"matches": [in_play, timed]}, status=200
+        )
+        client = _fresh_client()
+        live = client.get_live_matches()
+        assert len(live) == 2
+        ids = {m.id for m in live}
+        assert ids == {1, 2}
+
+    @resp_lib.activate
+    def test_finished_excluded(self):
+        """FINISHED match → terminal → NOT returned even if kickoff was recent."""
+        raw = self._make_raw_match(3, "FINISHED", minutes_ago=95)
+        raw["score"] = {"fullTime": {"home": 1, "away": 0}, "winner": "HOME_TEAM"}
+        resp_lib.add(resp_lib.GET, WC_MATCHES, json={"matches": [raw]}, status=200)
+        client = _fresh_client()
+        assert client.get_live_matches() == []
+
+    @resp_lib.activate
+    def test_timed_over_4h_ago_excluded(self):
+        """TIMED match >4h ago → past MATCH_LIVE_WINDOW → excluded."""
+        raw = self._make_raw_match(4, "TIMED", minutes_ago=300)
+        resp_lib.add(resp_lib.GET, WC_MATCHES, json={"matches": [raw]}, status=200)
+        client = _fresh_client()
+        assert client.get_live_matches() == []

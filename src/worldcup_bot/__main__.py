@@ -21,7 +21,7 @@ from worldcup_bot.ai.commentators import generate_porra_commentary, pick_comment
 from worldcup_bot.ai.daily_update import generate_daily_update
 from worldcup_bot.ai.goal_extractor import extract_scorer
 from worldcup_bot.ai.rich_image import run_rich_iteration
-from worldcup_bot.api.client import FootballAPIError
+from worldcup_bot.api.client import FootballAPIError, match_is_schedule_live
 from worldcup_bot.bot.formatters import (
     bold_person_names,
     format_final_result,
@@ -808,6 +808,9 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             save_scores(state_path, scores)
 
         # IN_PLAY/PAUSED are live; FINISHED matches already in state catch final goals + FT.
+        # schedule_live broadens this to TIMED/SCHEDULED matches within the kickoff window
+        # so that the ~1h football-data.org free-tier lag doesn't block seeding and
+        # Reddit real-time goal detection for matches that are already playing.
         # Hard-exclude any match whose kickoff was >MATCH_OVER_AGE ago, and any match
         # in a penalty shootout (its kicks must not be announced as goals).
         relevant = [
@@ -817,6 +820,7 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             and (
                 m.status in ("IN_PLAY", "PAUSED")
                 or (m.status == "FINISHED" and str(m.id) in scores)
+                or match_is_schedule_live(m, now_utc)
             )
         ]
 
