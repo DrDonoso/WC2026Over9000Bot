@@ -33,8 +33,10 @@ from worldcup_bot.bot.formatters import (
     format_standings,
     format_user_detail,
     participant_photo_url,
+    standard_competition_positions,
     team_flag,
 )
+from worldcup_bot.bot.podium_image import render_podium
 from worldcup_bot.ai.client import AIClient
 from worldcup_bot.ai.daily_update import generate_daily_update
 from worldcup_bot.ai.match_events import extract_match_events
@@ -193,14 +195,34 @@ async def _send_ranking_with_top3_photos(
     rows: list,
     settings: Settings,
 ) -> None:
-    """Send a ranking text as a top-3 photo album, or fall back to plain text."""
+    """Send a ranking as a podium image → album → plain text (first path that works)."""
     if not rows:
         await update.message.reply_text(text, parse_mode="HTML")
         return
 
     top3 = rows[:3]
-    candidate_urls = [participant_photo_url(r.username, settings.photo_base_url) for r in top3]
+    positions = standard_competition_positions(top3)
+    participants = [
+        {"username": r.username, "display_name": r.display_name, "position": positions[i]}
+        for i, r in enumerate(top3)
+    ]
 
+    # ── Podium image (primary path) ───────────────────────────────────────────
+    podium_buf = await asyncio.to_thread(render_podium, participants, settings)
+    if podium_buf is not None:
+        caption = text[:1024]
+        await context.bot.send_photo(
+            chat_id=update.effective_chat.id,
+            photo=podium_buf,
+            caption=caption,
+            parse_mode="HTML",
+        )
+        if len(text) > 1024:
+            await update.message.reply_text(text, parse_mode="HTML")
+        return
+
+    # ── Album fallback ────────────────────────────────────────────────────────
+    candidate_urls = [participant_photo_url(r.username, settings.photo_base_url) for r in top3]
     valid_urls: list[str] = []
     for url in candidate_urls:
         try:

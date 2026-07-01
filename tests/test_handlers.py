@@ -6,6 +6,7 @@ so no network calls or real files are needed.
 
 from __future__ import annotations
 
+import io
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -725,6 +726,18 @@ def _mock_requests_all_invalid():
 
 
 class TestSendRankingWithTop3Photos:
+    """Album-path tests — render_podium is stubbed to None so the album remains the primary path."""
+
+    @pytest.fixture(autouse=True)
+    def _stub_render_podium(self):
+        """Patch render_podium → None for every test in this class.
+
+        This keeps the album/fallback tests isolated from the new podium feature.
+        The podium path is exercised in TestSendRankingWithPodium below.
+        """
+        with patch("worldcup_bot.bot.handlers.render_podium", return_value=None):
+            yield
+
     async def test_send_media_group_called_with_top3(self, fake_settings):
         """With 5 rows and all URLs valid, send_media_group is called with exactly 3 items."""
         update = _make_update()
@@ -854,11 +867,96 @@ class TestSendRankingWithTop3Photos:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# _send_ranking_with_top3_photos — podium path
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _tiny_png_buf() -> io.BytesIO:
+    """Minimal 10×10 red PNG as a BytesIO (valid for send_photo)."""
+    from PIL import Image  # noqa: PLC0415
+    img = Image.new("RGB", (10, 10), (255, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+class TestSendRankingWithPodium:
+    """Tests for the podium-image primary path in _send_ranking_with_top3_photos."""
+
+    async def test_send_photo_called_when_podium_succeeds(self, fake_settings):
+        """When render_podium returns a BytesIO, send_photo is used (not send_media_group)."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.render_podium", return_value=_tiny_png_buf()):
+            await _send_ranking_with_top3_photos(update, context, "text", _TOP5_ROWS, fake_settings)
+
+        context.bot.send_photo.assert_called_once()
+        context.bot.send_media_group.assert_not_called()
+
+    async def test_send_photo_caption_passed(self, fake_settings):
+        """Caption is forwarded to send_photo when podium succeeds."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.render_podium", return_value=_tiny_png_buf()):
+            await _send_ranking_with_top3_photos(update, context, "mi caption", _TOP5_ROWS, fake_settings)
+
+        _, kwargs = context.bot.send_photo.call_args
+        assert kwargs["caption"] == "mi caption"
+        assert kwargs["parse_mode"] == "HTML"
+
+    async def test_podium_caption_truncated_at_1024(self, fake_settings):
+        """Caption is truncated at 1024 chars; full text sent as follow-up reply."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+        long_text = "x" * 2000
+
+        with patch("worldcup_bot.bot.handlers.render_podium", return_value=_tiny_png_buf()):
+            await _send_ranking_with_top3_photos(update, context, long_text, _ONE_ROW, fake_settings)
+
+        _, kwargs = context.bot.send_photo.call_args
+        assert len(kwargs["caption"]) == 1024
+        update.message.reply_text.assert_called_once_with(long_text, parse_mode="HTML")
+
+    async def test_album_used_when_podium_returns_none(self, fake_settings):
+        """When render_podium returns None, the album path is used as fallback."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.render_podium", return_value=None):
+            with patch("worldcup_bot.bot.handlers._requests.get", return_value=_mock_requests_all_valid()):
+                await _send_ranking_with_top3_photos(update, context, "text", _TOP5_ROWS, fake_settings)
+
+        context.bot.send_photo.assert_not_called()
+        context.bot.send_media_group.assert_called_once()
+
+    async def test_text_fallback_when_podium_none_and_no_valid_urls(self, fake_settings):
+        """podium=None + all invalid URLs → reply_text fallback."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.render_podium", return_value=None):
+            with patch("worldcup_bot.bot.handlers._requests.get", return_value=_mock_requests_all_invalid()):
+                await _send_ranking_with_top3_photos(update, context, "fallback", _TOP5_ROWS, fake_settings)
+
+        context.bot.send_photo.assert_not_called()
+        context.bot.send_media_group.assert_not_called()
+        update.message.reply_text.assert_called_once_with("fallback", parse_mode="HTML")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # cmd_actual
 # ══════════════════════════════════════════════════════════════════════════════
 
 
 class TestCmdActual:
+    @pytest.fixture(autouse=True)
+    def _stub_render_podium(self):
+        with patch("worldcup_bot.bot.handlers.render_podium", return_value=None):
+            yield
+
     async def test_no_predictions_sends_error(self, fake_settings):
         update = _make_update()
         context = _make_context(fake_settings)
@@ -922,6 +1020,11 @@ class TestCmdActual:
 
 
 class TestCmdGeneral:
+    @pytest.fixture(autouse=True)
+    def _stub_render_podium(self):
+        with patch("worldcup_bot.bot.handlers.render_podium", return_value=None):
+            yield
+
     async def test_no_predictions_sends_error(self, fake_settings):
         update = _make_update()
         context = _make_context(fake_settings)
