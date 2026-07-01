@@ -4,6 +4,9 @@
 
 ## Current Sessions (2026-07-01)
 
+### ✅ Podium Layout Rework — Vertical Stack (awaiting commit)
+Replaced the flat tile layout with a proper vertical stack: podium BLOCK at bottom → circular photo "head" on block → crown on head. Each participant occupies one column; classic arrangement for n=3 (center=1st, left=2nd, right=3rd). Block height is tied to tie-aware position (1→175px tall/gold, 2→120px/silver, 3→85px/bronze). Photo (150px diameter, circular) rests on the block top with 10px overlap. Crown (asset, 105px wide, or drawn fallback) sits on the photo head with 30px overlap at its bottom — like a crown on a head. Position number is drawn on the block face, not on the crown. Canvas 760×560, dark-navy background. All magic numbers are module-level constants. Fixed a broken edit (duplicate content in file — old code was appended after new code at line 352; trimmed via `Set-Content lines[0..349]`). Updated two geometry assertions in `test_podium_image.py` (720→760, 400→560 and one `tile_y`→`photo_top_y` rename). **2018 tests pass**. Decision doc: `.squad/decisions/inbox/kante-podium-drawn-base.md`. **No commit** — David handles.
+
 ### ✅ Crown Asset Integration (awaiting commit)
 Swapped podium crown from hand-drawn polygon to real Noto Emoji crown (`src/worldcup_bot/assets/crown.png`, 128×128 RGBA, Apache-2.0). Loaded at module init via `importlib.resources.files("worldcup_bot") / "assets" / "crown.png"`, cached in `_CROWN_IMG`. Scaled to 56×56 px and alpha-composited; position number drawn in the same 22 px gap below crown. `_draw_crown` kept as fallback when `_CROWN_IMG is None`. Updated `test_podium_image_edge_cases.py::test_draw_crown_exception_mid_render_returns_none` to also patch `_CROWN_IMG = None`. 5 new tests in `TestCrownAsset`. Decision doc: `.squad/decisions/inbox/kante-crown-asset.md`. **No commit** — David handles.
 

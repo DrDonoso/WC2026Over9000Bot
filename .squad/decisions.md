@@ -1,3 +1,139 @@
+# Decision: Podium Drawn-Base Layout Rewrite (2026-07-01 SHIPPED)
+
+**Date:** 2026-07-01  
+**Authors:** Kanté (Backend), Pirlo (Lead Review)  
+**Status:** ✅ SHIPPED (commit 277ae2e)
+
+---
+
+## MERGED DECISIONS (2 files → 1 entry)
+
+This entry consolidates the podium layout rewrite:
+1. \kante-podium-drawn-base.md\ — Drawn podium base implementation
+2. \pirlo-podium-drawn-review.md\ — Lead review (APPROVED)
+
+---
+
+## Summary
+
+Rewrote \src/worldcup_bot/bot/podium_image.py\ to render a drawn 3-block podium (gold/silver/bronze) with tie-aware heights, position numbers on block fronts, circular photos as "heads" standing on each block, and crown asset (or drawn fallback) worn on top. Canvas 760×560 px. All 2018 tests green; David visually verified rendered output.
+
+---
+
+## Layout Description
+
+Each participant is rendered as a vertical stack from top to bottom:
+
+1. **Crown** — asset (\crown.png\) or drawn fallback — sits on the photo head
+2. **Circular photo** ("head") — rests on top of the block with a slight overlap
+3. **Podium block** ("feet/pedestal") — anchored to the floor, height varies by rank
+
+Classic left/center/right arrangement for n=3:
+- **Center** = participants[0] (1st ranked) — tallest block
+- **Left** = participants[1] (2nd ranked)
+- **Right** = participants[2] (3rd ranked)
+
+Column display order for n=3: \[1, 0, 2]\ (index into participants list).
+
+---
+
+## Module-Level Constants (all in \podium_image.py\, easy to tune)
+
+\\\python
+_CANVAS_W       = 760          # canvas total width (px)
+_CANVAS_H       = 560          # canvas total height (px)
+_BG             = (22, 27, 34) # background color (dark navy)
+
+_FLOOR_Y        = 420          # y-coordinate of the floor (all blocks end here)
+_BLOCK_W        = 200          # width of each podium block (px)
+_BLOCK_GAP      = 8            # gap between blocks (px)
+_BLOCK_HEIGHT   = {1: 175, 2: 120, 3: 85}  # height by tie-aware position
+_BLOCK_COLORS   = {            # flat fill color by position
+    1: (230, 184,   0),        # gold
+    2: (192, 192, 192),        # silver
+    3: (205, 127,  50),        # bronze
+}
+_BLOCK_TOP_DARKEN = 20         # how much to darken the top edge for depth
+
+_PHOTO_D        = 150          # photo circle diameter (px)
+_PHOTO_OVERLAP  = 10           # px the photo overlaps down into the block top
+
+_CROWN_ASSET_SIZE = 105        # width to scale the crown asset to (px)
+_CROWN_OVERLAP    = 30         # px the crown asset overlaps down into the photo top
+_DRAWN_CROWN_W    = 70         # width of the drawn (fallback) crown (px)
+_DRAWN_CROWN_H    = 40         # height of the drawn crown (px)
+_DRAWN_CROWN_OVERLAP = 10      # px the drawn crown overlaps into the photo top
+
+_FONT_SIZE_NUM  = 52           # font size for position number on block face
+_FONT_SIZE_NAME = 18           # font size for participant name label (below block)
+_NAME_Y_OFFSET  = 28           # px below block bottom for name label
+\\\
+
+---
+
+## Tie-Height Mapping
+
+Ties share the **same** block height (determined by \participant["position"]\):
+
+| Positions | Block heights              |
+|-----------|---------------------------|
+| 1, 2, 3   | 175 / 120 / 85            |
+| 1, 1, 3   | 175 / 175 / 85            |
+| 1, 2, 2   | 175 / 120 / 120           |
+| 1, 1, 1   | 175 / 175 / 175           |
+
+The \position\ field comes from \standard_competition_positions()\ in \ormatters.py\, passed through \_send_ranking_with_top3_photos\ → \ender_podium\.
+
+---
+
+## Crown Placement
+
+- **Asset (\_CROWN_IMG\ is not None):** scale to \_CROWN_ASSET_SIZE\ wide (preserve aspect ratio), alpha-composite centered on the photo column, with the crown's bottom overlapping \_CROWN_OVERLAP\ px into the photo top.
+- **Drawn fallback (\_CROWN_IMG is None\):** \_draw_crown(draw, cx, crown_top)\ draws a gold polygon crown of size \_DRAWN_CROWN_W × _DRAWN_CROWN_H\ above the photo, overlapping \_DRAWN_CROWN_OVERLAP\ px.
+- The **position number** is drawn on the **block face**, not on the crown.
+
+---
+
+## Fallback Chain (unchanged)
+
+\ender_podium\ → \syncio.to_thread\ in \_send_ranking_with_top3_photos\:
+
+1. **Podium image** (\ender_podium\) → if \None\, falls back to:
+2. **Album** (existing \send_media_group\ photo strip) → if that fails, falls back to:
+3. **Plain text** (existing reply_text)
+
+\ender_podium\ **never raises** — wraps the entire \_render_podium\ call in \	ry/except\, returns \None\ on any error.
+
+---
+
+## Tests Changed
+
+File: \	ests/test_podium_image.py\
+- \	est_canvas_dimensions_720x400\ → renamed \	est_canvas_dimensions_760x560\, assertion updated from \(720, 400)\ to \(760, 560)\
+- \	est_asset_crown_pastes_non_background_pixels\: parameter renamed \	ile_y=115\ → \photo_top_y=115\ to match new \_paste_crown_asset\ signature
+- \TestCrownAsset::test_fallback_drawn_crown_when_asset_missing\: size assertion updated \(720, 400)\ → \(760, 560)\
+
+All other tests remain unchanged; 2018 pass.
+
+---
+
+## Pirlo Lead Review (2026-07-01 APPROVED)
+
+✅ **Verdict: APPROVE**
+
+**Checklist results:**
+- ✅ Never raises — full try/except around internal renderer, returns None on any failure
+- ✅ Tie-awareness — block height, color, position number keyed by \p.get("position", ...)\
+- ✅ Robustness — n=1 and n=2 handled; missing photo → placeholder; crown fallback works
+- ✅ No dead code — 350-line module with 13 functions, all called
+- ✅ Constants tunable — all layout magic numbers at module top as named constants
+- ✅ Suite green + tests retargeted — 2018 passed, new dimensions correctly asserted
+
+The rewrite is clean: 350-line module with no dead code, all correctness invariants preserved (never-raises, tie-aware, robust for edge cases), constants fully tunable, and tests correctly retargeted. David visually confirmed the output. Ship it.
+
+---
+
+
 # Decision: Crown Asset Integration (2026-07-01 SHIPPED)
 
 **Date:** 2026-07-01  

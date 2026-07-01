@@ -223,3 +223,10 @@
 
 **Pirlo lead review:** Verified asset loader (importlib.resources PEP 451), fallback dispatch, packaging (wheel verified), attribution (Apache 2.0), test suite green (2018 passed, 5 new crown tests). **Verdict: APPROVE** — ship it.
 
+### 2026-07-01 — Podium Drawn-Base Layout Review (APPROVED)
+
+**Session:** Kanté implementation review (podium rewrite with 3-block drawn base)  
+**Status:** ✅ APPROVED (shipped commit 277ae2e)
+
+**Pirlo lead review:** 6-item checklist all pass — never-raises, tie-aware blocks, robust n=1/n=2/placeholders, no dead code, constants tunable, 2018 tests green + David visual QA confirmed. **Verdict: APPROVE** — ship it.
+
