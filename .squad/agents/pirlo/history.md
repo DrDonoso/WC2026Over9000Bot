@@ -7,93 +7,13 @@
 
 ## Recent Sessions (2026-06-26 onwards)
 
+### 2026-07-02 — "Ver gol" Button Clip-Pipeline Fix — APPROVED
+
+**Role:** Lead reviewer. Approved narrowly-scoped search-term normalization (USA alias) and timeout bump (25→40 attempts). No regression: post-fetch matching unchanged. 2134 tests pass.
+
 ### 2026-07-01 — Schedule-Live Seeding Fix — APPROVED
 
 **Review gate:** 6 concurrency/correctness checks (double-announce, false-disallowed, window consistency, over-inclusion, null-safety, no regression). All PASS.
-
-### 2026-06-26 — TVE 📺 Label Fix — Review Gate (APPROVED)
-
-**Session:** TVE daily-update fix, kante-2 implementation  
-**Status:** APPROVED — no required code changes
-
-**Decisions reviewed:**
-1. Same-day TLA-pair fallback — SAFE (unique pairing per UTC date in tournament)
-2. Cache redesign (no-cache-on-all-fail, 30-min TTL for empty, 6h for populated) — SOUND
-3. Residual timing issue (09:00 fires before RTVE publishes ~10:40) — RECOMMENDED: move `daily_update_hour` to 11:00
-
-**Recommendation:** Move `DAILY_UPDATE_HOUR` to 11:00 (env-configurable, no code change needed). Owner discretionary.
-
-**Test count:** 1629 passed (1618 baseline + 11 new from Kanté/Buffon)
-- **Scoring:** Groups = 3pts exact position, 1pt off-by-one. Knockout = per-stage configurable points per correct qualifier (1/1/2/3/5). General = base_score + groups + all knockout stages.
-- **WC2026:** 48 teams, 12 groups (A–L), 5 knockout rounds (Round of 32, R16, QF, SF, Final).
-- **All legacy commands preserved.** Added `/ronda32`, `/semis`, `/final`. Renamed `/euroPorraDiaria` → `/porra`.
-- **`/listaaciertos` now auto-detects caller** by Telegram username (no arg needed for own predictions).
-- **Key learning:** User wants simplicity — YAML file editable live on host, no DB, no complex flows. The bot is a *reader* of pre-submitted predictions, not a prediction submission system.
-
-**Role:** Lead reviewer for Kanté's best-thirds implementation.
-
-**Key decisions locked:**
-1. Scoring model coherence — all 7 cases correctly implement STRICT policy (non-qualifying exact-3rd → 0.0).
-2. Provisional handling KEEP AS-IS — code already computes best-8-of-available once ≥9 thirds exist (better than doc describes).
-3. Tiebreaker fallback acceptable — stable alphabetical (group+TLA) with WARNING for FIFA disciplinary/drawing-of-lots unavailability.
-4. Backward-compat seam low-risk — all callers explicitly build and pass `qualifying_thirds`.
-
-**Outcome:** APPROVE. Ready for Buffon QA gate.
-
-**Buffon added 5 regression tests** (TestQualifyingThirdsCallerRegression) to guard against callers dropping `qualifying_thirds` param. Coverage gap closed.
-
-### 2026-06-27 — Catch-Up Recovery + FINISHED-Eviction Fix — Design & Review Gates
-
-**Session:** kante-4 (investigation) → pirlo-4 (design) → kante-5 (implementation) → pirlo-5 (review) → buffon-4 (QA)  
-**Status:** GATES PASSED (Pirlo-5 APPROVE, Buffon-4 PASS WITH ADDED TESTS +4)
-
-**Pirlo-4 Design Role:**
-- Reviewed Kanté's investigation of three production symptoms (A: missed goals, B: Spain double-notify, C: 4-goal catch-up)
-- Issued two key design decisions:
-  1. **Goal recovery from thread (revises 2026-06-26 Decision 1):** Attempt to extract real goal events from Reddit match thread and emit proper per-goal notifications (scorer + "Ver gol" keyboard). Fallback to neutral "Me perdí N goles" only if thread unavailable or goals can't be matched. Rule: ALL-proper or ALL-neutral, never mixed.
-  2. **Seed at 0-0 + FINISHED two-tick eviction:** Seed `live_scores` at 0-0 when kickoff fires (poll_kickoff_job). Evict FINISHED matches after first processed tick with no delta (two-tick minimum, prevents post-FT oscillation).
-
-**Pirlo-5 Review (Implementation Gate):**
-- Verified deduplication safety: first-seen recovery + concurrent thread job = no duplicate-announce window
-- Verified two-tick eviction correct: first FINISHED (status update), second FINISHED (evict if no delta)
-- Verified recovery fallback strict (ALL-proper or ALL-neutral)
-- Verified hang safety bounded (~35s worst-case, acceptable for one-time event per match)
-- Confirmed no regression with recap job or real in-play VAR
-
-**Outcome:** APPROVE — Implementation is correct, matches design spec, well-tested.
-
----
-
-### 2026-06-27 — Finished-Match Goal Loop Fix (Egypt-Iran) — Review Gate
-
-**Session:** kante-3 implementation + pirlo-3 review  
-**Status:** APPROVED — no required code changes
-
-**Reviewed:** Kanté's `_match_is_over` wall-clock guard for stuck goal-polling loop.
-
-**Key approvals:**
-1. 4h threshold is correct (ET+penalties fit comfortably, margin safe)
-2. Prune safety verified (no interaction with recap job)
-3. Concurrency atomic (no interleaving on single-threaded asyncio)
-4. Error path safe (date parse failure → match stays live)
-
-**Verdict:** APPROVE — fix is correct, minimal, safe. Ship it.
-
-### 2026-06-30 — LLM Chat Features Design (Picante + Revive Inactive)
-
-**Session:** pirlo design/refinement for two new LLM-powered chat features  
-**Status:** PROPOSED — awaiting David's decisions
-
-**Key architectural decisions:**
-1. New `src/worldcup_bot/chat/` package with clean separation: `listener.py` (Telegram), `picante.py` / `revive.py` (LLM orchestration), `buffer.py` / `state.py` (pure state).
-2. **Privacy stance:** In-memory ring buffer ONLY for message text. NO message bodies persisted to disk. Only `last_seen`, `last_mentioned`, and cooldown metadata saved as JSON.
-3. Both features independently toggleable via `CHAT_PICANTE_ENABLED` / `CHAT_REVIVE_ENABLED` env vars (default: False).
-4. Reuses existing `AIClient` and `OPENAI_*` config — no new API credentials needed.
-5. **Blocking infra requirement:** Bot privacy mode must be DISABLED in BotFather + bot re-added to group.
-6. MessageHandler with `TEXT & ~COMMAND & GROUPS` filter, registered after existing CommandHandlers in `build_app()`.
-7. Rate limiting: per-message probability + cooldown timestamp + daily counter (picante); periodic job + per-user mention cooldown + rotation (revive).
-
-**Open decisions document:** `.squad/decisions/inbox/pirlo-llm-chat-features.md`
 
 ### 2026-06-30 — LLM Chat Features Implementation Review (APPROVED)
 
@@ -145,9 +65,7 @@
 
 **Blocking pre-deployment requirement documented:** BotFather privacy mode MUST be disabled. Failure mode obvious: features ship in code but produce zero group messages received because API gating blocks them. This requirement now lives in README with step-by-step setup instructions.
 
----
-
-## Follow-Up Session: 2026-06-30 — Revive Quiet Hours + Jitter Self-Rescheduling (commit 31f1a89)
+### 2026-06-30 — Revive Quiet Hours + Jitter Self-Rescheduling (commit 31f1a89)
 
 **Team:** Kanté (Backend) + Maldini (DevOps) + Buffon (Testing) + Pirlo (Lead Review)  
 **Shipped:** ✅ commit 31f1a89
@@ -183,8 +101,6 @@
 **Key verification:** Placement correct (startup after seeding, step 7 before picante), guards safe (`.get()` + truthiness), best-effort resilience, privacy unchanged, atomic writes acceptable, suite green (1939 passed).
 
 **Verdict:** ✅ **APPROVE** — Minimal, correct, well-guarded change. Ship it.
-
----
 
 ### 2026-07-01 — Podium Photo Feature: Feasibility + Implementation Review
 
@@ -233,4 +149,3 @@
 **Status:** ✅ APPROVED (shipped commit 277ae2e)
 
 **Pirlo lead review:** 6-item checklist all pass — never-raises, tie-aware blocks, robust n=1/n=2/placeholders, no dead code, constants tunable, 2018 tests green + David visual QA confirmed. **Verdict: APPROVE** — ship it.
-

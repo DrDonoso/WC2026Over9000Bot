@@ -1,3 +1,132 @@
+# Decision: "Ver gol" Button Missing — Clip-Pipeline Fix (2026-07-02 SHIPPED)
+
+**Date:** 2026-07-02  
+**Authors:** Kanté (Backend Implementation), Pirlo (Lead Review)  
+**Status:** ✅ SHIPPED (commit 522ba6d)
+
+---
+
+## MERGED DECISIONS (2 files → 1 entry)
+
+This entry consolidates the "Ver gol" button clip-search fix:
+1. kante-vergol-button-fix.md — Root cause analysis and implementation
+2. pirlo-vergol-button-review.md — Lead review (APPROVED)
+
+---
+
+## Summary
+
+Two goals lacked the "Ver gol" clip button in the live match thread; reproduced ind_goal_clip LIVE for both:
+
+**(A) Belgium 3-2 Senegal — Tielemans 120+5' ET penalty**
+- Root cause: Search timeout (18.75 min window vs. 20–30 min for ET clip posting)
+- Fix: _MAX_CLIP_ATTEMPTS 25 → 40 (~30 min window)
+
+**(B) USA 1-0 Bosnia-Herzegovina — Balogun 45'**
+- Root cause: Reddit search miss ("United States" query doesn't match "USA" posts) + timeout
+- Fix: Added search-term normalization (_TEAM_SEARCH_SHORT + _search_term() for "usa" alias and hyphen stripping); applied to both JSON and HTML search paths; post-fetch matching unchanged
+
+---
+
+## Root Cause per Goal
+
+### Goal A — Timeout (ET / match-ending penalty)
+
+_MAX_CLIP_ATTEMPTS = 25 × 45 s = ~18.75 min window.
+
+The Tielemans goal was scored at 120+5'—literally the last playable moment. After an ET penalty that clinches the match, the clip poster typically watches the final whistle + celebrations before clipping and posting. This takes 20–30 min, exceeding the 18.75 min window.
+
+### Goal B — Search Miss + Timeout (first-half stoppage goal)
+
+Two compounding issues:
+1. **Search miss:** _fetch_html_search_posts built query from raw football-data names: "United States Bosnia-Herzegovina". Reddit's index does NOT match "USA" for "United States". The clip title uses USA [1] - 0 Bosnia & Herzegovina—"United States" appears nowhere. Result: 25 HTML search results contained no goal clips.
+2. **Timeout:** A 45' goal clip posted during/after half-time may appear >18.75 min after detection.
+
+---
+
+## Fixes
+
+### 1. Extend clip search window — __main__.py
+
+\\\
+_MAX_CLIP_ATTEMPTS: 25 → 40   (~18.75 min → ~30 min)
+\\\
+
+Rationale: "clips rarely appear >30–40 min after" (David's constraint). 40 attempts × 45 s = 30 min covers ET goals, halftime goals, and late-posted clips. Well within sane bounds.
+
+### 2. Search-query normalisation — clip_finder.py
+
+Added:
+\\\python
+_TEAM_SEARCH_SHORT: dict[str, str] = {"united states": "usa"}
+
+def _search_term(team: str) -> str:
+    norm = _normalize_team(team)          # WC alias applied, lowercased
+    short = _TEAM_SEARCH_SHORT.get(norm, team)
+    return short.replace("-", " ")        # strips hyphens for broader Reddit search
+\\\
+
+Applied in:
+- _fetch_html_search_posts: query now \"{_search_term(home)} {_search_term(away)}"\
+- ind_goal_clip JSON path: same query construction
+
+Effect on Goal B:
+- \_search_term("United States")\ → \"usa"\ (via alias)
+- \_search_term("Bosnia-Herzegovina")\ → \"Bosnia Herzegovina"\ (hyphen stripped)
+- Search query: \"usa+Bosnia+Herzegovina"\ → finds \USA [1] - 0 Bosnia & Herzegovina\ ✓
+
+---
+
+## Invariants Preserved
+
+- \_match_post\ is unchanged — all matching logic (exact score, fuzzy teams, scorer/minute) is unaffected.
+- \_teams_match\ is unchanged — post-fetch title matching works as before.
+- Dedup in merged /new + HTML search posts is unchanged.
+- Goal A's \120+5'\ regex already worked.
+- No changes to \poll_goal_clips_job\, \_cs_add_entry\, or clip store — only search window and query strings.
+
+---
+
+## Tests Added (13 new → 2134 total)
+
+All tests pass ✅. Coverage includes:
+- ET penalty regex parsing (\120+5'\ → minute 120)
+- Full \_match_post\ for both goals with actual titles
+- Search-term alias ("United States" → "usa")
+- Hyphen stripping ("Bosnia-Herzegovina" → "Bosnia Herzegovina")
+- End-to-end search URL normalization
+- Regression: non-aliased teams unaffected
+
+---
+
+## Review: APPROVED ✅
+
+**Reviewer:** Pirlo (Lead)
+
+Surgical, safe changes:
+1. \_search_term\ only affects Reddit search QUERY (both paths); never post-matching logic.
+2. USA alias narrowly scoped to one entry in \_TEAM_SEARCH_SHORT\.
+3. Timeout bump (25→40) is bounded and reasonable (30 min < sane upper bound).
+4. Post-fetch matching uses original team names via \_teams_match\ fuzzy logic — no regression.
+5. Best-effort / non-fatal behavior preserved.
+6. **2134 tests pass, 0 failures.**
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| \src/worldcup_bot/reddit/clip_finder.py\ | Added \_TEAM_SEARCH_SHORT\, \_search_term()\; patched \_fetch_html_search_posts\ + \ind_goal_clip\ |
+| \src/worldcup_bot/__main__.py\ | \_MAX_CLIP_ATTEMPTS\ 25 → 40 |
+| \	ests/test_clip_finder.py\ | 13 new tests (2134 total) |
+| \.squad/agents/kante/history.md\ | Session entry added |
+
+---
+
+
+---
+
 # Decision: Schedule-Live Decoupling — Live Match / Goal Notification Bug Fix (2026-07-01 SHIPPED)
 
 **Date:** 2026-07-01
@@ -2861,5 +2990,6 @@ Entirely drawn with Pillow `ImageDraw.polygon` + `ImageDraw.ellipse`:
 1. **Serial photo fetches:** Only 3 requests, acceptable. Future `ThreadPoolExecutor` optimization not needed now.
 2. **Font path cached at import:** Fine — matplotlib's font cache is fast. Fallback covers edge cases.
 3. **`r.display_name` assumption:** Correct — `UserRankEntry` includes it.
+
 
 
