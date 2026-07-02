@@ -9,11 +9,13 @@ import pytest
 
 from worldcup_bot.reddit.clip_finder import (
     GOAL_TITLE_PATTERN,
+    _TEAM_SEARCH_SHORT,
     _extract_media_url,
     _match_post,
     _parse_clip_posts_html,
     _parse_search_results_html,
     _scorer_matches,
+    _search_term,
     find_goal_clip,
 )
 from worldcup_bot.reddit.scanner import RedditMatchScanner
@@ -97,6 +99,17 @@ class TestGoalTitlePattern:
 
     def test_no_match_plain_title(self):
         assert GOAL_TITLE_PATTERN.match("Daily Discussion Thread") is None
+
+    def test_et_penalty_120_plus_5_parses_as_minute_120(self):
+        """Live bug: '120+5' (Penalty)' — regex captures 120, not 5."""
+        m = GOAL_TITLE_PATTERN.match(
+            "Belgium [3] - 2 Senegal - Y. Tielemans 120+5' (Penalty)"
+        )
+        assert m is not None
+        assert m.group("minute") == "120"
+        assert m.group("home_score") == "3"
+        assert m.group("away_score") == "2"
+        assert "Tielemans" in m.group("scorer")
 
 
 # ── _extract_media_url ────────────────────────────────────────────────────────
@@ -328,6 +341,26 @@ class TestMatchPost:
         )
         result = _match_post(post, "Czechia", "South Africa", 1, 0, "Michal Sadílek", 6)
         assert result == "https://streamin.link/v/9801698f"
+
+    def test_tielemans_120plus5_et_penalty_belgium_senegal(self):
+        """Live bug goal A: ET penalty '120+5'' matches target minute 120."""
+        post = self._post(
+            "Belgium [3] - 2 Senegal - Y. Tielemans 120+5' (Penalty)",
+            "https://streamff.pro/v/06c8bf9c",
+        )
+        result = _match_post(post, "Belgium", "Senegal", 3, 2, "Youri Tielemans", 120)
+        assert result == "https://streamff.pro/v/06c8bf9c"
+
+    def test_balogun_45_usa_bosnia_ampersand_name(self):
+        """Live bug goal B: 'USA [1] - 0 Bosnia & Herzegovina' matches football-data names."""
+        post = self._post(
+            "USA [1] - 0 Bosnia & Herzegovina - Folarin Balogun 45'",
+            "https://streamff.pro/v/62723e6e",
+        )
+        result = _match_post(
+            post, "United States", "Bosnia-Herzegovina", 1, 0, "Folarin Balogun", 45
+        )
+        assert result == "https://streamff.pro/v/62723e6e"
 
 
 # ── find_goal_clip ────────────────────────────────────────────────────────────
@@ -681,3 +714,94 @@ class TestFindGoalClipMergeNewListing:
             )
 
         assert result == "https://streamin.link/v/f5eabdf2"
+
+
+# ── _search_term / _TEAM_SEARCH_SHORT ────────────────────────────────────────
+
+
+class TestSearchTerm:
+    def test_united_states_returns_usa(self):
+        """'United States' is the canonical football-data name; r/soccer uses 'USA'."""
+        assert _search_term("United States") == "usa"
+
+    def test_usa_unchanged(self):
+        """'USA' normalizes through WC_TEAM_ALIASES → 'united states' → maps back to 'usa'."""
+        assert _search_term("USA") == "usa"
+
+    def test_bosnia_hyphen_stripped(self):
+        """'Bosnia-Herzegovina' (football-data) → 'Bosnia Herzegovina' for search."""
+        assert _search_term("Bosnia-Herzegovina") == "Bosnia Herzegovina"
+
+    def test_regular_name_unchanged(self):
+        assert _search_term("Sweden") == "Sweden"
+
+    def test_team_search_short_has_usa(self):
+        assert "united states" in _TEAM_SEARCH_SHORT
+        assert _TEAM_SEARCH_SHORT["united states"] == "usa"
+
+
+class TestFindGoalClipSearchQueryNormalisation:
+    """HTML search URL uses _search_term aliases when JSON endpoint is 403."""
+
+    def test_usa_alias_and_hyphen_strip_used_in_html_search_query(self):
+        """When home='United States', away='Bosnia-Herzegovina' and JSON is 403,
+        the HTML search URL must use 'usa' and 'Bosnia+Herzegovina' (no hyphen)."""
+        from unittest.mock import MagicMock
+
+        urls_hit: list[str] = []
+
+        def _get(url, **kwargs):
+            urls_hit.append(url)
+            r = MagicMock()
+            r.raise_for_status = MagicMock()
+            r.status_code = 403 if "search.json" in url else 200
+            r.text = ""
+            return r
+
+        session = MagicMock()
+        session.get = MagicMock(side_effect=_get)
+        scanner = RedditMatchScanner(session=session)
+
+        find_goal_clip(
+            scanner, "United States", "Bosnia-Herzegovina", 1, 0, "Balogun", 45
+        )
+
+        html_search_urls = [
+            u for u in urls_hit if "search?" in u and "search.json" not in u
+        ]
+        assert html_search_urls, "HTML search endpoint was not called"
+        search_url = html_search_urls[0].lower()
+        # Query must use 'usa' (not 'united' or 'states')
+        assert "usa" in search_url
+        assert "united" not in search_url
+        # Hyphen must be stripped → 'bosnia' and 'herzegovina' as separate tokens
+        assert "bosnia" in search_url
+        assert "herzegovina" in search_url
+        assert "bosnia-herzegovina" not in search_url  # hyphen gone
+
+    def test_regular_teams_query_unchanged(self):
+        """Teams without aliases ('Sweden', 'Tunisia') keep their names in query."""
+        from unittest.mock import MagicMock
+
+        urls_hit: list[str] = []
+
+        def _get(url, **kwargs):
+            urls_hit.append(url)
+            r = MagicMock()
+            r.raise_for_status = MagicMock()
+            r.status_code = 403 if "search.json" in url else 200
+            r.text = ""
+            return r
+
+        session = MagicMock()
+        session.get = MagicMock(side_effect=_get)
+        scanner = RedditMatchScanner(session=session)
+
+        find_goal_clip(scanner, "Sweden", "Tunisia", 1, 0, "Isak", 10)
+
+        html_search_urls = [
+            u for u in urls_hit if "search?" in u and "search.json" not in u
+        ]
+        assert html_search_urls
+        assert "sweden" in html_search_urls[0].lower()
+        assert "tunisia" in html_search_urls[0].lower()

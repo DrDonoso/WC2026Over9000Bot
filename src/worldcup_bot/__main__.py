@@ -95,8 +95,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Max search attempts before giving up on a clip (~18 min at 45s interval)
-_MAX_CLIP_ATTEMPTS = 25
+# Max search attempts before giving up on a clip (~30 min at 45 s/poll; wider
+# window for ET / half-time goals whose clips can be posted 20-30 min late)
+_MAX_CLIP_ATTEMPTS = 40
 
 # A football match (including ET + penalties) never exceeds ~3 h; 4 h is a safe
 # ceiling for "this match is definitely over regardless of football-data status".

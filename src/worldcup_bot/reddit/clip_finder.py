@@ -227,6 +227,30 @@ def _scorer_matches(clip_scorer: str, target_scorer: str) -> bool:
     return clip_last == target_last
 
 
+# ── search-query helpers ──────────────────────────────────────────────────────
+# Maps canonical football-data team names (normalised to lowercase, same as
+# _normalize_team output) to the shorter form r/soccer commonly uses in clip
+# post titles.  Ensures search queries find clips even when the post author
+# wrote "USA" instead of "United States".
+
+_TEAM_SEARCH_SHORT: dict[str, str] = {
+    "united states": "usa",
+}
+
+
+def _search_term(team: str) -> str:
+    """Return a Reddit-search-friendly query token for *team*.
+
+    Applies short-name aliases (e.g. 'United States' → 'USA') and strips
+    hyphens so 'Bosnia-Herzegovina' becomes 'Bosnia Herzegovina' — a more
+    permissive Reddit search token that finds clip titles using either the
+    hyphenated or the ampersand form.
+    """
+    norm = _normalize_team(team)  # lowercase + WC-alias applied
+    short = _TEAM_SEARCH_SHORT.get(norm, team)
+    return short.replace("-", " ")
+
+
 # ── internal fetchers ──────────────────────────────────────────────────────────
 
 
@@ -271,7 +295,7 @@ def _fetch_html_search_posts(
     scanner: RedditMatchScanner, home: str, away: str
 ) -> list[dict]:
     """Search r/soccer via HTML search endpoint (returns 200 where JSON is 403)."""
-    query = quote_plus(f"{home} {away}")
+    query = quote_plus(f"{_search_term(home)} {_search_term(away)}")
     url = _REDDIT_SEARCH_HTML.format(query=query)
     try:
         resp = scanner._session.get(url, timeout=15)
@@ -362,7 +386,7 @@ def find_goal_clip(
     This is **synchronous** — call via ``await asyncio.to_thread(find_goal_clip, ...)``.
     Returns None if no matching post is found.
     """
-    query = quote_plus(f"{home_team} {away_team}")
+    query = quote_plus(f"{_search_term(home_team)} {_search_term(away_team)}")
     search_url = _REDDIT_SEARCH_JSON.format(query=query)
 
     posts = _fetch_search_posts(scanner, search_url)
