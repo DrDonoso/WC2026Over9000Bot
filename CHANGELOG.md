@@ -5,6 +5,15 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260702] - 2026-07-02
+
+- fix(clip): 'Ver gol' button - widen window + normalize team search
+- .squad/decisions.md: merged inbox files, deleted inbox entries
+- .squad/orchestration-log/: 3 agent logs (kante, buffon, pirlo)
+- .squad/log/: session summary
+- .squad/agents/pirlo/history.md: added session note
+
+
 ## [20260701.06] - 2026-07-01
 
 - fix(goals): seed live matches by scheduled kickoff (real-time goals + /endirecto)
