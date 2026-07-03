@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260703.02] - 2026-07-03
+
+- fix(goals): post-final VAR correction for wrong final score
+
+
 ## [20260703] - 2026-07-03
 
 - fix(tve): 'La 1' label for knockout & midnight matches
