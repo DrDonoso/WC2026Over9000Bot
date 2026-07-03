@@ -15,6 +15,8 @@ from worldcup_bot.tve import (
     ES_NAME_TO_TLA,
     TveBroadcast,
     _norm,
+    _parse_kickoff_utc,
+    _parse_teams,
     fetch_rtve_schedule,
     load_tve_broadcasts,
     parse_wc_broadcasts,
@@ -619,3 +621,200 @@ class TestBuildAiUserMessageTve:
         msg = build_ai_user_message([], today, [], [], "Europe/Madrid")
         assert "📺" not in msg
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# _parse_teams: knockout round-prefix stripping
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Fixture data matching live RTVE knockout names
+_ITEM_KO_1_16_ARG_CPV = {
+    "original_episode_name": "Futbol Copa Mundo Fifa 1/16 Argentina - Cabo Verde",
+    "description": "(00:00) ARGENTINA / CABO VERDE",
+    "begintime": "20260703210000",
+    "idPrograma": 1030562,
+}
+
+_ITEM_KO_1_8_FRA_NOR = {
+    "original_episode_name": "Futbol Copa Mundo Fifa 1/8 Francia - Noruega",
+    "description": "(21:00) FRANCIA / NORUEGA",
+    "begintime": "20260710200000",
+    "idPrograma": 1030562,
+}
+
+_ITEM_KO_SEMIFINAL_ARG_FRA = {
+    "original_episode_name": "Futbol Copa Mundo Fifa Semifinal Argentina - Francia",
+    "description": "(21:00) ARGENTINA / FRANCIA",
+    "begintime": "20260718200000",
+    "idPrograma": 1030562,
+}
+
+
+def _pt(raw_name: str) -> tuple[str | None, str | None]:
+    """Helper: call _parse_teams with a single original_episode_name."""
+    return _parse_teams({"original_episode_name": raw_name})
+
+
+class TestParseTeamsRoundPrefix:
+    """_parse_teams strips knockout round tokens before splitting on teams."""
+
+    def test_1_16_argentina_cabo_verde(self):
+        """Live bug: '1/16 Argentina - Cabo Verde' → (ARG, CPV)."""
+        assert _pt("Futbol Copa Mundo Fifa 1/16 Argentina - Cabo Verde") == ("ARG", "CPV")
+
+    def test_1_8_fraction_form(self):
+        assert _pt("Futbol Copa Mundo Fifa 1/8 Francia - Noruega") == ("FRA", "NOR")
+
+    def test_1_4_fraction_form(self):
+        assert _pt("Futbol Copa Mundo Fifa 1/4 Alemania - Japon") == ("GER", "JPN")
+
+    def test_semifinal_singular(self):
+        assert _pt("Futbol Copa Mundo Fifa Semifinal Argentina - Francia") == ("ARG", "FRA")
+
+    def test_semifinales_plural(self):
+        assert _pt("Futbol Copa Mundo Fifa Semifinales Brasil - Espana") == ("BRA", "ESP")
+
+    def test_final(self):
+        assert _pt("Futbol Copa Mundo Fifa Final Argentina - Francia") == ("ARG", "FRA")
+
+    def test_cuartos_de_final(self):
+        assert _pt("Futbol Copa Mundo Fifa Cuartos de final Argentina - Brasil") == ("ARG", "BRA")
+
+    def test_cuartos_without_de_final(self):
+        assert _pt("Futbol Copa Mundo Fifa Cuartos Argentina - Brasil") == ("ARG", "BRA")
+
+    def test_group_stage_no_round_token_unchanged(self):
+        """Group-stage names have no round token — must parse as before (regression guard)."""
+        assert _pt("Futbol Copa Mundo Fifa Argentina - Austria") == ("ARG", "AUT")
+
+    def test_group_stage_espana_unchanged(self):
+        assert _pt("Futbol Copa Mundo Fifa España - Arabia Saudi") == ("ESP", "KSA")
+
+    def test_original_event_name_field_also_works(self):
+        """_parse_teams also reads original_event_name; round prefix stripped there too."""
+        item = {"original_event_name": "Futbol Copa Mundo Fifa 1/16 Alemania - Japon"}
+        assert _parse_teams(item) == ("GER", "JPN")
+
+
+class TestParseWcBroadcastsKnockout:
+    """parse_wc_broadcasts correctly handles knockout-stage episode names."""
+
+    def test_1_16_arg_cpv_both_tlas_parsed(self):
+        result = parse_wc_broadcasts({"items": [_ITEM_KO_1_16_ARG_CPV]}, "Teledeporte")
+        assert len(result) == 1
+        b = result[0]
+        assert b.home_tla == "ARG"
+        assert b.away_tla == "CPV"
+
+    def test_1_8_fra_nor_both_tlas_parsed(self):
+        result = parse_wc_broadcasts({"items": [_ITEM_KO_1_8_FRA_NOR]}, "La 1")
+        assert len(result) == 1
+        b = result[0]
+        assert b.home_tla == "FRA"
+        assert b.away_tla == "NOR"
+
+    def test_semifinal_arg_fra_both_tlas_parsed(self):
+        result = parse_wc_broadcasts({"items": [_ITEM_KO_SEMIFINAL_ARG_FRA]}, "La 1")
+        assert len(result) == 1
+        b = result[0]
+        assert b.home_tla == "ARG"
+        assert b.away_tla == "FRA"
+
+
+class TestTveChannelForKnockout:
+    """tve_channel_for now matches knockout broadcasts (prev. returned None due to None home_tla).
+
+    RTVE begintime for knockout games is the pre-show start, typically >20 min
+    before the actual kickoff. tve_channel_for must use the same-day TLA fallback.
+    """
+
+    def test_knockout_1_16_arg_cpv_same_day_tla_fallback(self):
+        """ARG-CPV: broadcast 1 h before kickoff → same-day TLA fallback applies."""
+        match = _make_match("ARG", "CPV", "2026-07-03T22:00:00Z")
+        # Broadcast begintime 21:00 UTC = 60 min before kickoff (outside ±20 min window)
+        broadcasts = [_bcast(_dt("2026-07-03T21:00:00Z"), "ARG", "CPV", "Teledeporte")]
+        assert tve_channel_for(match, broadcasts) == "Teledeporte"
+
+    def test_knockout_none_home_tla_returns_none(self):
+        """Without the fix (home_tla=None), same-day fallback requires both TLAs — None blocks it."""
+        match = _make_match("ARG", "CPV", "2026-07-03T22:00:00Z")
+        # Simulate pre-fix state: home_tla=None because round token wasn't stripped
+        broadcasts = [_bcast(_dt("2026-07-03T21:00:00Z"), None, "CPV", "Teledeporte")]
+        assert tve_channel_for(match, broadcasts) is None
+
+    def test_knockout_la1_preferred_over_teledeporte(self):
+        """When both channels carry the knockout match, La 1 wins."""
+        match = _make_match("ARG", "CPV", "2026-07-03T22:00:00Z")
+        broadcasts = [
+            _bcast(_dt("2026-07-03T21:00:00Z"), "ARG", "CPV", "Teledeporte"),
+            _bcast(_dt("2026-07-03T21:05:00Z"), "ARG", "CPV", "La 1"),
+        ]
+        assert tve_channel_for(match, broadcasts) == "La 1"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# _parse_kickoff_utc: over-midnight (24:00 / 25:xx) RTVE notation
+# ══════════════════════════════════════════════════════════════════════════════
+
+# La 1 item for the live bug: description has "(24:00)" = midnight next day.
+_ITEM_LA1_KO_1_16_ARG_CPV_24H = {
+    "original_episode_name": "Futbol Copa Mundo Fifa 1/16 Argentina - Cabo Verde",
+    "description": "Incluye:Nº 23 Previo\r(24:00) ARGENTINA / CABO VERDE \rNº 23 Post\r",
+    "begintime": "20260703210000",   # pre-show July 3, 21:00 Madrid
+    "idPrograma": 1030562,
+}
+
+
+class TestParseKickoffUtcMidnightNotation:
+    """_parse_kickoff_utc handles RTVE Spanish over-midnight hour notation.
+
+    RTVE writes midnight matches as 24:00 (= 00:00 next day), and after-midnight
+    as 25:30, 26:00, etc.  datetime.strptime rejects hour>=24, so we roll over.
+    """
+
+    def test_24_00_la1_description_gives_next_day_midnight(self):
+        """(24:00) on 20260703 → Madrid 2026-07-04 00:00 CEST = UTC 2026-07-03 22:00."""
+        result = _parse_kickoff_utc(_ITEM_LA1_KO_1_16_ARG_CPV_24H, "La 1")
+        assert result == datetime(2026, 7, 3, 22, 0, tzinfo=_UTC)
+
+    def test_25_30_la1_description_gives_next_day_01_30(self):
+        """(25:30) on 20260703 → Madrid 2026-07-04 01:30 CEST = UTC 2026-07-03 23:30."""
+        item = {
+            "description": "(25:30) PARTIDO MADRUGADA",
+            "begintime": "20260703210000",
+        }
+        result = _parse_kickoff_utc(item, "La 1")
+        assert result == datetime(2026, 7, 3, 23, 30, tzinfo=_UTC)
+
+    def test_normal_time_la1_unchanged(self):
+        """(20:45) on La 1 → normal Madrid→UTC conversion, no rollover."""
+        item = {
+            "description": "(20:45) PARTIDO NORMAL",
+            "begintime": "20260703184500",
+        }
+        result = _parse_kickoff_utc(item, "La 1")
+        assert result == datetime(2026, 7, 3, 18, 45, tzinfo=_UTC)
+
+    def test_begintime_fallback_normal_hour_unchanged(self):
+        """Teledeporte uses begintime directly; normal hour (< 24) is unchanged."""
+        item = {"begintime": "20260703184500"}
+        result = _parse_kickoff_utc(item, "Teledeporte")
+        assert result == datetime(2026, 7, 3, 16, 45, tzinfo=_UTC)
+
+    def test_parse_wc_broadcasts_la1_24h_item_valid_kickoff(self):
+        """End-to-end: La 1 knockout item with (24:00) + 1/16 round prefix → both fixes work together."""
+        result = parse_wc_broadcasts({"items": [_ITEM_LA1_KO_1_16_ARG_CPV_24H]}, "La 1")
+        assert len(result) == 1
+        b = result[0]
+        assert b.home_tla == "ARG"
+        assert b.away_tla == "CPV"
+        assert b.kickoff_utc == datetime(2026, 7, 3, 22, 0, tzinfo=_UTC)
+        assert b.channel == "La 1"
+
+    def test_tve_channel_for_la1_24h_kickoff_primary_window(self):
+        """La 1 with 24:00-derived kickoff (22:00 UTC) hits the ±20 min primary window → La 1 wins."""
+        match = _make_match("ARG", "CPV", "2026-07-03T22:00:00Z")
+        broadcasts = [
+            _bcast(_dt("2026-07-03T22:00:00Z"), "ARG", "CPV", "La 1"),       # exact match (from 24:00)
+            _bcast(_dt("2026-07-03T19:00:00Z"), "ARG", "CPV", "Teledeporte"), # pre-show, same-day fallback only
+        ]
+        assert tve_channel_for(match, broadcasts) == "La 1"

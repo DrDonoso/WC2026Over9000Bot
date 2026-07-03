@@ -44,6 +44,21 @@ _UA = (
 )
 
 _WC_EPISODE_PREFIX = re.compile(r"^futbol\s+copa\s+mundo\s+fifa\s*", re.IGNORECASE)
+# Leading round token present in knockout-stage RTVE names, e.g.:
+#   "Futbol Copa Mundo Fifa 1/16 Argentina - Cabo Verde"
+#                            ^^^^ stripped here
+_ROUND_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"\d+/\d+"                          # fraction form: 1/16, 1/8, 1/4
+    r"|octavos?(?:\s+de\s+final)?"      # Octavos (de final)
+    r"|cuartos?(?:\s+de\s+final)?"      # Cuartos (de final)
+    r"|semifinal(?:es)?"                # Semifinal, Semifinales
+    r"|final"                           # Final
+    r"|tercer\s+puesto"                 # Tercer puesto
+    r"|3[^\s]*(?:\s*y\s*4[^\s]*)?\s*puesto"  # 3º y 4º puesto variants
+    r")\s+",
+    re.IGNORECASE,
+)
 _KICKOFF_RE = re.compile(r"\((\d{2}:\d{2})\)")
 _MATCH_WINDOW = timedelta(minutes=20)
 
@@ -268,7 +283,15 @@ def _parse_kickoff_utc(item: dict, channel_label: str) -> datetime | None:
             return None
 
     try:
-        dt_naive = datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M")
+        hh, mm = time_str.split(":")
+        hour = int(hh)
+        minute = int(mm)
+        # RTVE uses Spanish "over-midnight" notation: 24:00 = midnight next day,
+        # 25:30 = 01:30 next day, etc.  Roll over when hour >= 24.
+        day_offset = hour // 24
+        hour_mod = hour % 24
+        date_base = datetime.strptime(date_str, "%Y%m%d")
+        dt_naive = date_base.replace(hour=hour_mod, minute=minute) + timedelta(days=day_offset)
         # Localize in Madrid (handles DST automatically — do NOT hardcode UTC offset)
         local_dt = _MADRID_TZ.localize(dt_naive)
         return local_dt.astimezone(_UTC)
@@ -290,6 +313,10 @@ def _parse_teams(item: dict) -> tuple[str | None, str | None]:
 
         # Strip "Futbol Copa Mundo Fifa " prefix (case-insensitive)
         stripped = _WC_EPISODE_PREFIX.sub("", raw).strip()
+
+        # Strip leading knockout-round token, e.g. "1/16 " from
+        # "1/16 Argentina - Cabo Verde" so the home team parses correctly.
+        stripped = _ROUND_PREFIX_RE.sub("", stripped)
 
         # Split on " - " or " / "
         if " - " in stripped:
