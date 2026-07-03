@@ -27,6 +27,7 @@ from worldcup_bot.bot.formatters import (
     format_final_result,
     format_match_camps,
     format_match_start,
+    format_var_correction,
     match_result_is_final,
     team_flag,
 )
@@ -74,6 +75,7 @@ from worldcup_bot.reddit.parser import parse_goal_events
 from worldcup_bot.reddit.scanner import RedditMatchScanner, _teams_match
 from worldcup_bot.reddit.score_state import GoalDelta, diff_scores, load_scores, reconcile, save_scores
 from worldcup_bot.reddit.finished_state import load_finished, save_finished
+from worldcup_bot.reddit.finished_scores import load_finished_scores, save_finished_scores
 from worldcup_bot.chat.buffer import RingBuffer
 from worldcup_bot.chat.state import load_chat_state, save_chat_state
 from worldcup_bot.chat.listener import on_group_text
@@ -1602,11 +1604,12 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         finished_ids = {m.id for m in all_matches if m.status == "FINISHED"}
         new_ids = finished_ids - announced
+        matches_by_id = {m.id: m for m in all_matches}
 
         if not new_ids:
+            await _var_correction_watch(context, matches_by_id, settings)
             return
 
-        matches_by_id = {m.id: m for m in all_matches}
         live_path = f"{settings.state_dir}/porra_live.json"
 
         for match_id in new_ids:
@@ -1733,14 +1736,241 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     match.away_name,
                 )
 
+                # Record finalized score for post-final VAR-correction watch.
+                try:
+                    fs: dict = context.bot_data.setdefault("finished_scores", {})
+                    fs[str(match_id)] = {
+                        "home": match.home_score if match.home_score is not None else 0,
+                        "away": match.away_score if match.away_score is not None else 0,
+                        "finalized_at": datetime.now(timezone.utc).isoformat(),
+                        "corrected": False,
+                    }
+                    save_finished_scores(
+                        f"{settings.state_dir}/finished_scores.json", fs
+                    )
+                except Exception as _rse:
+                    log.warning(
+                        "poll_finished_matches_job: could not record score for match %d: %s",
+                        match_id, _rse,
+                    )
+
             except Exception as exc:
                 log.error("poll_finished_matches_job: error processing match %d: %s", match_id, exc)
             finally:
                 announced.add(match_id)
                 save_finished(finished_path, announced)
 
+        # ── post-final VAR-correction watch ──────────────────────────────────
+        await _var_correction_watch(context, matches_by_id, settings)
+
     except Exception as exc:
         log.exception("poll_finished_matches_job: unexpected error: %s", exc)
+
+
+# ── post-final VAR correction helpers ────────────────────────────────────────
+
+
+def _fs_entry_is_stale(entry: dict, now_utc: datetime, window: timedelta) -> bool:
+    """True when a finished_scores entry's finalized_at is outside the correction window."""
+    try:
+        finalized_at = datetime.fromisoformat(entry["finalized_at"])
+        if finalized_at.tzinfo is None:
+            finalized_at = finalized_at.replace(tzinfo=timezone.utc)
+        return now_utc - finalized_at > window
+    except Exception:
+        return True  # unparseable → prune
+
+
+async def _mark_goal_annulled(
+    context: ContextTypes.DEFAULT_TYPE,
+    match_id: int,
+    match,
+    annulled_home: int,
+    annulled_away: int,
+    settings: Settings,
+) -> None:
+    """Edit the ¡GOOOL! message for the annulled goal, appending '❌ ANULADO (VAR)'.
+
+    Locates the clip-store entry by reconstructing the token for both the home
+    and away team as scoring_team (canonical names, exactly as _process_goal_delta
+    stores them).  Best-effort: logs and returns if the entry is absent or the
+    edit fails.  Preserves the existing inline keyboard (passes reply_markup when
+    the clip is 'ready', omits it otherwise to avoid stripping a non-existent button).
+    """
+    try:
+        clip_data: dict = context.bot_data.get("clip_store", {})
+
+        entry = None
+        tok: str | None = None
+        for scoring_team in (match.home_name, match.away_name):
+            token_key = f"{match_id}:{scoring_team}:{annulled_home}-{annulled_away}"
+            candidate_tok = _cs_goal_token(token_key)
+            candidate = clip_data.get(candidate_tok)
+            if candidate is not None:
+                entry = candidate
+                tok = candidate_tok
+                break
+
+        if entry is None:
+            log.info(
+                "_mark_goal_annulled: no clip-store entry for match %d score %d-%d — "
+                "correction message sent, goal message edit skipped",
+                match_id, annulled_home, annulled_away,
+            )
+            return
+
+        original_text = format_new_goal_message(
+            scoring_team=entry.get("scoring_team", ""),
+            home_name=entry.get("home_name", ""),
+            away_name=entry.get("away_name", ""),
+            home_score=entry.get("home_score", annulled_home),
+            away_score=entry.get("away_score", annulled_away),
+            home_tla=entry.get("home_tla", ""),
+            away_tla=entry.get("away_tla", ""),
+            scorer=entry.get("scorer"),
+            minute=entry.get("minute"),
+        )
+        new_text = original_text + "\n❌ <b>ANULADO (VAR)</b>"
+
+        edit_kwargs: dict = {
+            "chat_id": entry["chat_id"],
+            "message_id": entry["message_id"],
+            "text": new_text,
+            "parse_mode": "HTML",
+        }
+        if entry.get("status") == "ready":
+            edit_kwargs["reply_markup"] = build_goal_keyboard(tok)
+
+        try:
+            await context.bot.edit_message_text(**edit_kwargs)
+            log.info(
+                "_mark_goal_annulled: edited message %d for match %d (annulled %d-%d)%s",
+                entry["message_id"], match_id, annulled_home, annulled_away,
+                " (keyboard preserved)" if entry.get("status") == "ready" else "",
+            )
+        except Exception as exc:
+            log.warning(
+                "_mark_goal_annulled: could not edit message %d for match %d: %s",
+                entry.get("message_id"), match_id, exc,
+            )
+
+    except Exception as exc:
+        log.warning(
+            "_mark_goal_annulled: unexpected error for match %d: %s", match_id, exc
+        )
+
+
+async def _var_correction_watch(
+    context: ContextTypes.DEFAULT_TYPE,
+    matches_by_id: dict,
+    settings: Settings,
+) -> None:
+    """Check recently-finalized matches for post-final VAR score corrections.
+
+    For each entry in ``bot_data["finished_scores"]`` within
+    ``settings.final_correction_window_minutes``:
+    - Prune entries older than the window.
+    - If the API's settled score differs from the recorded score, post a correction
+      message (format_var_correction) and edit the original ¡GOOOL! message to mark
+      it annulled (_mark_goal_annulled).
+
+    Non-fatal: any failure is logged and swallowed so the main finished-match job
+    is never disrupted by a correction failure.
+
+    Re-correction safety: after posting a correction the recorded score is updated
+    to the new score, so a stable API on the next tick produces no diff and no
+    duplicate correction.  A genuine second VAR correction (different score again)
+    is handled by the same diff logic.
+    """
+    try:
+        finished_scores: dict | None = context.bot_data.get("finished_scores")
+        if not finished_scores:
+            return
+
+        window = timedelta(minutes=settings.final_correction_window_minutes)
+        now_utc = datetime.now(timezone.utc)
+        scores_path = f"{settings.state_dir}/finished_scores.json"
+        dirty = False
+
+        # ── prune stale entries ───────────────────────────────────────────────
+        stale = [
+            mid_str
+            for mid_str, entry in finished_scores.items()
+            if _fs_entry_is_stale(entry, now_utc, window)
+        ]
+        for mid_str in stale:
+            finished_scores.pop(mid_str, None)
+        if stale:
+            dirty = True
+            log.info("_var_correction_watch: pruned %d stale entries", len(stale))
+
+        # ── check each remaining entry for a score change ─────────────────────
+        for mid_str, entry in list(finished_scores.items()):
+            try:
+                match_id = int(mid_str)
+                current = matches_by_id.get(match_id)
+                if current is None:
+                    continue
+                # Penalty shootouts: on-pitch home/away scores are stable; the
+                # penalty_home/away differ.  Only compare on-pitch scores so a
+                # settled shootout never triggers a false VAR correction.
+                if not match_result_is_final(current):
+                    continue
+
+                recorded_home: int = entry["home"]
+                recorded_away: int = entry["away"]
+                new_home = current.home_score if current.home_score is not None else 0
+                new_away = current.away_score if current.away_score is not None else 0
+
+                if new_home == recorded_home and new_away == recorded_away:
+                    continue  # stable — no correction needed
+
+                log.info(
+                    "_var_correction_watch: match %d VAR correction detected: "
+                    "%d-%d → %d-%d",
+                    match_id, recorded_home, recorded_away, new_home, new_away,
+                )
+
+                # 1. Post correction message to the group (best-effort)
+                correction_text = format_var_correction(current, recorded_home, recorded_away)
+                try:
+                    await context.bot.send_message(
+                        chat_id=settings.telegram_group_id,
+                        text=correction_text,
+                        parse_mode="HTML",
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "_var_correction_watch: could not post correction for match %d: %s",
+                        match_id, exc,
+                    )
+
+                # 2. Edit the original goal message (best-effort)
+                await _mark_goal_annulled(
+                    context=context,
+                    match_id=match_id,
+                    match=current,
+                    annulled_home=recorded_home,
+                    annulled_away=recorded_away,
+                    settings=settings,
+                )
+
+                # 3. Update recorded score so subsequent ticks see no diff
+                entry["home"] = new_home
+                entry["away"] = new_away
+                entry["corrected"] = True
+                dirty = True
+
+            except Exception as exc:
+                log.warning(
+                    "_var_correction_watch: error processing match %s: %s", mid_str, exc
+                )
+
+        if dirty:
+            save_finished_scores(scores_path, finished_scores)
+
+    except Exception as exc:
+        log.warning("_var_correction_watch: unexpected error: %s", exc)
 
 
 # ── app builder ───────────────────────────────────────────────────────────────
@@ -1780,6 +2010,10 @@ def build_app(settings: Settings) -> Application:
     app.bot_data["kickoff_announced"] = load_finished(kickoff_path)
     # False until first poll_kickoff_job run completes its seed pass.
     app.bot_data["kickoff_seeded"] = False
+    # Post-final VAR-correction watch: persisted dict of recently-finalized match scores.
+    # Entries are pruned after settings.final_correction_window_minutes.
+    finished_scores_path = f"{settings.state_dir}/finished_scores.json"
+    app.bot_data["finished_scores"] = load_finished_scores(finished_scores_path)
 
     # ── Chat features (picante + revive) ──────────────────────────────────────
     # Skip entirely when both features are off — true zero overhead.

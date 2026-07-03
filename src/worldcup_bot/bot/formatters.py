@@ -593,6 +593,31 @@ def match_result_is_final(match: Match) -> bool:
     return True
 
 
+def format_var_correction(match: Match, old_home: int, old_away: int) -> str:
+    """Build the post-final VAR correction notice (HTML).
+
+    Format::
+
+        ⚠️ <b>Corrección (VAR)</b>
+        🇵🇹 Portugal 2-1 Croatia 🇭🇷
+        El gol del 2-2 fue anulado.
+
+    ``old_home`` / ``old_away`` are the pre-correction on-pitch scores.
+    The new (corrected) score is read from ``match.home_score`` / ``match.away_score``.
+    """
+    h_flag = team_flag(match.home_tla)
+    a_flag = team_flag(match.away_tla)
+    new_home = match.home_score if match.home_score is not None else 0
+    new_away = match.away_score if match.away_score is not None else 0
+    h_name = html.escape(match.home_name, quote=False)
+    a_name = html.escape(match.away_name, quote=False)
+    return "\n".join([
+        "⚠️ <b>Corrección (VAR)</b>",
+        f"{h_flag} {h_name} {new_home}-{new_away} {a_name} {a_flag}",
+        f"El gol del {old_home}-{old_away} fue anulado.",
+    ])
+
+
 # ── private helpers ───────────────────────────────────────────────────────────
 
 

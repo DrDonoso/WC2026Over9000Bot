@@ -14,6 +14,8 @@ import pytest
 from worldcup_bot.api.models import Match
 from worldcup_bot.config import Settings
 from worldcup_bot.porra.engine import UserRankEntry
+from worldcup_bot.reddit.clip_store import goal_token as _cs_goal_token
+from datetime import timezone
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -71,6 +73,7 @@ def _make_context(settings: Settings) -> MagicMock:
         "finished_seeded": False,
     }
     ctx.bot.send_message = AsyncMock()
+    ctx.bot.edit_message_text = AsyncMock()
     return ctx
 
 
@@ -1646,3 +1649,344 @@ class TestPenaltyFinal:
 
         ctx.bot.send_message.assert_not_awaited()
         assert 1 not in ctx.bot_data["finished_announced"]  # not marked done → retries later
+
+
+# ── post-final VAR-correction watch ───────────────────────────────────────────
+
+
+class TestVARCorrectionWatch:
+    """Tests for the post-final VAR score correction feature.
+
+    The watch runs at the end of every poll_finished_matches_job tick.
+    Scenarios: score change → correction + goal edit; stable → no-op;
+    penalty shootout → no false positive; window expiry → prune only;
+    clip absent → correction posted, edit skipped gracefully.
+    """
+
+    # ── fixture helpers ────────────────────────────────────────────────────
+
+    def _por_cro(self, home_score: int, away_score: int, winner: str = "HOME_TEAM") -> Match:
+        """Portugal vs Croatia at the given on-pitch score."""
+        return Match(
+            id=101,
+            utc_date="2026-07-03T20:00:00Z",
+            status="FINISHED",
+            stage="LAST_16",
+            group=None,
+            home_tla="POR",
+            away_tla="CRO",
+            home_name="Portugal",
+            away_name="Croatia",
+            home_score=home_score,
+            away_score=away_score,
+            winner=winner,
+            duration="REGULAR",
+        )
+
+    def _fs_entry(
+        self,
+        home: int,
+        away: int,
+        corrected: bool = False,
+        age_minutes: int = 5,
+    ) -> dict:
+        """finished_scores entry finalized `age_minutes` ago."""
+        ts = (datetime.now(timezone.utc) - timedelta(minutes=age_minutes)).isoformat()
+        return {"home": home, "away": away, "finalized_at": ts, "corrected": corrected}
+
+    def _clip_tok_entry(
+        self,
+        match_id: int,
+        scoring_team: str,
+        home_score: int,
+        away_score: int,
+        message_id: int = 42,
+        chat_id: int = -100999,
+        status: str = "searching",
+    ) -> tuple[str, dict]:
+        """(token, clip_store_entry) for the given scored goal."""
+        token_key = f"{match_id}:{scoring_team}:{home_score}-{away_score}"
+        tok = _cs_goal_token(token_key)
+        entry = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "home_name": "Portugal",
+            "away_name": "Croatia",
+            "home_tla": "POR",
+            "away_tla": "CRO",
+            "home_score": home_score,
+            "away_score": away_score,
+            "scoring_team": scoring_team,
+            "scorer": "Cristiano Ronaldo",
+            "minute": "90",
+            "status": status,
+            "clip_path": None,
+            "file_id": None,
+            "attempts": 0,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return tok, entry
+
+    def _make_ctx_no_new_ids(self, settings: Settings, match: Match) -> tuple[MagicMock, MagicMock]:
+        """Context where the match is already in finished_announced (no new recap)."""
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = True
+        ctx.bot_data["finished_announced"] = {match.id}
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+        return ctx, mock_client
+
+    # ── main correction tests ──────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_correction_posted_and_goal_edited_on_score_change(self, tmp_path):
+        """2-2 finalized, API corrects to 2-1 → correction sent, goal message edited."""
+        settings = _make_settings(tmp_path, ai=False)
+        corrected_match = self._por_cro(2, 1, winner="HOME_TEAM")
+        ctx, mock_client = self._make_ctx_no_new_ids(settings, corrected_match)
+
+        # Pre-recorded score at finalization: 2-2
+        ctx.bot_data["finished_scores"] = {"101": self._fs_entry(home=2, away=2)}
+        # Portugal scored the 2-2 goal (searching status)
+        tok, clip_entry = self._clip_tok_entry(
+            match_id=101, scoring_team="Portugal",
+            home_score=2, away_score=2, message_id=42,
+        )
+        ctx.bot_data["clip_store"] = {tok: clip_entry}
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        # 1. Correction message sent with correct format and target
+        send_calls = ctx.bot.send_message.call_args_list
+        assert len(send_calls) == 1
+        ckw = send_calls[0][1]
+        assert ckw["chat_id"] == settings.telegram_group_id
+        assert ckw["parse_mode"] == "HTML"
+        text = ckw["text"]
+        assert "Corrección" in text
+        assert "VAR" in text
+        assert "2-2" in text    # old (annulled) score
+        assert "2-1" in text    # new (corrected) score
+
+        # 2. Original goal message edited with ANULADO mark (no keyboard for 'searching')
+        edit_calls = ctx.bot.edit_message_text.call_args_list
+        assert len(edit_calls) == 1
+        ekw = edit_calls[0][1]
+        assert ekw["chat_id"] == -100999
+        assert ekw["message_id"] == 42
+        assert "ANULADO" in ekw["text"]
+        assert "VAR" in ekw["text"]
+        assert ekw["parse_mode"] == "HTML"
+        assert "reply_markup" not in ekw  # 'searching' clip → no keyboard
+
+        # 3. finished_scores updated in-memory
+        entry = ctx.bot_data["finished_scores"]["101"]
+        assert entry["corrected"] is True
+        assert entry["home"] == 2
+        assert entry["away"] == 1
+
+        # 4. Persisted to disk
+        import json as _json
+        with open(str(tmp_path / "finished_scores.json")) as f:
+            saved = _json.load(f)
+        assert saved["101"]["corrected"] is True
+        assert saved["101"]["home"] == 2
+        assert saved["101"]["away"] == 1
+
+    @pytest.mark.asyncio
+    async def test_keyboard_preserved_when_clip_ready(self, tmp_path):
+        """'ready' clip entry → 'Ver gol' keyboard passed through on edit."""
+        from worldcup_bot.reddit.notifier import build_goal_keyboard
+
+        settings = _make_settings(tmp_path, ai=False)
+        corrected_match = self._por_cro(2, 1)
+        ctx, mock_client = self._make_ctx_no_new_ids(settings, corrected_match)
+        ctx.bot_data["finished_scores"] = {"101": self._fs_entry(2, 2)}
+
+        tok, clip_entry = self._clip_tok_entry(
+            match_id=101, scoring_team="Portugal",
+            home_score=2, away_score=2, message_id=55, status="ready",
+        )
+        ctx.bot_data["clip_store"] = {tok: clip_entry}
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        edit_calls = ctx.bot.edit_message_text.call_args_list
+        assert len(edit_calls) == 1
+        ekw = edit_calls[0][1]
+        assert "reply_markup" in ekw
+        assert ekw["reply_markup"] == build_goal_keyboard(tok)
+
+    @pytest.mark.asyncio
+    async def test_no_correction_when_score_stable(self, tmp_path):
+        """Recorded 2-1, API still 2-1 → no correction, no edit."""
+        settings = _make_settings(tmp_path, ai=False)
+        same_match = self._por_cro(2, 1)
+        ctx, mock_client = self._make_ctx_no_new_ids(settings, same_match)
+        ctx.bot_data["finished_scores"] = {"101": self._fs_entry(2, 1)}
+        ctx.bot_data["clip_store"] = {}
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        ctx.bot.edit_message_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_correction_on_third_tick(self, tmp_path):
+        """After correction the recorded score is updated → stable on third tick → no duplicate."""
+        settings = _make_settings(tmp_path, ai=False)
+        # Entry already corrected: recorded score is the post-VAR score (2-1)
+        same_match = self._por_cro(2, 1)
+        ctx, mock_client = self._make_ctx_no_new_ids(settings, same_match)
+        ctx.bot_data["finished_scores"] = {
+            "101": self._fs_entry(home=2, away=1, corrected=True),
+        }
+        ctx.bot_data["clip_store"] = {}
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        ctx.bot.edit_message_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_penalty_shootout_no_false_correction(self, tmp_path):
+        """Settled shootout: on-pitch score stable (1-1) → no false VAR correction.
+
+        Penalty shootouts only change penalty_home/away, not home_score/away_score.
+        match_result_is_final(match) is True here (both penalty scores set, winner set).
+        The comparison is purely on on-pitch scores; 1-1 == 1-1 → no diff.
+        """
+        settings = _make_settings(tmp_path, ai=False)
+        shootout_match = Match(
+            id=102,
+            utc_date="2026-07-03T20:00:00Z",
+            status="FINISHED",
+            stage="LAST_16",
+            group=None,
+            home_tla="GER",
+            away_tla="BRA",
+            home_name="Germany",
+            away_name="Brazil",
+            home_score=1,
+            away_score=1,
+            winner="HOME_TEAM",
+            duration="PENALTY_SHOOTOUT",
+            penalty_home=4,
+            penalty_away=3,
+        )
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = True
+        ctx.bot_data["finished_announced"] = {102}
+        # On-pitch score recorded at finalization: 1-1 (same as current)
+        ctx.bot_data["finished_scores"] = {"102": self._fs_entry(1, 1)}
+        ctx.bot_data["clip_store"] = {}
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [shootout_match]
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        ctx.bot.edit_message_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_window_expiry_prunes_entry_no_correction(self, tmp_path):
+        """Entry finalized 45 min ago (> 30-min window) → pruned, no correction."""
+        settings = _make_settings(tmp_path, ai=False)
+        corrected_match = self._por_cro(2, 1)
+        ctx, mock_client = self._make_ctx_no_new_ids(settings, corrected_match)
+        # Finalized 45 min ago — outside the default 30-min window
+        ctx.bot_data["finished_scores"] = {
+            "101": self._fs_entry(home=2, away=2, age_minutes=45),
+        }
+        ctx.bot_data["clip_store"] = {}
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        ctx.bot.edit_message_text.assert_not_awaited()
+        assert "101" not in ctx.bot_data["finished_scores"]  # pruned
+
+    @pytest.mark.asyncio
+    async def test_correction_sent_even_if_goal_message_absent(self, tmp_path):
+        """Goal message absent from clip_store → correction still posted, edit skipped."""
+        settings = _make_settings(tmp_path, ai=False)
+        corrected_match = self._por_cro(2, 1)
+        ctx, mock_client = self._make_ctx_no_new_ids(settings, corrected_match)
+        ctx.bot_data["finished_scores"] = {"101": self._fs_entry(2, 2)}
+        ctx.bot_data["clip_store"] = {}  # no clip entry
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        # Correction message still sent
+        assert ctx.bot.send_message.await_count == 1
+        text = ctx.bot.send_message.call_args_list[0][1]["text"]
+        assert "Corrección" in text
+        # But goal message NOT edited (no entry found)
+        ctx.bot.edit_message_text.assert_not_awaited()
+        # corrected flag still set
+        assert ctx.bot_data["finished_scores"]["101"]["corrected"] is True
+
+    @pytest.mark.asyncio
+    async def test_score_recorded_when_match_finalized(self, tmp_path):
+        """When a new match is finalized, its score is recorded in finished_scores."""
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = True
+        ctx.bot_data["finished_announced"] = set()  # match 1 is new
+        ctx.bot_data["finished_scores"] = {}
+
+        match = _make_match(1, winner="HOME_TEAM")  # 2-1
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+        mock_scanner = MagicMock()
+        mock_scanner.get_espn_game_id = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        assert "1" in ctx.bot_data["finished_scores"]
+        entry = ctx.bot_data["finished_scores"]["1"]
+        assert entry["home"] == 2
+        assert entry["away"] == 1
+        assert entry["corrected"] is False
+        assert "finalized_at" in entry

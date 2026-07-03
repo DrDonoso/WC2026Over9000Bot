@@ -62,6 +62,8 @@ class Settings:
     revive_quiet_start_hour: int = 23
     revive_quiet_end_hour: int = 6
     revive_jitter_seconds: int = 2700
+    # ── Post-final VAR-correction watch ──────────────────────────────────────
+    final_correction_window_minutes: int = 30
 
 
 def _parse_bool(raw: str) -> bool:
@@ -173,4 +175,5 @@ def load_settings() -> Settings:
         revive_quiet_start_hour=int(os.getenv("REVIVE_QUIET_START_HOUR", "23")),
         revive_quiet_end_hour=int(os.getenv("REVIVE_QUIET_END_HOUR", "6")),
         revive_jitter_seconds=int(os.getenv("REVIVE_JITTER_SECONDS", "2700")),
+        final_correction_window_minutes=int(os.getenv("FINAL_CORRECTION_WINDOW_MINUTES", "30")),
     )
