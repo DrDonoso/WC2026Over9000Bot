@@ -7,6 +7,10 @@
 
 ## Recent Sessions (2026-06-26 onwards)
 
+### 2026-07-03 — Post-Final VAR Score Correction Watch — APPROVED
+
+**Role:** Lead reviewer. Approved VAR correction watch architecture (6 concurrency checks: no double-correction, no false-correction, window/prune safety, edit safety, no regression). 2165 tests pass. Decision merged to decisions.md. Ship it.
+
 ### 2026-07-03 — TVE Knockout-Round Prefix + Midnight Notation Fix — APPROVED
 
 **Role:** Lead reviewer. Approved round-prefix regex (anchored `^`, trailing `\s+`) and over-midnight hour rollover (identity-safe for hour<24). 2157 tests pass.
