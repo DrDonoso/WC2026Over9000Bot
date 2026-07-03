@@ -5,6 +5,22 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260703] - 2026-07-03
+
+- fix(tve): 'La 1' label for knockout & midnight matches
+- Belgium 3-2 Senegal penalty: timeout (18.75 → 30 min search window)
+- USA 1-0 Bosnia: Reddit search miss ("United States" → "usa" alias) + timeout
+- _MAX_CLIP_ATTEMPTS 25 → 40 in __main__.py
+- Added _TEAM_SEARCH_SHORT + _search_term() in clip_finder.py
+- 13 new tests (2134 total), all pass
+- No regression: post-fetch matching unchanged
+- .squad/log/2026-07-02T08-42-51Z-vergol-button-fix.md
+- .squad/orchestration-log/2026-07-02T08-42-51Z-{kante,pirlo}.md
+- .squad/decisions.md (merged entry prepended)
+- .squad/agents/pirlo/history.md (added 2026-07-02 session)
+- .squad/agents/pirlo/history-archive.md (archived old entries)
+
+
 ## [20260702] - 2026-07-02
 
 - fix(clip): 'Ver gol' button - widen window + normalize team search
