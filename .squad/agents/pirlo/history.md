@@ -7,6 +7,10 @@
 
 ## Recent Sessions (2026-06-26 onwards)
 
+### 2026-07-03 — TVE Knockout-Round Prefix + Midnight Notation Fix — APPROVED
+
+**Role:** Lead reviewer. Approved round-prefix regex (anchored `^`, trailing `\s+`) and over-midnight hour rollover (identity-safe for hour<24). 2157 tests pass.
+
 ### 2026-07-02 — "Ver gol" Button Clip-Pipeline Fix — APPROVED
 
 **Role:** Lead reviewer. Approved narrowly-scoped search-term normalization (USA alias) and timeout bump (25→40 attempts). No regression: post-fetch matching unchanged. 2134 tests pass.

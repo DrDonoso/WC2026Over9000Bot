@@ -2566,3 +2566,1008 @@ This seeds both currently-FINISHED matches AND stale IN_PLAY/PAUSED matches whos
 
 ---
 
+
+---
+
+**Date:** 2026-06-26  
+**Author:** Kanté (Backend Developer)  
+**Status:** Implemented (code changes UNCOMMITTED; pending owner decision on commit/push and DAILY_UPDATE_HOUR config)
+
+## Problem
+
+The 09:00 daily update (`daily_update_job`) never showed the `📺 La 1` (or Teledeporte) marker for fixtures airing on Spanish public TV. Running `/updateDiario` manually later in the day DID show it. Both paths call `generate_daily_update(client, ai, settings)` identically — the difference was in the TVE data available at each time.
+
+## Root Causes
+
+### RC1 — Failure-caching bug (confirmed code bug)
+
+`load_tve_broadcasts` (tve.py:402-431) cached the result **unconditionally** — even when every channel fetch returned `None` (network error, RTVE outage at 09:00). An empty `broadcasts = []` was stored in `_tve_cache["data"]` for 6 hours. Any call within that window — including `/updateDiario` — saw `tve_by_key = {}` → no label.
+
+The `/updateDiario` worked when the owner ran it either after the cache expired naturally (15:00+) or after a bot restart (clears the module-level dict).
+
+### RC2 — RTVE schedule published mid-morning
+
+Live API evidence: `diahoy = 20260626104143` (La 1), `20260626103942` (Teledeporte). The RTVE schedule is published around **10:40 CEST**, after the 09:00 job fires. At 09:00:
+- WC match items for today may be absent from the schedule (fetches succeed, `broadcasts = []`), or
+- Copa del Mundo items exist but description lacks `(HH:MM)`, so `_parse_kickoff_utc` falls back to `begintime` (pre-match show start), which can be >20 min before actual kickoff → `tve_channel_for`'s ±20 min window misses.
+
+RC1 then caches this wrong result for 6 hours, silencing RC2.
+
+## Decisions
+
+### 1. Don't cache when all fetches fail
+
+Track `any_fetch_ok`. Update `_tve_cache` only when at least one channel returned a non-None HTTP response. If all fail, return `[]` without caching → next call retries immediately.
+
+### 2. Short TTL for empty WC schedule
+
+When fetches succeed but `broadcasts = []` (no WC items found), store `_EMPTY_RESULT_TTL = 1800 s` (30 min) instead of the default 6 h. The bot will retry before the next live window and pick up the RTVE update that lands ~10:40.
+
+### 3. Same-day TLA-pair fallback in `tve_channel_for`
+
+After the primary ±20 min window and time-only fallback, add a third tier: if the broadcast is on the same UTC calendar date and TLA pair matches exactly, accept it regardless of time offset. This handles pre-show `begintime` values >20 min before actual kickoff without weakening the anti-misfire protection (teams never play twice on the same WC day).
+
+### 4. Cache `_ttl` key + conftest reset
+
+Store the effective TTL as `_tve_cache["_ttl"]` so subsequent cache-hit checks use the correct TTL for that result type. Update `conftest.py reset_tve_cache` fixture to also pop `_ttl`.
+
+## Files Changed
+
+- `src/worldcup_bot/tve.py` — `load_tve_broadcasts`, `tve_channel_for`, `_EMPTY_RESULT_TTL` constant
+- `tests/conftest.py` — `reset_tve_cache` fixture pops `_ttl`
+- `tests/test_tve.py` — 8 new tests
+- `tests/test_ai.py` — 1 new integration test (09:00 scenario with same-day fallback)
+
+## Test Delta
+
+1618 → 1629 (+11 total from Kanté +9, Buffon +2 edge cases, all green).
+
+## Session Status
+
+Both review gates (Pirlo, Buffon) passed. All tests green. No required code changes.
+
+**Recommendation from Pirlo to owner:** Move `DAILY_UPDATE_HOUR` to 11 (RTVE publishes ~10:40; 09:00 is pre-publication); no code change needed, env-configurable via `DAILY_UPDATE_HOUR=11`.
+
+---
+
+# Review: TVE 📺 label missing from 09:00 daily update
+
+**Date:** 2026-06-26  
+**Reviewer:** Pirlo (Lead / Tech Lead)  
+**Author:** Kanté  
+**Status:** APPROVED  
+
+## 1. Same-Day TLA-Pair Fallback Safety
+
+**SAFE — no regression risk.**
+
+The core question: can tier 3 attach the wrong channel to the wrong match?  **No.**
+
+- In a FIFA World Cup, a given team pairing plays at most once per tournament, let alone once per calendar day. The {home_tla, away_tla} set is unique per UTC date by tournament rules.
+- The fallback requires BOTH TLAs to be non-None (`b.home_tla is not None and b.away_tla is not None`), so it cannot fire for unparsed broadcasts — the "time-only ambiguity" that tier 2's `len(time_window_hits) == 1` guard protects against is structurally impossible in tier 3.
+- Same fixture on both La 1 and Teledeporte: both enter `candidates`, then `"La 1" in candidates` picks La 1. Correct. Test `test_same_day_tla_fallback_prefers_la1` verifies this.
+- The `if not candidates:` gate ensures tier 3 never competes with tier 1/2 — strictly lower priority. No regression to the "don't mismatch simultaneous games" property.
+- Re-broadcasts / summary items are already filtered upstream by `parse_wc_broadcasts` (idPrograma + resumen exclusion). A re-broadcast of the same game would have identical TLAs anyway — same match, not a mismatch.
+
+**Conclusion:** The combination of same-UTC-date + exact-TLA-pair is a strictly sound relaxation of the ±20-min window constraint for the scenario it targets (pre-show `begintime` >20 min before kickoff). No holes found.
+
+## 2. Cache Redesign
+
+**Sound. No state-leak or staleness concerns.**
+
+| Scenario | any_fetch_ok | broadcasts | Cached? | TTL |
+|---|---|---|---|---|
+| All fetches fail | False | [] | NO — retries immediately | — |
+| Fetches ok, no WC items | True | [] | YES | 30 min |
+| Fetches ok, WC items found | True | [items] | YES | 6 h |
+| Partial success (La 1 ok, dep fails) | True | La 1 items | YES | 6 h or 30 min |
+
+- Partial success is handled reasonably: La 1 is the primary WC channel, so caching its results even if Teledeporte failed is correct behaviour. If La 1 succeeds with no WC items and Teledeporte fails, we get 30-min TTL → Teledeporte retried soon. Acceptable.
+- `_tve_cache.get("_ttl", ttl_seconds)` defaults correctly on first call. TTL transitions (empty→populated) update `_ttl` on re-fetch. No stale-TTL bug.
+- `conftest.py` properly pops `_ttl` in both setup and teardown.
+- `min(ttl_seconds, _EMPTY_RESULT_TTL)` is a nice guard against callers passing `ttl_seconds < 1800` in tests.
+
+## 3. Residual Timing — Recommendation
+
+**The 09:00 message fundamentally cannot show TVE labels when RTVE hasn't published the schedule yet (~10:40).** The cache fixes ensure subsequent calls (manual `/updateDiario`, or future automatic retries) pick up data within 30 min, but the scheduled 09:00 job is a one-shot: it generates once and sends.
+
+### Recommendation for DrDonoso
+
+**Move `daily_update_hour` to 11:00** (or configure via env `DAILY_UPDATE_HOUR=11`).
+
+Rationale:
+- RTVE publishes by ~10:40 consistently. An 11:00 send gives a 20-min margin.
+- The daily update is informational, not time-critical — users check their phone during their morning, not at 09:00:00 sharp.
+- No code change needed: `settings.daily_update_hour` is already env-configurable.
+- The alternative (retry-and-edit-message loop at 11:00) adds complexity for marginal gain. Not worth it — just send later.
+
+If you strongly prefer 09:00 for non-TVE content freshness, a simple compromise: keep 09:00 for the main update, add a second lightweight job at ~11:00 that only re-sends if TVE labels were absent in the first send. But honestly, 11:00 is cleaner.
+
+## Test Coverage
+
+1629 tests green (verified locally). +11 new tests covering:
+- Same-day fallback: positive, negative (wrong TLAs), cross-day rejection, La 1 preference
+- Cache: all-fail retry, empty-result short TTL, non-empty full TTL
+- Integration: 09:00 scenario end-to-end in test_ai.py
+
+Good coverage. The former `test_outside_window_returns_none` was correctly updated to `test_outside_window_matching_tlas_uses_same_day_fallback` (behaviour changed by design), and a new `test_outside_window_wrong_tlas_returns_none` preserves the negative case.
+
+---
+
+## VERDICT: APPROVE
+
+No required changes. Code is correct, safe, well-tested. Recommendation to move daily update to 11:00 is advice for the owner — not a merge gate.
+
+---
+
+# Gate Verdict: TVE 09:00 Daily-Update Fix
+
+**Date:** 2026-06-26  
+**Reviewer:** Buffon (Tester / QA)  
+**Author:** Kanté (Backend Developer)  
+**Branch/change:** TVE failure-caching bug fix + same-day TLA-pair fallback  
+**Baseline:** 1618 → Kanté claimed 1627 → Buffon final: **1629 passed, 5 warnings**
+
+---
+
+## VERDICT: PASS WITH ADDED TESTS (+2)
+
+All hazards resolved. No failures. Two missing edge-case tests added by Buffon.
+
+---
+
+## STEP 1 — Suite run
+
+```
+1629 passed, 5 warnings in 75s
+```
+
+Kanté's claimed count **1627** confirmed ✅. Buffon added +2 tests → 1629.
+
+---
+
+## STEP 2 — New test audit (Kanté's +9)
+
+### test_tve.py (+8 net: -1 old, +9 new)
+
+The removed test `test_outside_window_returns_none` previously asserted that a broadcast 25 min off with matching TLAs returned None. That assertion is now wrong (same-day fallback catches it). Correct replacement with a two-test split. ✅
+
+| Test | Meaningful? | Would fail without fix? |
+|------|-------------|------------------------|
+| `test_failed_fetch_not_cached_allows_retry` | ✅ | ✅ — Without fix: second call returns cached `[]`, `call_count` stays 2 not 4 |
+| `test_empty_broadcasts_use_short_ttl` | ✅ | ✅ — Without fix: no `_ttl` key or wrong value (6h) |
+| `test_non_empty_broadcasts_use_full_ttl` | ✅ | ✅ — Without fix: wrong `_ttl` value |
+| `test_same_day_tla_fallback_beyond_20min_window` | ✅ | ✅ — Without fallback: returns None |
+| `test_outside_window_matching_tlas_uses_same_day_fallback` | ✅ | ✅ — Without fallback: returns None |
+| `test_same_day_tla_fallback_wrong_tlas_no_match` | ✅ | N/A (negative test — guards against over-matching) |
+| `test_same_day_tla_fallback_different_utc_date_no_match` | ✅ | N/A (negative test — guards against over-matching) |
+| `test_same_day_tla_fallback_prefers_la1` | ✅ | ✅ — Without La-1-wins logic: random channel returned |
+
+**RC1 retry specifically:** `call_count == 4` (2 channels × 2 invocations) directly verifies the second call refetches — not just the return value. ✅
+
+**TTL selection:** Both `test_empty_broadcasts_use_short_ttl` (`_ttl == 1800`) and `test_non_empty_broadcasts_use_full_ttl` (`_ttl == 21600`) assert the actual cache dict value. ✅
+
+### test_ai.py (+1)
+
+`test_tve_label_via_same_day_fallback_simulates_0900_scenario`:
+- Uses the **real** `tve_channel_for` (not mocked).
+- `load_tve_broadcasts` mocked to return a `TveBroadcast` with `kickoff_utc` 45 min before match kickoff.
+- Full `generate_daily_update` pipeline executes.
+- Asserts `"📺 La 1" in result`.
+- This is a genuine end-to-end RC2 regression test. ✅
+
+### conftest.py
+
+`reset_tve_cache` now pops `_ttl` before AND after each test. Confirmed: even if `_ttl` were to leak (it can't, since fixture runs), `data` is also reset to None so no false cache hit is possible. TVE tests run clean in isolation (61 passed, 1.68s). ✅
+
+---
+
+## STEP 3 — Edge cases
+
+### Found missing — tests added by Buffon
+
+#### 1. Cross-match prevention: two different games on same day
+
+**Gap:** All Kanté same-day tests use a *single* broadcast in the list. No test verified that when there are two broadcasts on the same UTC day for two different matches, each match correctly claims its own broadcast and not the other's.
+
+**Added:** `TestTveChannelFor.test_same_day_tla_fallback_no_cross_match_two_simultaneous_games`
+
+```python
+match_arg_aut = _make_match("ARG", "AUT", "2026-06-22T19:00:00Z")
+match_bra_ger = _make_match("BRA", "GER", "2026-06-22T19:00:00Z")
+broadcasts = [
+    _bcast(_dt("2026-06-22T17:30:00Z"), "ARG", "AUT", "La 1"),
+    _bcast(_dt("2026-06-22T17:30:00Z"), "BRA", "GER", "Teledeporte"),
+]
+assert tve_channel_for(match_arg_aut, broadcasts) == "La 1"
+assert tve_channel_for(match_bra_ger, broadcasts) == "Teledeporte"
+```
+
+This WOULD fail if the TLA-pair guard (`{b.home_tla, b.away_tla} == match_tlas`) were weakened or removed — both broadcasts would qualify for each match.
+
+#### 2. Partial fetch success (La 1 ok, Teledeporte None)
+
+**Gap:** `test_returns_parsed_broadcasts` has Teledeporte returning `{"items": []}` (empty schedule, fetch succeeded). No test had Teledeporte returning `None` (fetch failed). This is a distinct code path: `any_fetch_ok` is set by La 1 but Teledeporte's `None` is skipped without setting it to False.
+
+**Added:** `TestLoadTveBroadcasts.test_partial_fetch_la1_ok_teledeporte_none_cached_with_full_ttl`
+
+```python
+def side_effect(slug, **_):
+    if slug == "tv1": return {"items": [_ITEM_LA1_ARG_AUT]}
+    return None  # Teledeporte fails
+result = load_tve_broadcasts(ttl_seconds=21600)
+assert len(result) == 1
+assert tve_module._tve_cache["data"] is not None
+assert tve_module._tve_cache.get("_ttl") == 21600  # full TTL, not short
+```
+
+### Already covered
+
+| Edge case | Coverage |
+|-----------|----------|
+| `tve_enabled=False` short-circuit | `test_disabled_returns_empty_without_fetching` (existing) ✅ |
+| `_ttl` key lifecycle / fixture reset | conftest autouse fixture: pop before + after ✅ |
+| All fetches fail → no cache | `test_failed_fetch_not_cached_allows_retry` ✅ |
+| Wrong TLAs on same day | `test_same_day_tla_fallback_wrong_tlas_no_match` ✅ |
+| Different UTC date | `test_same_day_tla_fallback_different_utc_date_no_match` ✅ |
+
+---
+
+## Hazards / concerns
+
+**None blocking.** No source-code issues found. The two missing tests close the remaining coverage gaps.
+
+One cosmetic note: `_make_match` hard-codes `id=1`; when two Match objects are created in `test_same_day_tla_fallback_no_cross_match_two_simultaneous_games`, both have `id=1`. This does not affect `tve_channel_for` correctness (it only reads `utc_date`, `home_tla`, `away_tla`).
+
+---
+
+## Final test count
+
+**1629 passed, 5 warnings** (Kanté +9, Buffon +2 = net +11 from baseline 1618).
+
+---
+
+# Decision: Live goal notification bugs — root causes and fixes
+
+**Author:** Kanté (Backend Developer)  
+**Date:** 2026-06-26  
+**Status:** IMPLEMENTED — 1571 tests green (after Pirlo review + Buffon gate)
+
+---
+
+## Root Causes Found
+
+### Bug A — Missed goal notifications (Ecuador-Germany 0-1, 1-1 never arrived)
+
+**Two distinct causes:**
+
+**A1 – API status-flip delay** (most likely for Ecuador-Germany):  
+\poll_goals_job\ only processes matches with status \IN_PLAY\ or \PAUSED\.  
+The football-data API sometimes takes 5–15 minutes to flip a match from \SCHEDULED\ to \IN_PLAY\.  
+When it finally flips, it may already show a non-zero score (e.g. \1-1\).  
+The seeding code in \__main__.py:519-532\ called \
+econcile(None, None, curr_home, curr_away)\ which silently stored the current score as the baseline, announcing nothing for the earlier goals.  
+\poll_thread_goals_job\ also missed these because it guards on \scores.get(key) is None\.
+
+**A2 – Bot restart mid-match** (possible contributor):  
+\
+econcile()\ in \score_state.py:176-179\ had a blind seed pass:  
+\\\python
+if seen is None:
+    ann = announced if announced is not None else new
+    return ([], new, ann)   # ALWAYS [] — bug
+\\\
+On restart, the per-source \seen\ dict is empty (in-memory, not persisted).  
+First tick: \
+econcile(None, {1,1}, 2, 1)\ → \
+ew_seen={2,1}\, no deltas emitted.  
+Second tick: \
+ew == seen\ (both {2,1}) → no deltas again.  
+The 1-1 → 2-1 transition is permanently lost.
+
+### Bug B — Missing inline keyboards (Tunisia-NL, Japan-Sweden, Turkey-USA)
+
+**Two causes:**
+
+**B1 – Race condition between \poll_goal_clips_job\ and \_backfill_scorer_in_clip_store\:**  
+\poll_goal_clips_job\ in \__main__.py:967-973\ set \ntry["status"] = "ready"\ AFTER  
+\wait context.bot.edit_message_reply_markup(...)\.  
+If \_backfill_scorer_in_clip_store\ ran in the asyncio gap during the network round-trip,  
+it saw \status="searching"\, called \dit_message_text(reply_markup=None)\,  
+which the Telegram API interprets as "clear the keyboard".  
+This was confirmed at \__main__.py:353\ (\keyboard = ... if entry.get("status") == "ready" else None\).
+
+**B2 – Disk-full download failures:**  
+If the volume was full, \downloader.download()\ returned \None\ → status stays \"searching"\ → timeout → no keyboard ever added.  
+This is expected behavior but exacerbated by clips accumulating over many matches.
+
+### Bug C — Disk space assessment
+
+~4 GB free is borderline. At ~30 MB per clip × ~3 goals/match × multiple concurrent matches, space fills quickly with a 7-day retention window. Disk-full download failures (Bug B2) are a direct consequence. The new delete-after-send (see below) mitigates this substantially going forward.
+
+---
+
+## Fixes Implemented
+
+### Fix A1 — reconcile() restart case (\score_state.py\)
+
+When \seen is None\ (first tick for this source after restart) and \nnounced is not None\ (persisted baseline exists), use \_ahead()\ to check whether goals were missed. Emits ONE neutral catch-up \GoalDelta(kind="catchup")\ instead of N fabricated per-goal deltas:
+
+\\\python
+if seen is None:
+    if announced is None:
+        return ([], new, new)          # truly first-seen — seed only
+    if _ahead(new, announced):
+        # Goals scored while bot was down — emit ONE neutral catch-up delta
+        catchup = GoalDelta(kind="catchup", goals_missed=home_diff+away_diff, ...)
+        return ([catchup], new, new)
+    return ([], new, announced)        # source lagging — no delta
+\\\
+
+### Fix A2 — Initial non-zero seeding (\__main__.py — poll_goals_job\)
+
+In the \stored is None\ branch, when \curr_home > 0 or curr_away > 0\, emit ONE \GoalDelta(kind="catchup")\ instead of N synthesised per-team goals. This prevents broadcasting fabricated scorelines that never existed.
+
+### Fix B1 — Status before edit (\__main__.py — poll_goal_clips_job\)
+
+Reordered:
+\\\python
+# Before fix: set status AFTER edit (keyboard race)
+# After fix: set status BEFORE edit (backfill sees "ready" during network round-trip)
+entry["status"] = "ready"
+entry["clip_path"] = str(persistent_path)
+await context.bot.edit_message_reply_markup(...)
+\\\
+
+### Fix B2 — Backfill keyboard hardening (\__main__.py — _backfill_scorer_in_clip_store\)
+
+Changed to OMIT \
+eply_markup\ from \dit_message_text\ kwargs when status ≠ "ready", rather than passing \
+eply_markup=None\. Passing \None\ sends \
+eply_markup: null\ to Telegram which removes any existing keyboard. Omitting the key leaves the existing markup unchanged.
+
+\\\python
+edit_kwargs = {"chat_id": ..., "message_id": ..., "text": ..., "parse_mode": "HTML"}
+if entry.get("status") == "ready":
+    edit_kwargs["reply_markup"] = build_goal_keyboard(tok)
+# If not ready: key is absent → Telegram preserves existing markup
+await context.bot.edit_message_text(**edit_kwargs)
+\\\
+
+### Fix D — Delete clip after successful send (\handlers.py — cmd_ver_gol_callback\)
+
+After \send_video\ succeeds and \ile_id\ is persisted to \goal_clips.json\, the local file is deleted:
+
+\\\python
+if sent_msg and sent_msg.video:
+    entry["file_id"] = sent_msg.video.file_id
+    _cs_save_clips(clips_path, clip_store)   # persist file_id FIRST
+    # Delete local file — future taps use file_id; stale file_id falls back gracefully
+    Path(clip_path_str).unlink(missing_ok=True)
+\\\
+
+**Safety guarantees:**
+- Delete only runs AFTER successful send AND after file_id is saved to disk.  
+- Never raises — wrapped in try/except/log.  
+- \prune_old_entries\ already uses \missing_ok=True\, so no conflict.  
+- If file_id later expires, the existing "file not found" path sends an error message.
+
+---
+
+## Catch-Up Message Format (neutral, no fabrication)
+
+\\\
+⚠️ Me perdí 2 goles
+🇪🇨 Ecuador 1-1 Germany 🇩🇪
+\\\
+
+- ONE message per catch-up event, regardless of how many goals were missed.
+- No scoring team attribution; no intermediate scoreline.
+- A single clip-store entry is registered with token \{match_id}:catchup:{H}-{A}\.
+  The clip finder can still locate a recent goal clip and attach a "Ver gol" button.
+
+---
+
+## Recommendation for Maldini (compose/volume)
+
+The 7-day prune window (\prune_old_entries\) combined with many matches accumulating clips risks filling the volume. The new delete-after-send removes files as soon as Telegram caches them, dramatically reducing steady-state disk usage.
+
+**Recommended:**
+1. Consider reducing \max_age_days\ in \prune_old_entries\ from 7 to 2 for faster background cleanup of clips that were never pressed (search timed out or no one pressed the button).
+2. Monitor volume with a disk-usage alert at <1 GB free.
+3. The delete-after-send fix handles the "pressed" case; the prune handles the "never pressed" case.
+
+---
+
+## Tests
+
+Full suite: **1571 passed** (1552 before this session; +16 by Kanté; +2 by Buffon; +3 catchup redesign by Kanté — net +21 total).
+
+Files changed:
+- \src/worldcup_bot/reddit/score_state.py\ — GoalDelta.goals_missed field, Fix A1 (single catchup delta)
+- \src/worldcup_bot/reddit/notifier.py\ — format_catchup_message()
+- \src/worldcup_bot/__main__.py\ — _notify_catchup(), Fix A2 (single catchup delta), Fix B1 (status before edit), Fix B2 (omit reply_markup)
+- \src/worldcup_bot/bot/handlers.py\ — Fix D (delete after send)
+- \	ests/test_score_state.py\ — restart tests updated for single catchup delta; Buffon's test updated
+- \	ests/test_poll_goals_job.py\ — catchup tests updated; new neutral-message assertion test
+- \	ests/test_poll_thread_goals_job.py\ — backfill-no-keyboard assertion updated (absent not None)
+- \	ests/test_poll_goal_clips_job.py\ — keyboard race condition tests (unchanged, still valid)
+- \	ests/test_handlers.py\ — delete-after-send tests (unchanged, still valid)
+
+---
+
+# Decision: Clip Disk Investigation: Retention, Disk Pressure & Missing Keyboards (2026-06-26)
+
+**Author:** Maldini (DevOps)  
+**Status:** Investigation summary
+
+## 1. Clip Storage Infrastructure
+
+### Disk Location
+- **Container path:** \/app/state/clips/\
+- **Volume mount:** Named volume \ot_state\ → \/app/state\ in both \docker-compose.yml\ and \docker-compose.local.yml\
+- **Configuration:** 
+  - \STATE_DIR\ env var defaults to \/app/state\ (set in both compose files)
+  - \clips_dir = Path(settings.state_dir) / "clips"\ — created on first poll_goal_clips_job run
+  - Directory is created on-demand: \clips_dir.mkdir(parents=True, exist_ok=True)\ in __main__.py:867
+
+### Clips File Naming
+- Stored as \{state_dir}/clips/{token}.mp4\ where \	oken = SHA1(goal_key)[:12]\
+- Per-goal metadata persisted in \{state_dir}/goal_clips.json\
+
+---
+
+## 2. Current Retention Policy
+
+### Active Cleanup: \prune_old_entries()\
+- **File:** \src/worldcup_bot/reddit/clip_store.py:122\
+- **Invocation:** Called every 45 seconds during \poll_goal_clips_job\ (async job)
+- **Job scheduling:** \pplication.job_queue.run_repeating(poll_goal_clips_job, interval=45, first=20)\ in __main__.py
+- **Max age:** **7 days** (default, line 122: \max_age_days: int = 7\)
+- **Scope:** Removes entries + their disk files older than 7 days
+
+### Clips NOT Deleted on Send
+- **Handler:** \cmd_ver_gol_callback()\ in handlers.py:753
+- **Behavior:** Clips are kept in persistent volume after sending to user
+- **Reason:** Multiple users can tap the same "Ver gol" button; one send should not invalidate the clip for others
+- **Note:** File existence check at line 821 logs error if clip missing (expected after pruning)
+
+### Size Cap Today
+- **Explicit size limit:** **NONE** — no total-volume size cap exists
+- **Risk:** Pathological case (compression failures, edge cases) could theoretically fill the volume
+- **Reality:** With 7-day retention + typical match-day volumes, disk pressure is unlikely unless retention is broken
+
+---
+
+## 3. Disk Pressure Estimation
+
+### Typical Clip Sizes
+- **Telegram limit:** 50 MB per video (video.py:16)
+- **Compression logic:** Files over 50 MB are re-encoded (video.py:88-148)
+- **Expected range:** 10–30 MB per goal clip (typical short goals, ~30 sec at 720p)
+- **Worst case:** 1–2 uncompressible videos (edge cases, timeouts) → skipped
+
+### Clips Stored at Any Time (7-day retention)
+- **Typical match-day:** 3–4 goals per match × ~4 matches = 12–16 goals/day
+- **Weekly volume:** 12–16 goals/day × 7 days = 84–112 clips stored
+- **Disk usage estimate:** 
+  - Conservative: 84 clips × 10 MB = **840 MB**
+  - Aggressive: 112 clips × 30 MB = **3.36 GB**
+  - **Expected range: 800 MB – 3 GB**
+
+---
+
+## 4. Assessment
+
+**Disk-full is unlikely to be the direct cause** of yesterday's missing keyboards, but it's worth monitoring because:
+- The 4GB free estimate assumes \prune_old_entries\ is working correctly
+- If prune silently failed (corrupt JSON, permissions), retention would break and disk could fill
+- Write failures during download/move don't throw explicit disk-full errors; they silently fail and manifest as missing keyboards
+
+**Most likely causes of missing keyboards:**
+1. Clip finder couldn't locate the goal on Reddit (title/name mismatch)
+2. Download or compression failed silently
+3. Poll job was slow → keyboard appeared minutes after goal
+
+---
+
+# Review: Live Goal Notification Bug Fixes
+
+**Reviewer:** Pirlo (Lead / Tech Lead)  
+**Date:** 2026-06-26  
+**Changeset Author:** Kanté  
+**Status:** APPROVE WITH REQUIRED CHANGES
+
+---
+
+## Decisions
+
+### Decision 1 — Catch-Up Misinformation: OPTION (a) — Neutral Summary
+
+**Requirement:** Replace the N individual fabricated goal messages with ONE neutral catch-up notification per match. No per-goal attribution, no intermediate scorelines, no scorer claims.
+
+**Specification:** New formatter function — \ormat_catchup_message()\ in \
+eddit/notifier.py\:
+
+\\\
+⚠️ Me perdí {n} gol(es)
+🇪🇨 Ecuador 1-1 Germany 🇩🇪
+\\\
+
+**Behaviour changes:**
+1. Both \__main__.py\ first-seen branch and \score_state.py\ restart-ahead branch emit \kind="catchup"\ instead of N fabricated per-goal deltas.
+2. \_process_goal_delta\: Handle \kind="catchup"\ by calling \_notify_catchup()\ instead of \_notify_goal()\.
+3. Clip store for catch-up: Register ONE entry with token \{match_id}:catchup:{H}-{A}\. 
+
+### Decision 2 — Race Fix Robustness: ADEQUATE + ONE HARDENING
+
+**Required hardening:** In \_backfill_scorer_in_clip_store\ (line 353), change the \
+eply_markup\ handling to NEVER explicitly clear an existing keyboard. Instead of \
+eply_markup=None\, omit the key entirely when status ≠ "ready" to ensure Telegram preserves existing markup.
+
+### Decision 3 — Delete-After-Send: APPROVED
+
+The ordering is correct: send → file_id → persist → unlink. Safety properties confirmed.
+
+---
+
+## VERDICT: APPROVE WITH REQUIRED CHANGES
+
+Ship Fix B1 (race reorder), Fix D (delete-after-send), and Fix A2 (reconcile restart detection logic) as-is.
+
+**Required changes for Kanté:**
+1. Replace catch-up goal fabrication with neutral summary message per Decision 1.
+2. Harden \_backfill_scorer_in_clip_store\ to OMIT \
+eply_markup\ when status ≠ "ready".
+
+---
+
+# Gate Verdict — Live Goal Bug Fix (Kanté, 2026-06-26)
+
+**Author:** Buffon (Tester / QA)  
+**Date:** 2026-06-26  
+**Reviewed:** Kanté's fixes for missed goals (A1/A2), keyboard race (B1), delete-after-send (D)  
+**Final pytest count: 1570 passed** (was 1568 after Kanté; +2 added by Buffon)
+
+---
+
+## Step 1 — Suite Verification
+
+Ran \.venv\Scripts\python.exe -m pytest -q\ independently.  
+**Result: 1568 passed, 5 warnings in 88.74s** — matches Kanté's claim. ✅
+
+---
+
+## Step 2 — New Test Quality Audit
+
+All 17 new tests are **real and non-tautological**. Each test would fail without its corresponding fix.
+
+---
+
+## Step 3 — Delete-After-Send Edge Case Analysis
+
+Critical ordering verified: \ntry["file_id"] = ...\ → \_cs_save_clips(...)\ → \Path(...).unlink(...)\ — all synchronous, no \wait\ between them. No asyncio interleave window between save and delete. ✅
+
+---
+
+## Step 4 — Catch-Up Emit Edge Cases
+
+All hazards covered by existing tests.  Double-announce analysis confirmed no race possible due to \goal_lock\.
+
+---
+
+## ⚠️ Documented Design Limitation
+
+**Subject:** Token collision in \
+econcile()\ restart catch-up for 2+ same-team goals missed.
+
+**Recommendation for Kanté:** Change the reconcile restart catch-up to emit deltas with incremental scores (similar to the \__main__.py\ catch-up logic).
+
+**Regression guard added:** \	est_restart_catchup_deltas_carry_final_score\ in \	est_score_state.py\ documents this behavior.
+
+---
+
+## Tests Added by Buffon (+2)
+
+1. **\	est_stale_file_id_with_deleted_file_sends_error_message\** (\	est_handlers.py\)  
+2. **\	est_restart_catchup_deltas_carry_final_score\** (\	est_score_state.py\)
+
+---
+
+## VERDICT
+
+**PASS WITH ADDED TESTS** — All 3 fixes verified, all 17 new tests are real, critical ordering hazard explicitly tested.
+
+**Final pytest count: 1570 passed, 5 warnings**
+
+
+
+# Decision: WC2026 Best-Thirds Qualifying Scoring
+
+**Date:** 2026-06-26  
+**Author:** Kanté  
+**Status:** Pending Pirlo architecture review  
+**Requested by:** drdonoso
+
+---
+
+## Context
+
+WC2026 group stage: 48 teams, 12 groups of 4. Top-2 of each group qualify directly.
+The 8 best third-placed teams (ranked by FIFA tiebreakers) also qualify. The remaining
+4 thirds and all 4th-placed teams are eliminated.
+
+The porra `score_groups` previously awarded a 1.0 hit for any exact 3rd-place prediction
+without checking whether that team was among the 8 qualifying thirds. Owner requested
+that a 3rd-place pick only counts if the team actually advances.
+
+---
+
+## PART 1 — API vs Compute Finding
+
+**Finding: We must compute qualifying thirds ourselves.**
+
+football-data.org's `/competitions/WC/standings` endpoint returns per-group tables with
+position, points, goalDifference, goalsFor, goalsAgainst, played. It does NOT provide:
+- A "qualified" flag for 3rd-placed teams
+- Any cross-group third-place ranking
+- Knockout-bracket fixtures that would reveal which thirds advanced (those are created
+  only when the knockout round pairings are confirmed by FIFA)
+
+We cannot rely on the API to tell us which thirds qualify. We must rank them ourselves.
+
+---
+
+## PART 2 — Scoring Model
+
+### Constants / Knobs (all in `src/worldcup_bot/porra/scoring.py`)
+
+| Constant | Default | Purpose |
+|----------|---------|---------|
+| `NUM_QUALIFYING_THIRDS` | `8` | How many thirds qualify in WC2026 format |
+| `NON_QUALIFYING_THIRD_SCORE` | `0.0` | Score for a non-qualifying exact 3rd; owner may set to `0.5` for partial credit |
+| `DIRECT_QUALIFY` | `2` | Positions that auto-qualify (unchanged) |
+
+### STRICT Scoring Policy
+
+`score_groups(user_groups, actual_standings, qualifying_thirds=None)`
+
+| pred position | actual position | 3rd qualifies? | Score | Label |
+|--------------|----------------|----------------|-------|-------|
+| 1 or 2 | 1 or 2 | — | 1.0 | exacto |
+| 3 | 3 | **yes** | 1.0 | exacto |
+| 3 | 3 | **no** | `NON_QUALIFYING_THIRD_SCORE` (0.0) | fallo |
+| 1 or 2 | 3 | yes | 0.5 | clasifica |
+| 1 or 2 | 3 | no | `NON_QUALIFYING_THIRD_SCORE` (0.0) | fallo |
+| 3 | 1 or 2 | — (advanced) | 0.5 | clasifica |
+| any | 4 | — | 0.0 | fallo |
+
+**Backward compatibility:** `qualifying_thirds=None` → all 3rds treated as qualifying
+(identical to old behavior). This is the safe default when the caller has no data.
+
+### `best_qualifying_thirds()` Algorithm
+
+Pure function. Input: `{GROUP_X: [{"tla","points","goal_difference","goals_for"},…]}`.
+
+1. Extract the 3rd-place entry (index 2) from each group.
+2. Sort by `(-points, -goal_difference, -goals_for, group_key, tla)`.
+   - Stable tiebreak: group letter alphabetically, then TLA alphabetically.
+   - Disciplinary points and drawing of lots are not available from the API and are NOT
+     implemented. If a true tie exists at the 8/9 boundary, the algorithm logs a WARNING
+     and deterministically resolves via group/TLA order.
+3. If fewer than `NUM_QUALIFYING_THIRDS` thirds are present: return all (provisional).
+4. Otherwise return top 8 as a `frozenset[str]` of TLAs.
+
+FIFA tiebreaker order implemented: (1) points, (2) goal difference, (3) goals scored.
+Not implemented (not available): (4) disciplinary, (5) drawing of lots.
+
+---
+
+## PART 3 — Provisional Handling
+
+Mid-tournament, not all 12 groups have finished. The qualifying thirds set is provisional:
+
+- `_build_qualifying_thirds(client, only_groups)` in `engine.py` mirrors the same
+  `only_groups` filter as `_build_actual_standings` — only the groups with started/finished
+  matches are considered.
+- `best_qualifying_thirds` with fewer than 8 thirds available returns ALL of them, meaning
+  all provisional 3rds are treated as qualifying.
+- This is intentionally optimistic and consistent with the existing provisional scoring
+  behavior (partial standings used without penalty to users).
+- Once all 12 groups are complete, exactly 8 thirds are selected.
+
+This means provisional scores may change once the full 12-group picture is known —
+the same is already true for provisional standings generally.
+
+---
+
+## PART 4 — Standing Model Extension
+
+### `api/models.py`
+Added `goal_difference: int = 0` and `goals_for: int = 0` to the `Standing` dataclass
+as optional fields with defaults. Backward compatible.
+
+### `api/client.py`
+`get_standings()` now parses `goalDifference` and `goalsFor` from the API response payload.
+
+### `history.py`
+Added `reconstruct_full_group_standings(matches)` returning
+`{GROUP_X: [{"tla","points","goal_difference","goals_for"},…]}` for the match-reconstruction
+path (used by `/evolucion`, `/recalcular`). The existing `reconstruct_group_standings`
+(returns TLA lists only) is unchanged.
+
+---
+
+## PART 5 — Files Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/api/models.py` | Added `goal_difference`, `goals_for` to `Standing` |
+| `src/worldcup_bot/api/client.py` | Parse `goalDifference`, `goalsFor` in `get_standings()` |
+| `src/worldcup_bot/porra/scoring.py` | New constants, `best_qualifying_thirds()`, `_team_advances()`, updated `score_groups()` and `score_user_groups_detail()` |
+| `src/worldcup_bot/porra/engine.py` | `_build_qualifying_thirds()` helper; updated `compute_general_ranking_from`, `compute_group_ranking`, `compute_general_ranking`, `compute_user_detail` |
+| `src/worldcup_bot/porra/history.py` | `_compute_group_stats()`, `_sort_order()`, `reconstruct_full_group_standings()`; updated `compute_ranking_at_jornada()` |
+| `tests/test_best_qualifying_thirds.py` | **New** — ~40 tests for the algorithm |
+| `tests/test_scoring.py` | 17 new tests for STRICT scoring policy |
+| `tests/test_history.py` | 9 new tests for reconstruct and history paths |
+| `tests/test_api_client.py` | 2 new tests for `goal_difference`/`goals_for` parsing |
+
+**Test counts:** 1571 (baseline) → 1613 (+42 tests, all green).
+
+---
+
+## Items for Owner / Pirlo Decision
+
+1. **`NON_QUALIFYING_THIRD_SCORE = 0.0`** — Owner requested STRICT (0.0 for non-qualifying
+   3rds). Implemented as a named constant. Change to `0.5` in `scoring.py` for partial credit.
+
+2. **Tiebreaker limitation** — FIFA uses disciplinary points and drawing of lots as final
+   tiebreakers 4 and 5. We cannot access these from football-data.org. In the extremely rare
+   case of a true 3-way GF tie at position 8/9, the algorithm falls back to alphabetical
+   group+TLA order and logs a WARNING. Pirlo/owner: is this acceptable, or should we surface
+   the uncertainty to users differently?
+
+3. **Provisional optimism** — All currently-known 3rds are treated as qualifying until 12
+   groups are complete. This means a user who predicted a 3rd correctly may see 1.0 mid-
+   tournament but could drop to 0.0 if that team is knocked out of the 8 best thirds once
+   all groups finish. This matches existing provisional behavior. Confirm this is acceptable.
+
+
+# Review: WC2026 Best-Thirds Qualifying Scoring
+
+**Reviewer:** Pirlo (Lead / Tech Lead)  
+**Date:** 2026-06-26  
+**Changeset Author:** Kanté  
+**Requested by:** drdonoso  
+**Status:** APPROVE
+
+---
+
+## 1. Scoring Model Coherence — CORRECT
+
+All rows verified against the code (`scoring.py`). The model is internally consistent under the rule "advances = pos 1, 2, or qualifying-3rd":
+
+| pred | actual | 3rd qualifies? | Score | Code path verified |
+|------|--------|---------------|-------|--------------------|
+| top-2 | top-2 | — | 1.0 | `pred_pos <= 2 and actual_pos <= 2` → "exacto" |
+| 3 | 3 | yes | 1.0 | `pred==actual`, `_team_advances` True → "exacto" |
+| 3 | 3 | no | 0.0 | `pred==actual`, `_team_advances` False → NON_QUALIFYING_THIRD_SCORE |
+| top-2 | 3 | yes | 0.5 | `actual_pos <= 3`, `_team_advances` True → "clasifica" |
+| top-2 | 3 | no | 0.0 | `actual_pos <= 3`, `_team_advances` False → NON_QUALIFYING_THIRD_SCORE |
+| 3 | top-2 | — | 0.5 | `actual_pos <= 3`, `_team_advances` True (top-2 always) → "clasifica" |
+| any | 4 | — | 0.0 | else → "fallo" |
+
+**The boundary-with-non-qualifying-third → 0.0 row:** This is the correct reading of the owner's strict intent. The old 0.5 "clasifica" credit meant "you predicted the team advances, and it did (but at a different position)." If the team finishes 3rd but doesn't qualify, it is *eliminated* — awarding 0.5 for "you predicted top-2, team was eliminated" contradicts the strict policy. Logically consistent; not an overreach.
+
+The `_team_advances()` helper correctly gates on `actual_pos`, so top-2 teams always advance regardless of `qualifying_thirds`, and 3rds are checked against the set. Clean separation.
+
+---
+
+## 2. Provisional Handling — CORRECT AS-IS (Directive: KEEP)
+
+**The implementation is better than the doc describes.**
+
+The doc says "all available 3rds qualify until 12 groups complete." The code actually does:
+
+```
+len(thirds) <= NUM_QUALIFYING_THIRDS (8)  →  return all  (no cutoff data)
+len(thirds) > 8                            →  sort and return best 8
+```
+
+This means:
+- **7 groups done → 7 thirds → all qualify** — correct, no basis to exclude any
+- **8 groups done → 8 thirds → all 8 qualify** — correct, trivially all-8-of-8
+- **9 groups done → 9 thirds → best 8 of 9** — already computing best-8-of-available
+- **10-11 groups done → best 8 of N** — already correct
+- **12 groups done → best 8 of 12** — final, authoritative
+
+The "provisional optimism" concern only affects the ≤8 case, where there is literally not enough data to determine a cutoff. Once ≥9 thirds exist, the code already computes best-8-of-N. This is the optimal design.
+
+**Directive:** Keep as-is. No change needed. The volatility concern (a 3rd showing as qualifying then dropping out) is inherent to any provisional scoring and is no worse here than for provisional group positions generally.
+
+---
+
+## 3. Tiebreaker Fallback — ACCEPTABLE
+
+FIFA tiebreakers 4-5 (disciplinary points, drawing of lots) are not available from football-data.org. The stable `(group_key, tla)` alphabetical fallback with a logged WARNING is the right tradeoff for a porra:
+
+- The probability of a true 3-stat tie (pts, GD, GF) at the 8/9 boundary is extremely low.
+- If it happens in real life, FIFA resolves it with information we don't have.
+- Alphabetical order is deterministic, reproducible, and auditable.
+- The WARNING ensures manual intervention is possible if the rare case occurs.
+
+No better deterministic approach exists given the API constraints. Acceptable.
+
+---
+
+## 4. Backward-Compat Seam — LOW RISK
+
+All production callers in `engine.py` explicitly compute and pass `qualifying_thirds`:
+- `compute_general_ranking_from()` — receives as parameter (line 93)
+- `compute_group_ranking()` — computes via `_build_qualifying_thirds` (line 143)
+- `compute_general_ranking()` — computes via `_build_qualifying_thirds` (lines 183/187)
+- `compute_user_detail()` — computes via `_build_qualifying_thirds` (lines 214/227)
+
+The `history.py` path also computes and passes it (line 214).
+
+The `None` default is a safety net, not a trap. A new caller that omits it gets the pre-2026-06-26 behavior (all 3rds score), which is non-breaking. The pattern is well-established in all existing callers.
+
+**Architectural note for Buffon:** Verify no handler or command in `__main__.py` or `handlers.py` calls `score_groups()` directly (bypassing `engine.py`). The grep confirms all production calls go through `engine.py`, so this is clean.
+
+---
+
+## Minor Observations (informational, not blocking)
+
+1. **Doc vs code:** Kanté's decision doc says "fewer than 8 thirds" triggers all-qualify, but the code uses `<=` (includes exactly 8). Both are correct behavior — the doc could say "8 or fewer" for precision. Not blocking.
+
+2. **`NON_QUALIFYING_THIRD_SCORE` as constant:** Clean knob. If the owner later wants partial credit for exact-3rd-but-eliminated, changing this single constant to 0.5 adjusts the exact-match case. The boundary case would need a separate knob if partial credit is wanted there too — but the owner said STRICT, so 0.0 is correct.
+
+---
+
+## VERDICT: APPROVE
+
+No required changes. The scoring model is correct and internally consistent. The provisional handling is already computing best-8-of-available once ≥9 thirds exist (better than described). All callers pass qualifying_thirds explicitly. Tiebreaker fallback is acceptable for a porra.
+
+Kanté: ship it.
+
+
+# Gate Verdict — WC2026 Best-Thirds Scoring (Kanté, 2026-06-26)
+
+**Author:** Buffon (Tester / QA)  
+**Date:** 2026-06-26  
+**Reviewed:** Kanté's best-thirds qualifying scoring change  
+**Baseline (pre-change):** 1571 passed  
+**Kanté claimed:** 1613 passed (+42)  
+**Final pytest count: 1618 passed, 5 warnings** (+5 added by Buffon)
+
+---
+
+## Step 1 — Suite Verification
+
+Ran `.venv\Scripts\python.exe -m pytest -q` independently.  
+**Result: 1613 passed, 5 warnings** — matches Kanté's claim. ✅
+
+---
+
+## Step 2 — Caller Check
+
+Traced all 7 production paths that reach `score_groups`:
+
+| Caller | Builds qualifying_thirds? | Passes it? |
+|--------|--------------------------|-----------|
+| `compute_general_ranking` (provisional) | `_build_qualifying_thirds(client, started)` | `compute_general_ranking_from(…, qualifying_thirds)` ✅ |
+| `compute_general_ranking` (official) | `_build_qualifying_thirds(client, finished)` | `compute_general_ranking_from(…, qualifying_thirds)` ✅ |
+| `compute_general_ranking_from` | accepts as param | `score_groups(…, qualifying_thirds)` ✅ |
+| `compute_group_ranking` | `_build_qualifying_thirds(client)` | `score_groups(…, qualifying_thirds)` ✅ |
+| `compute_user_detail` (provisional) | `_build_qualifying_thirds(client, started)` | `score_groups(…, qualifying_thirds)` ✅ |
+| `compute_user_detail` (official) | `_build_qualifying_thirds(client, finished)` | `score_groups(…, qualifying_thirds)` ✅ |
+| `compute_ranking_at_jornada` | `best_qualifying_thirds(full_standings)` | `compute_general_ranking_from(…, qualifying_thirds)` ✅ |
+| `ensure_history` (latest) | via `compute_general_ranking` (above) | internal ✅ |
+| `ensure_history` (past) | via `compute_ranking_at_jornada` (above) | internal ✅ |
+
+All callers correct. ✅
+
+### ⚠️ Coverage Gap Found
+
+No test in `test_engine.py` would have caught a caller dropping `qualifying_thirds`. All existing engine tests use `points=0` standings with only 1 started group, so `best_qualifying_thirds` returns BRA provisionally (< 8 thirds → all qualify). The backward-compat `None` path also qualifies all thirds. No observable difference. **A caller bug could ship silently.**
+
+The history path had one end-to-end guard (`test_non_qualifying_3rd_scores_zero_in_history_path`), but the direct engine paths (`compute_general_ranking`, `compute_group_ranking`, `compute_user_detail`) had zero guards.
+
+**Resolved:** Buffon added `TestQualifyingThirdsCallerRegression` (5 tests) to `test_engine.py` — see Step 4.
+
+---
+
+## Step 3 — Test Quality Audit
+
+### `test_best_qualifying_thirds.py` (~14 tests)
+
+| Coverage area | Test | Real? |
+|---|---|---|
+| Empty input | `test_empty_standings_returns_empty` | ✅ |
+| Group with <3 entries skipped | `test_group_with_fewer_than_3_entries_skipped` | ✅ |
+| Exactly 3 entries → third included | `test_group_with_exactly_3_entries_yields_third` | ✅ |
+| <8 thirds → all qualify | `test_fewer_than_8_thirds_all_qualify` | ✅ |
+| Exactly 8 selected from 12 | `test_exactly_8_selected_from_12` | ✅ |
+| Top 8 in, bottom 4 out | `test_top_8_qualify_bottom_4_do_not` | ✅ |
+| Returns frozenset | `test_returns_frozenset` | ✅ |
+| GD breaks points tie | `test_goal_difference_breaks_points_tie` | ✅ |
+| GF breaks GD tie | `test_goals_for_breaks_gd_tie` | ✅ |
+| Points dominate over GD | `test_points_dominate_over_gd` | ✅ |
+| Points dominate over GF | `test_points_dominate_over_goals_for` | ✅ |
+| Full tie → deterministic | `test_full_tie_selects_deterministically` | ✅ |
+| Full tie → group/TLA order | `test_full_tie_uses_group_letter_then_tla_order` | ✅ |
+| Logs WARNING on tie | `test_full_tie_at_boundary_logs_warning` | ✅ |
+| No WARNING when no tie | `test_no_warning_when_no_tie` | ✅ |
+
+All 15 tests would fail if `best_qualifying_thirds` were reverted or removed. ✅
+
+### `test_scoring.py` — `TestScoreGroupsQualifyingThirds` (17 tests)
+
+| Policy row | Test | Real? |
+|---|---|---|
+| Qualifying exact 3rd → 1.0 | `test_qualifying_3rd_exact_match_scores_1` | ✅ |
+| Non-qualifying exact 3rd → 0.0 | `test_non_qualifying_exact_3rd_scores_0` | ✅ |
+| `NON_QUALIFYING_THIRD_SCORE` is 0.0 | `test_non_qualifying_exact_3rd_score_constant_is_zero` | ✅ |
+| boundary pred1/actual3 qualifying → 0.5 | `test_boundary_pred1_actual3_qualifying_scores_0_5` | ✅ |
+| boundary pred1/actual3 non-qualifying → 0.0 | `test_boundary_pred1_actual3_non_qualifying_scores_0` | ✅ |
+| boundary pred2/actual3 non-qualifying → 0.0 | `test_boundary_pred2_actual3_non_qualifying_scores_0` | ✅ |
+| pred3/actual1 (top-2) always → 0.5 | `test_boundary_pred3_actual1_always_scores_0_5` | ✅ |
+| pred3/actual2 (top-2) always → 0.5 | `test_boundary_pred3_actual2_always_scores_0_5` | ✅ |
+| top-2 swap unaffected | `test_top2_swap_unaffected_by_qualifying_set` | ✅ |
+| top-2 exact unaffected by empty set | `test_top2_exact_unaffected_by_empty_qualifying_set` | ✅ |
+| None → all 3rds qualify | `test_backward_compat_none_all_3rds_qualify` | ✅ |
+| None boundary → clasifica | `test_backward_compat_boundary_none_all_3rds_qualify` | ✅ |
+| Default == None | `test_default_call_no_qualifying_set_is_same_as_none` | ✅ |
+| Total with non-qualifying 3rd | `test_total_with_non_qualifying_3rd` | ✅ |
+| Total with qualifying 3rd | `test_total_with_qualifying_3rd` | ✅ |
+| Alias passes qualifying_thirds | `test_alias_passes_qualifying_thirds` | ✅ |
+
+All would fail if scoring fix were reverted. ✅
+
+### `test_history.py` — `TestReconstructFullGroupStandings` (6 tests) + `TestComputeRankingAtJornadaQualifyingThirds` (3 tests)
+
+All 9 tests meaningful. `test_non_qualifying_3rd_scores_zero_in_history_path` is the key end-to-end regression guard for the history path. ✅
+
+### `test_api_client.py` (2 tests)
+
+`test_parse_goal_difference_and_goals_for` and `test_goal_difference_goals_for_default_zero_when_absent` both real. ✅
+
+---
+
+## Step 4 — Edge Cases
+
+| Edge case | Status |
+|---|---|
+| 3-way tie at 8/9 boundary: deterministic? | ✅ Covered — stable group+TLA sort, WARNING logged |
+| All 12 thirds identical pts/GD/GF | ✅ Covered — `test_full_tie_*` tests |
+| Group not yet started (no 3rd) | ✅ Covered — `test_group_with_fewer_than_3_entries_skipped` |
+| Provisional <8 thirds → all qualify | ✅ Covered — `test_fewer_than_8_thirds_all_qualify` + `test_provisional_third_qualifies_when_fewer_than_8_groups` |
+| **Engine callers drop qualifying_thirds (no guard)** | ⚠️ **GAP FOUND → Fixed by Buffon** |
+
+### Tests Added by Buffon (+5) in `test_engine.py` — `TestQualifyingThirdsCallerRegression`
+
+Setup: 9 groups (A-I) in started/finished; GROUP_A's BRA has 0pts (9th best third, doesn't qualify); groups B-I each have a 3rd with 1pt (all 8 qualify). Alice predicts ESP/GER/BRA exactly. Expected group_score = 2.0 (not 3.0).
+
+| Test | Would fail if fix reverted? |
+|---|---|
+| `test_compute_general_ranking_provisional_non_qualifying_3rd_scores_zero` | ✅ Yes |
+| `test_compute_general_ranking_official_non_qualifying_3rd_scores_zero` | ✅ Yes |
+| `test_compute_user_detail_provisional_non_qualifying_3rd_scores_zero` | ✅ Yes |
+| `test_compute_user_detail_official_non_qualifying_3rd_scores_zero` | ✅ Yes |
+| `test_compute_group_ranking_non_qualifying_3rd_scores_zero` | ✅ Yes (also first test ever for `compute_group_ranking`) |
+
+---
+
+## VERDICT
+
+**PASS WITH ADDED TESTS**
+
+Kanté's implementation is correct and complete. All 42 new tests are real. One coverage gap found: engine callers had no regression guard against dropping `qualifying_thirds`. Fixed by Buffon with 5 tests in `TestQualifyingThirdsCallerRegression`.
+
+**Final pytest count: 1618 passed, 5 warnings**  
+(1571 baseline → +42 Kanté → +5 Buffon = 1618)
+
+---
+
+# Decision: Hard-exclude matches >4h past kickoff from goal-polling jobs
+
