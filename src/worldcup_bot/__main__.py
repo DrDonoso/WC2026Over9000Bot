@@ -1635,10 +1635,13 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     - `finished_announced` (bot_data + disk): set of match ids already recapped or
       seeded as already-handled.  Loaded from `{state_dir}/finished_announced.json` at
       startup; persisted after every change so restarts are safe.
-    - FIRST RUN (gate: `finished_seeded` flag): seed every match that is "definitely
-      over already" — FINISHED status OR kickoff older than MATCH_OVER_AGE (4 h).
-      This catches stale IN_PLAY/PAUSED matches whose football-data status lags.
-      Persist immediately and return (no sends).
+    - FIRST RUN (gate: `finished_seeded` flag): seed ONLY matches whose status is
+      FINISHED (matches that truly finished while the bot was down) into
+      `finished_announced`, so they are not re-announced.  A match that is over by
+      wall-clock but still NON-FINISHED (stale IN_PLAY / PAUSED past
+      MATCH_OVER_AGE) is deliberately NOT seeded here — seeding it would consume
+      the real-final dedup and permanently suppress the later official recap when
+      the API finally flips to FINISHED.  Persist immediately and return (no sends).
     - SUBSEQUENT RUNS: for each match newly showing FINISHED whose id is NOT in
       `finished_announced`, send the OFFICIAL recap (Part A ESPN stats + Part B porra
       commentary + 🏁 Final), then add the id and persist (one save per match so a
@@ -1687,24 +1690,22 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         finished_path = f"{settings.state_dir}/finished_announced.json"
 
         # ── seed on first run ─────────────────────────────────────────────────
+        # INVARIANT: `finished_announced` (the real-final dedup) is populated ONLY
+        # for matches whose status == "FINISHED" — here and at every other write
+        # site.  A match that is over by wall-clock but still NON-FINISHED
+        # (IN_PLAY or PAUSED past MATCH_OVER_AGE) must NOT be seeded: doing so
+        # would consume the final dedup and permanently suppress the official 🏁
+        # Final recap once the API flips to FINISHED (the production restart bug).
+        # Such matches are simply left unseeded — the normal per-tick pass routes
+        # a stuck IN_PLAY through the SEPARATE `provisional_announced` set and
+        # waits for a PAUSED match to legitimately reach FINISHED.
         if not context.bot_data.get("finished_seeded", False):
-            now_utc = datetime.utcnow()
-            seeded: set[int] = set()
-            for m in all_matches:
-                if m.status == "FINISHED":
-                    seeded.add(m.id)
-                else:
-                    try:
-                        kickoff = datetime.strptime(m.utc_date, "%Y-%m-%dT%H:%M:%SZ")
-                        if now_utc - kickoff > MATCH_OVER_AGE:
-                            seeded.add(m.id)
-                    except Exception:
-                        pass
+            seeded: set[int] = {m.id for m in all_matches if m.status == "FINISHED"}
             announced.update(seeded)
             save_finished(finished_path, announced)
             context.bot_data["finished_seeded"] = True
             log.info(
-                "poll_finished_matches_job: seeded %d already-handled matches (no sends)",
+                "poll_finished_matches_job: seeded %d FINISHED matches (no sends)",
                 len(seeded),
             )
             return
@@ -1731,6 +1732,10 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             and m.id not in provisional_announced
         }
 
+        # `new_ids` is derived from `finished_ids` (status == "FINISHED" only), so
+        # every downstream `announced.add(...)` in this loop honours the
+        # FINISHED-only dedup invariant — the ONLY writes to `finished_announced`
+        # besides the FINISHED-only first-run seed above.
         new_ids = finished_ids - announced
         matches_by_id = {m.id: m for m in all_matches}
 

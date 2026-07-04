@@ -1325,12 +1325,14 @@ def _make_match_at(mid: int, status: str, kickoff: datetime) -> Match:
 
 
 class TestFirstRunSeedWithAge:
-    """First-run seed must include FINISHED matches AND IN_PLAY matches whose
-    kickoff is older than MATCH_OVER_AGE (4 h), but NOT genuinely live ones.
+    """First-run seed must include ONLY FINISHED matches.  A match that is over by
+    wall-clock but still NON-FINISHED (stale IN_PLAY / PAUSED past
+    MATCH_OVER_AGE) must NOT be seeded into `finished_announced`, otherwise the
+    later official recap would be permanently suppressed on restart.
     """
 
     @pytest.mark.asyncio
-    async def test_seeds_finished_stale_not_live_sends_nothing(self, tmp_path):
+    async def test_seeds_finished_only_not_stale_or_live_sends_nothing(self, tmp_path):
         settings = _make_settings(tmp_path, ai=False)
         ctx = _make_context(settings)
         # finished_seeded=False (default) → triggers first-run seed
@@ -1339,7 +1341,7 @@ class TestFirstRunSeedWithAge:
             1, "FINISHED", _NOW_UTC - timedelta(hours=5)
         )
         stale_match = _make_match_at(
-            2, "IN_PLAY", _NOW_UTC - timedelta(hours=5)   # 5h old → definitely over
+            2, "IN_PLAY", _NOW_UTC - timedelta(hours=5)   # 5h old but NOT finished
         )
         live_match = _make_match_at(
             3, "IN_PLAY", _NOW_UTC - timedelta(minutes=30)  # 30min old → still live
@@ -1356,9 +1358,10 @@ class TestFirstRunSeedWithAge:
 
         # No sends on first run
         ctx.bot.send_message.assert_not_awaited()
-        # FINISHED and stale IN_PLAY are seeded; live IN_PLAY is NOT
+        # ONLY the FINISHED match is seeded; stale/live IN_PLAY are NOT — they must
+        # remain eligible for the later official recap.
         assert 1 in ctx.bot_data["finished_announced"]  # FINISHED
-        assert 2 in ctx.bot_data["finished_announced"]  # stale IN_PLAY (5h)
+        assert 2 not in ctx.bot_data["finished_announced"]  # stale IN_PLAY (5h)
         assert 3 not in ctx.bot_data["finished_announced"]  # live IN_PLAY (30min)
         assert ctx.bot_data["finished_seeded"] is True
 
@@ -1368,6 +1371,8 @@ class TestFirstRunSeedWithAge:
         ctx = _make_context(settings)
 
         finished_match = _make_match_at(10, "FINISHED", _NOW_UTC - timedelta(hours=6))
+        # A PAUSED match over 4h must NOT be seeded (it may be a resumable
+        # suspension and must still get its official recap when it FINISHES).
         stale_match = _make_match_at(20, "PAUSED", _NOW_UTC - timedelta(hours=5))
 
         mock_client = MagicMock()
@@ -1383,32 +1388,41 @@ class TestFirstRunSeedWithAge:
         assert os.path.exists(disk_path)
         with open(disk_path) as f:
             on_disk = set(json.load(f))
-        assert {10, 20} == on_disk
+        assert {10} == on_disk  # only the FINISHED match, NOT the PAUSED one
 
 
 class TestStaleLaterFlip:
-    """A stale IN_PLAY match that was seeded must NOT produce a recap when
-    football-data later flips it to FINISHED."""
+    """A stale IN_PLAY/PAUSED match is NOT seeded at startup, so when football-data
+    later flips it to FINISHED the official recap MUST fire exactly once."""
 
     @pytest.mark.asyncio
-    async def test_no_recap_for_seeded_stale_match(self, tmp_path):
+    async def test_recap_fires_for_unseeded_stale_match_on_flip(self, tmp_path):
         settings = _make_settings(tmp_path, ai=False)
         ctx = _make_context(settings)
-        # Simulate: match 2 was already seeded (stale IN_PLAY at startup)
+        # After the corrected first-run seed, a stale IN_PLAY match is NOT in
+        # finished_announced (only genuinely FINISHED matches are seeded).
         ctx.bot_data["finished_seeded"] = True
-        ctx.bot_data["finished_announced"] = {2}
+        ctx.bot_data["finished_announced"] = set()
 
         # On this run, match 2 has now flipped to FINISHED
         flipped_match = _make_match_at(2, "FINISHED", _NOW_UTC - timedelta(hours=5))
 
         mock_client = MagicMock()
         mock_client.get_all_matches.return_value = [flipped_match]
+        mock_scanner = MagicMock()
+        mock_scanner.get_espn_game_id = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
 
-        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
             await poll_finished_matches_job(ctx)
 
-        # MUST send nothing (id 2 is already in announced)
-        ctx.bot.send_message.assert_not_awaited()
+        # MUST send the official recap (id 2 was never seeded).
+        ctx.bot.send_message.assert_awaited()
+        assert 2 in ctx.bot_data["finished_announced"]
 
 
 class TestLiveMatchRecap:
@@ -2200,8 +2214,9 @@ class TestProvisionalLateFinal:
         assert 9006 in persisted
 
     @pytest.mark.asyncio
-    async def test_stale_inplay_seeded_on_first_run_not_announced(self, tmp_path):
-        """On first run a stale IN_PLAY match is seeded into finished_announced (no send)."""
+    async def test_stale_inplay_not_seeded_on_first_run(self, tmp_path):
+        """On first run a stale IN_PLAY match is NOT seeded into finished_announced
+        (no send) — it must stay eligible for the later official recap."""
         settings = _make_settings(tmp_path, ai=False)
         ctx = _make_context(settings)
         ctx.bot_data["finished_seeded"] = False
@@ -2215,8 +2230,132 @@ class TestProvisionalLateFinal:
             await poll_finished_matches_job(ctx)
 
         ctx.bot.send_message.assert_not_awaited()
-        assert 9007 in ctx.bot_data["finished_announced"]
+        assert 9007 not in ctx.bot_data["finished_announced"]
         assert ctx.bot_data["finished_seeded"] is True
+
+    @pytest.mark.asyncio
+    async def test_restart_stale_inplay_then_finished_official_fires_once(self, tmp_path):
+        """RESTART REGRESSION (IN_PLAY): first tick after restart seeds while the
+        API is still stuck IN_PLAY >4h → the match is NOT added to
+        finished_announced.  When a later poll returns it FINISHED, the official
+        recap is announced exactly once and the score is corrected."""
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = False
+        ctx.bot_data["finished_announced"] = set()
+        mock_scanner = MagicMock()
+        mock_scanner.get_espn_game_id = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        stale = self._make_stale_inplay(
+            mid=9200, status="IN_PLAY", kickoff_hours_ago=5.0,
+            home_score=1, away_score=0,
+        )
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [stale]
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            # Tick 1: first-run seed while still IN_PLAY → no send, not seeded.
+            await poll_finished_matches_job(ctx)
+            assert 9200 not in ctx.bot_data["finished_announced"]
+            ctx.bot.send_message.assert_not_awaited()
+
+            # Later poll: API now reports FINISHED with the settled score 2-1.
+            finished = self._make_stale_inplay(
+                mid=9200, status="FINISHED", kickoff_hours_ago=6.0,
+                home_score=2, away_score=1, winner="HOME_TEAM",
+            )
+            mock_client.get_all_matches.return_value = [finished]
+            await poll_finished_matches_job(ctx)
+
+        assert 9200 in ctx.bot_data["finished_announced"]
+        assert ctx.bot.send_message.await_count == 1
+        text = ctx.bot.send_message.call_args_list[0][1]["text"]
+        assert "🏁" in text
+        assert "2-1" in text
+
+    @pytest.mark.asyncio
+    async def test_restart_stale_paused_then_finished_official_fires_once(self, tmp_path):
+        """RESTART REGRESSION (PAUSED): a PAUSED >4h match at startup is NOT
+        seeded and gets NO provisional; when it legitimately reaches FINISHED the
+        official recap fires exactly once."""
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = False
+        ctx.bot_data["finished_announced"] = set()
+        mock_scanner = MagicMock()
+        mock_scanner.get_espn_game_id = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        paused = self._make_stale_inplay(
+            mid=9300, status="PAUSED", kickoff_hours_ago=5.0,
+            home_score=0, away_score=0,
+        )
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [paused]
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            # Tick 1: seed while PAUSED → no send, not seeded.
+            await poll_finished_matches_job(ctx)
+            assert 9300 not in ctx.bot_data["finished_announced"]
+            ctx.bot.send_message.assert_not_awaited()
+
+            # Tick 2: still PAUSED >4h → PAUSED gets NO provisional notice.
+            await poll_finished_matches_job(ctx)
+            ctx.bot.send_message.assert_not_awaited()
+
+            # Later: match resumes and FINISHES 1-0.
+            finished = self._make_stale_inplay(
+                mid=9300, status="FINISHED", kickoff_hours_ago=7.0,
+                home_score=1, away_score=0, winner="HOME_TEAM",
+            )
+            mock_client.get_all_matches.return_value = [finished]
+            await poll_finished_matches_job(ctx)
+
+        assert 9300 in ctx.bot_data["finished_announced"]
+        assert ctx.bot.send_message.await_count == 1
+        assert "🏁" in ctx.bot.send_message.call_args_list[0][1]["text"]
+
+    @pytest.mark.asyncio
+    async def test_restart_genuinely_finished_is_seeded_not_reannounced(self, tmp_path):
+        """RESTART REGRESSION (FINISHED): a match that truly FINISHED while the bot
+        was down IS seeded on first run and never re-announced afterwards."""
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = False
+        ctx.bot_data["finished_announced"] = set()
+        mock_scanner = MagicMock()
+        mock_scanner.get_espn_game_id = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        finished = self._make_stale_inplay(
+            mid=9400, status="FINISHED", kickoff_hours_ago=6.0,
+            home_score=3, away_score=1, winner="HOME_TEAM",
+        )
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [finished]
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            # Tick 1: first-run seed → FINISHED match seeded, NO send.
+            await poll_finished_matches_job(ctx)
+            assert 9400 in ctx.bot_data["finished_announced"]
+            ctx.bot.send_message.assert_not_awaited()
+
+            # Tick 2: still FINISHED and already seeded → must NOT re-announce.
+            await poll_finished_matches_job(ctx)
+            ctx.bot.send_message.assert_not_awaited()
 
 
 class TestSharedFootballClient:
