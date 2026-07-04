@@ -5,6 +5,16 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260704.10] - 2026-07-04
+
+- Replace _serve_elecciones with _serve_after_placeholder(context, chat_id, placeholder_id, artifact): delete-then-send on success, edit- to-error on failure.
+- Rewrite cmd_elecciones_callback: use query.edit_message_text('⏳ Generando…', reply_markup=None) as step 1; wrap generation in try/except so artifact=None on any exception; delegate to _serve_after_placeholder.
+- Add delete_message + edit_message_text mocks to _make_context().
+- Add edit_message_text mock to TestCmdEleccionesCallback._make_query().
+- Update test_removes_keyboard, test_sends_text_result_for_grupos, test_cache_hit_serves_without_regeneration, test_cache_invalidated_on_mtime_change, test_grupos_image_mode_* to assert delete_message + send_* (not edit_message_reply_markup).
+- Add test_generation_failure_edits_placeholder_to_error: assert no delete/send, bot.edit_message_text called with error text.
+
+
 ## [20260704.09] - 2026-07-04
 
 - feat(elecciones): circular flag images in knockout & groups images (replace TLA text)
