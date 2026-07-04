@@ -10,22 +10,23 @@ call from jobs, handlers, or tests without ceremony.
 Entry schema::
 
     {
-        "chat_id":       int | str,     # group/chat the goal message was sent to
-        "message_id":    int,            # Telegram message id of the goal message
-        "home_name":     str,
-        "away_name":     str,
-        "home_tla":      str,
-        "away_tla":      str,
-        "home_score":    int,
-        "away_score":    int,
-        "scoring_team":  str,
-        "scorer":        str | null,    # may be None if enrichment failed
-        "minute":        str | null,    # "65", "45+2", etc., or None
-        "status":        "searching" | "ready" | "timeout",
-        "clip_path":     str | null,    # absolute path once downloaded
-        "file_id":       str | null,    # Telegram file_id once sent
-        "attempts":      int,
-        "created_at":    str,           # ISO-8601 UTC
+        "chat_id":           int | str,  # group/chat the goal message was sent to
+        "message_id":        int,         # Telegram message id of the goal message
+        "home_name":         str,
+        "away_name":         str,
+        "home_tla":          str,
+        "away_tla":          str,
+        "home_score":        int,
+        "away_score":        int,
+        "scoring_team":      str,
+        "scorer":            str | null,  # may be None if enrichment failed
+        "minute":            str | null,  # "65", "45+2", etc., or None
+        "status":            "searching" | "ready" | "timeout",
+        "clip_path":         str | null,  # absolute path once downloaded
+        "file_id":           str | null,  # Telegram file_id once sent
+        "attempts":          int,
+        "keyboard_attached": bool,        # True once edit_message_reply_markup succeeded
+        "created_at":        str,         # ISO-8601 UTC
     }
 """
 
@@ -112,6 +113,7 @@ def add_entry(
         "clip_path": None,
         "file_id": None,
         "attempts": 0,
+        "keyboard_attached": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 

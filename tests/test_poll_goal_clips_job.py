@@ -104,10 +104,10 @@ class TestAttemptsTracking:
 
     @pytest.mark.asyncio
     async def test_no_searching_entries_returns_early(self, tmp_path):
-        """If all entries are 'ready' or 'timeout', find_goal_clip is never called."""
+        """If all entries are 'ready' (keyboard attached) or 'timeout', find_goal_clip is never called."""
         settings = _make_settings(tmp_path)
         clip_data = {
-            "tok1": {**_searching_entry(), "status": "ready"},
+            "tok1": {**_searching_entry(), "status": "ready", "keyboard_attached": True},
             "tok2": {**_searching_entry(), "status": "timeout"},
         }
         ctx = _make_context(settings, clip_data)
@@ -480,3 +480,212 @@ class TestKeyboardRaceConditionFix:
             await poll_goal_clips_job(ctx)
 
         assert clip_path_at_edit[0] is not None, "clip_path must be set before keyboard edit"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Regression — keyboard retry (Bug #1 fix)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _ready_entry_no_keyboard(token: str = "readytok") -> dict:
+    """A clip-store entry already at status='ready' but keyboard never attached."""
+    return {
+        "chat_id": -100999,
+        "message_id": 55,
+        "home_name": "Australia",
+        "away_name": "Egypt",
+        "home_tla": "AUS",
+        "away_tla": "EGY",
+        "home_score": 1,
+        "away_score": 0,
+        "scoring_team": "Australia",
+        "scorer": "Duke",
+        "minute": "34",
+        "status": "ready",
+        "clip_path": "/clips/readytok.mp4",
+        "file_id": None,
+        "attempts": 1,
+        "keyboard_attached": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+class TestKeyboardRetry:
+    """Regression tests for Bug #1: 'Ver gol' button never attached.
+
+    Root cause: if edit_message_reply_markup failed on the initial clip-ready
+    tick, the entry sat at status='ready' with keyboard_attached=False forever
+    — the main searching loop skips 'ready' entries and there was no retry
+    path.  The fix adds keyboard_attached tracking and a retry loop.
+    """
+
+    @pytest.mark.asyncio
+    async def test_keyboard_attached_true_after_successful_initial_edit(self, tmp_path):
+        """When clip is freshly found and edit succeeds, keyboard_attached is set True."""
+        settings = _make_settings(tmp_path)
+        token = "freshclip"
+        entry = _searching_entry()
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+
+        fake_video = tmp_path / "c.mp4"
+        fake_video.write_bytes(b"data")
+        fake_downloader = MagicMock()
+        fake_downloader.download = AsyncMock(return_value=fake_video)
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value="https://x.com/v"),
+            patch("worldcup_bot.__main__.MediaDownloader", return_value=fake_downloader),
+            patch("worldcup_bot.__main__.compress_if_needed", new=AsyncMock(return_value=fake_video)),
+            patch("worldcup_bot.__main__.shutil.move"),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        assert entry["keyboard_attached"] is True
+
+    @pytest.mark.asyncio
+    async def test_keyboard_not_attached_when_initial_edit_fails(self, tmp_path):
+        """If initial edit_message_reply_markup raises, keyboard_attached stays False."""
+        settings = _make_settings(tmp_path)
+        token = "editfail2"
+        entry = _searching_entry()
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+        ctx.bot.edit_message_reply_markup = AsyncMock(side_effect=Exception("TG err"))
+
+        fake_video = tmp_path / "c.mp4"
+        fake_video.write_bytes(b"data")
+        fake_downloader = MagicMock()
+        fake_downloader.download = AsyncMock(return_value=fake_video)
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value="https://x.com/v"),
+            patch("worldcup_bot.__main__.MediaDownloader", return_value=fake_downloader),
+            patch("worldcup_bot.__main__.compress_if_needed", new=AsyncMock(return_value=fake_video)),
+            patch("worldcup_bot.__main__.shutil.move"),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        assert not entry.get("keyboard_attached", False)
+
+    @pytest.mark.asyncio
+    async def test_retry_loop_attaches_keyboard_for_ready_entry(self, tmp_path):
+        """The retry loop must call edit_message_reply_markup for a ready+unattached entry.
+
+        This is the core regression: before the fix, ready entries with
+        keyboard_attached=False were never retried and the 'Ver gol' button was
+        permanently missing.
+        """
+        settings = _make_settings(tmp_path)
+        token = "retryready"
+        entry = _ready_entry_no_keyboard(token)
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value=None),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        ctx.bot.edit_message_reply_markup.assert_called_once()
+        assert entry["keyboard_attached"] is True
+
+    @pytest.mark.asyncio
+    async def test_retry_loop_sets_changed_so_clips_persisted(self, tmp_path):
+        """After a successful retry, save_clips must be called to persist the change."""
+        settings = _make_settings(tmp_path)
+        token = "retryready2"
+        entry = _ready_entry_no_keyboard(token)
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value=None),
+            patch("worldcup_bot.__main__.save_clips") as mock_save,
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        mock_save.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_retry_loop_skips_already_attached_entries(self, tmp_path):
+        """Entries already with keyboard_attached=True must NOT trigger a redundant edit."""
+        settings = _make_settings(tmp_path)
+        token = "alreadydone"
+        entry = _ready_entry_no_keyboard(token)
+        entry["keyboard_attached"] = True
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value=None),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        ctx.bot.edit_message_reply_markup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retry_loop_skips_timeout_entries(self, tmp_path):
+        """Entries with status='timeout' must not be retried regardless of keyboard_attached."""
+        settings = _make_settings(tmp_path)
+        token = "timeoutentry"
+        entry = _ready_entry_no_keyboard(token)
+        entry["status"] = "timeout"
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value=None),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        ctx.bot.edit_message_reply_markup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retry_loop_handles_multiple_unattached_entries(self, tmp_path):
+        """All ready+unattached entries must be retried in one tick."""
+        settings = _make_settings(tmp_path)
+        tokens = ["r1", "r2", "r3"]
+        clip_data = {t: _ready_entry_no_keyboard(t) for t in tokens}
+        ctx = _make_context(settings, clip_data)
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value=None),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        assert ctx.bot.edit_message_reply_markup.call_count == 3
+        for entry in clip_data.values():
+            assert entry["keyboard_attached"] is True
+
+    @pytest.mark.asyncio
+    async def test_retry_loop_does_not_set_attached_when_retry_also_fails(self, tmp_path):
+        """If the retry edit also fails, keyboard_attached stays False for next tick."""
+        settings = _make_settings(tmp_path)
+        token = "retryfail"
+        entry = _ready_entry_no_keyboard(token)
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+        ctx.bot.edit_message_reply_markup = AsyncMock(side_effect=Exception("still broken"))
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value=None),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        assert entry["keyboard_attached"] is False

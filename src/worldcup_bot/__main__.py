@@ -1281,7 +1281,15 @@ async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             for tok, entry in clip_data.items()
             if entry.get("status") == "searching"
         }
-        if not searching:
+        # Ready entries whose keyboard edit previously failed — must be retried
+        # even when there is no new clip searching work.
+        pending_retry = [
+            (tok, entry)
+            for tok, entry in clip_data.items()
+            if entry.get("status") == "ready" and not entry.get("keyboard_attached", False)
+        ]
+
+        if not searching and not pending_retry:
             return
 
         changed = False
@@ -1352,19 +1360,24 @@ async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     entry["status"] = "ready"
                     entry["clip_path"] = str(persistent_path)
 
-                    # Edit the original goal message to add the 'Ver gol' keyboard
+                    # Edit the original goal message to add the 'Ver gol' keyboard.
+                    # Track success so the retry loop below can re-attempt on failure.
                     try:
                         await context.bot.edit_message_reply_markup(
                             chat_id=entry["chat_id"],
                             message_id=entry["message_id"],
                             reply_markup=build_goal_keyboard(token),
                         )
+                        entry["keyboard_attached"] = True
                     except Exception as edit_exc:
                         log.warning(
                             "poll_goal_clips_job: could not edit message for token %s: %s",
                             token,
                             edit_exc,
                         )
+                        # keyboard_attached stays False — the retry loop will re-try
+                        # on the next tick so a transient Telegram error never
+                        # permanently hides the 'Ver gol' button.
 
                     log.info(
                         "poll_goal_clips_job: clip ready for token %s → %s",
@@ -1389,6 +1402,33 @@ async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as exc:
                 log.exception(
                     "poll_goal_clips_job: error processing token %s: %s", token, exc
+                )
+
+        # ── Retry keyboard attachment for ready-but-keyboardless entries ─────
+        # If edit_message_reply_markup failed on the initial clip-ready tick (e.g.
+        # Telegram API blip), the entry sits at status="ready" with
+        # keyboard_attached=False.  Since it is no longer "searching", the main
+        # loop above never revisits it.  This retry loop catches those entries and
+        # re-attempts the edit every tick until it succeeds (or the entry is pruned
+        # after 7 days by prune_old_entries).
+        for token, entry in pending_retry:
+            try:
+                await context.bot.edit_message_reply_markup(
+                    chat_id=entry["chat_id"],
+                    message_id=entry["message_id"],
+                    reply_markup=build_goal_keyboard(token),
+                )
+                entry["keyboard_attached"] = True
+                changed = True
+                log.info(
+                    "poll_goal_clips_job: keyboard retry succeeded for token %s",
+                    token,
+                )
+            except Exception as retry_exc:
+                log.warning(
+                    "poll_goal_clips_job: keyboard retry failed for token %s: %s",
+                    token,
+                    retry_exc,
                 )
 
         if changed:
@@ -1602,8 +1642,20 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
+        now_utc = datetime.now(timezone.utc)
         finished_ids = {m.id for m in all_matches if m.status == "FINISHED"}
-        new_ids = finished_ids - announced
+        # Wall-clock fallback: if the football-data.org free-tier API is slow to
+        # update a match to FINISHED (as happened for Australia vs Egypt: ended
+        # ~22:30 but API stayed IN_PLAY until ~06:00 next day, a 9h lag), use the
+        # wall-clock guard — any match with kickoff >MATCH_OVER_AGE (4h) ago that
+        # is still showing as IN_PLAY or PAUSED is treated as finished.  This caps
+        # the worst-case announcement delay at MATCH_OVER_AGE from kickoff rather
+        # than waiting indefinitely for the API status to update.
+        stale_live_ids = {
+            m.id for m in all_matches
+            if _match_is_over(m, now_utc) and m.status in ("IN_PLAY", "PAUSED")
+        }
+        new_ids = (finished_ids | stale_live_ids) - announced
         matches_by_id = {m.id: m for m in all_matches}
 
         if not new_ids:

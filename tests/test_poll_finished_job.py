@@ -1990,3 +1990,177 @@ class TestVARCorrectionWatch:
         assert entry["away"] == 1
         assert entry["corrected"] is False
         assert "finalized_at" in entry
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Regression — wall-clock fallback for late API updates (Bug #2 fix)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestWallClockFallback:
+    """Regression tests for Bug #2: FINAL announced ~9h late.
+
+    Root cause: poll_finished_matches_job only announced matches where
+    m.status == "FINISHED".  When football-data.org delayed updating the
+    Australia-Egypt match to FINISHED for ~9.5h, the bot never announced.
+    Fix: add a wall-clock fallback that also fires for IN_PLAY/PAUSED matches
+    whose kickoff is >MATCH_OVER_AGE (4h) ago.
+    """
+
+    def _make_stale_inplay(
+        self,
+        mid: int = 9001,
+        status: str = "IN_PLAY",
+        kickoff_hours_ago: float = 5.0,
+    ) -> "Match":
+        """An IN_PLAY match whose kickoff is `kickoff_hours_ago` hours in the past."""
+        from datetime import datetime, timedelta, timezone
+
+        kickoff = datetime.now(timezone.utc) - timedelta(hours=kickoff_hours_ago)
+        return Match(
+            id=mid,
+            utc_date=kickoff.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            status=status,
+            stage="GROUP_STAGE",
+            group="GROUP_A",
+            home_tla="AUS",
+            away_tla="EGY",
+            home_name="Australia",
+            away_name="Egypt",
+            home_score=1,
+            away_score=0,
+            winner=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_inplay_match_over_4h_gets_announced(self, tmp_path):
+        """An IN_PLAY match with kickoff >4h ago must be announced (wall-clock fallback).
+
+        This is the core regression: before the fix, this match would be silently
+        skipped until the football-data API eventually updated to FINISHED.
+        """
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = True
+        ctx.bot_data["finished_announced"] = set()
+
+        match = self._make_stale_inplay(mid=9001, status="IN_PLAY", kickoff_hours_ago=5.0)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+        mock_scanner = MagicMock()
+        mock_scanner.get_espn_game_id = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_awaited()
+        text = ctx.bot.send_message.call_args_list[0][1]["text"]
+        assert "🏁" in text
+        assert 9001 in ctx.bot_data["finished_announced"]
+
+    @pytest.mark.asyncio
+    async def test_paused_match_over_4h_gets_announced(self, tmp_path):
+        """A PAUSED match (e.g. HT stuck) with kickoff >4h ago must also be announced."""
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = True
+        ctx.bot_data["finished_announced"] = set()
+
+        match = self._make_stale_inplay(mid=9002, status="PAUSED", kickoff_hours_ago=5.0)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+        mock_scanner = MagicMock()
+        mock_scanner.get_espn_game_id = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_awaited()
+        assert 9002 in ctx.bot_data["finished_announced"]
+
+    @pytest.mark.asyncio
+    async def test_inplay_match_under_4h_not_announced(self, tmp_path):
+        """An IN_PLAY match with kickoff <4h ago must NOT be prematurely announced."""
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = True
+        ctx.bot_data["finished_announced"] = set()
+
+        match = self._make_stale_inplay(mid=9003, status="IN_PLAY", kickoff_hours_ago=1.5)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+
+        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        assert 9003 not in ctx.bot_data["finished_announced"]
+
+    @pytest.mark.asyncio
+    async def test_scheduled_match_over_4h_not_announced(self, tmp_path):
+        """A TIMED/SCHEDULED match >4h in the past must NOT be announced via wall-clock.
+
+        Only IN_PLAY and PAUSED matches trigger the fallback (a postponed or
+        cancelled match should not be announced as a final).
+        """
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = True
+        ctx.bot_data["finished_announced"] = set()
+
+        match = self._make_stale_inplay(mid=9004, status="TIMED", kickoff_hours_ago=5.0)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+
+        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        assert 9004 not in ctx.bot_data["finished_announced"]
+
+    @pytest.mark.asyncio
+    async def test_stale_inplay_already_announced_not_re_announced(self, tmp_path):
+        """Once a wall-clock-announced match is in `finished_announced`, never re-fire."""
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = True
+        ctx.bot_data["finished_announced"] = {9005}  # already announced
+
+        match = self._make_stale_inplay(mid=9005, status="IN_PLAY", kickoff_hours_ago=6.0)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+
+        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stale_inplay_seeded_on_first_run_not_announced(self, tmp_path):
+        """On first run, stale IN_PLAY is seeded (no send) — same as seed behavior."""
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        # finished_seeded=False → first-run seed path
+        ctx.bot_data["finished_seeded"] = False
+        ctx.bot_data["finished_announced"] = set()
+
+        match = self._make_stale_inplay(mid=9006, status="IN_PLAY", kickoff_hours_ago=5.0)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+
+        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        assert 9006 in ctx.bot_data["finished_announced"]
+        assert ctx.bot_data["finished_seeded"] is True
