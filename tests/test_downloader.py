@@ -11,9 +11,8 @@ import requests
 
 from worldcup_bot.reddit.downloader import (
     ANY_MP4_RE,
-    STREAMFF_CDN_BASE,
-    STREAMFF_CDN_HOSTS,
     STREAMFF_CDN_ID_RE,
+    STREAMFF_HOST_RE,
     STREAMFF_VIDEO_RE,
     STREAMIN_CDN_BASE,
     STREAMIN_CDN_ID_RE,
@@ -93,74 +92,64 @@ class TestFindDownloadedFile:
 
 
 class TestDownloadStreamff:
-    """streamff domains rotate, so the real ``.mp4`` is resolved from the actual
-    matched page first; a direct-CDN guess (derived from the matched domain) is
-    only a fallback."""
+    """streamff rotates domains, so the direct-CDN host is DERIVED from the
+    domain of the matched clip URL (never a hardcoded TLD); a page-source scrape
+    is the secondary fallback."""
 
-    def test_resolves_mp4_from_page_source(self, tmp_path):
-        """Primary path: the ``<source src>`` in the matched page is downloaded."""
-        page_html = (
-            '<video><source src="https://cdn.streamff.pro/real92cb.mp4" '
-            'type="video/mp4"></video>'
+    @pytest.mark.parametrize(
+        "domain,vid",
+        [
+            ("streamff.pro", "92cb0999"),
+            ("streamff.one", "abc123"),
+            ("streamff.com", "xyz789"),
+            ("streamff.gg", "cafebabe"),
+            ("streamff.link", "deadbeef"),
+        ],
+    )
+    def test_cdn_host_derived_from_matched_domain(self, tmp_path, domain, vid):
+        """PRIMARY: cdn.<matched-domain>/<id>.mp4 — TLD comes from the matched URL."""
+        session = _make_session_for_download(b"videobytes")
+        d = MediaDownloader(session=session)
+        dest = tmp_path / "out.mp4"
+
+        result = d._download_streamff(f"https://{domain}/v/{vid}", dest)
+
+        assert result == dest
+        # The one and only request goes to the DERIVED host — not a hardcoded one.
+        called_url = session.get.call_args[0][0]
+        assert called_url == f"https://cdn.{domain}/{vid}.mp4"
+
+    def test_derived_cdn_url_helper(self):
+        d = MediaDownloader(session=MagicMock())
+        assert (
+            d._streamff_cdn_url("https://streamff.pro/v/92cb0999")
+            == "https://cdn.streamff.pro/92cb0999.mp4"
         )
-        session = _make_session_for_page_scrape(page_html)
+        # No hardcoded ``.one`` anywhere: a different matched TLD yields a
+        # different derived host automatically.
+        assert (
+            d._streamff_cdn_url("https://streamff.com/v/xyz789")
+            == "https://cdn.streamff.com/xyz789.mp4"
+        )
+
+    def test_no_hardcoded_stale_one_host_used(self, tmp_path):
+        """Regression: a clip matched on .pro must NOT hit the stale cdn.streamff.one."""
+        session = _make_session_for_download(b"videobytes")
         d = MediaDownloader(session=session)
         dest = tmp_path / "out.mp4"
 
-        result = d._download_streamff("https://streamff.pro/v/92cb0999", dest)
+        d._download_streamff("https://streamff.pro/v/92cb0999", dest)
 
-        assert result == dest
-        # First get() is the page; second get() is the resolved mp4 (not a
-        # guessed cdn.streamff.one host).
-        assert session.get.call_count == 2
-        assert session.get.call_args_list[1][0][0] == "https://cdn.streamff.pro/real92cb.mp4"
+        for call in session.get.call_args_list:
+            assert "cdn.streamff.one" not in call[0][0]
 
-    def test_resolves_mp4_from_json_url_key(self, tmp_path):
-        """A JSON ``"videoUrl":"…mp4"`` embedded in the page is resolved."""
-        page_html = '{"videoUrl":"https://cdn.streamff.one/json42.mp4","x":1}'
-        session = _make_session_for_page_scrape(page_html)
-        d = MediaDownloader(session=session)
-        dest = tmp_path / "out.mp4"
-
-        result = d._download_streamff("https://streamff.pro/v/abc", dest)
-
-        assert result == dest
-        assert session.get.call_args_list[1][0][0] == "https://cdn.streamff.one/json42.mp4"
-
-    def test_resolves_bare_mp4_url_in_page(self, tmp_path):
-        """A bare absolute ``.mp4`` URL with no key is still picked up."""
-        page_html = "loading https://cdn.streamff.gg/bare777.mp4 now"
-        session = _make_session_for_page_scrape(page_html)
-        d = MediaDownloader(session=session)
-        dest = tmp_path / "out.mp4"
-
-        result = d._download_streamff("https://streamff.pro/v/xyz", dest)
-
-        assert result == dest
-        assert session.get.call_args_list[1][0][0] == "https://cdn.streamff.gg/bare777.mp4"
-
-    def test_cdn_fallback_uses_matched_domain_first(self, tmp_path):
-        """When the page has no source, the direct-CDN guess is derived from the
-        SAME domain the clip was matched on (streamff.pro → cdn.streamff.pro)."""
-        # Page returns no mp4; the CDN file download then succeeds.
-        session = _make_session_for_page_scrape("<html>no video here</html>")
-        d = MediaDownloader(session=session)
-        dest = tmp_path / "out.mp4"
-
-        result = d._download_streamff("https://streamff.pro/v/89b5d5c1", dest)
-
-        assert result == dest
-        assert session.get.call_count == 2
-        cdn_url = session.get.call_args_list[1][0][0]
-        assert cdn_url == "https://cdn.streamff.pro/89b5d5c1.mp4"
-
-    def test_cdn_fallback_iterates_hosts_on_dead_host(self, tmp_path, monkeypatch):
-        """A dead CDN host (connection reset) is skipped and the next host tried."""
+    def test_page_scrape_fallback_when_cdn_dead(self, tmp_path, monkeypatch):
+        """Derived CDN dead (connection reset) → scrape page for the real source."""
         monkeypatch.setattr("worldcup_bot.reddit.downloader.time.sleep", lambda *_: None)
 
         page_resp = MagicMock()
         page_resp.raise_for_status = MagicMock()
-        page_resp.text = "<html>no source</html>"
+        page_resp.text = '<source src="https://media.streamff.pro/real.mp4">'
 
         good_resp = MagicMock()
         good_resp.__enter__ = MagicMock(return_value=good_resp)
@@ -173,35 +162,28 @@ class TestDownloadStreamff:
         def _get(url, **kwargs):
             seen.append(url)
             if not kwargs.get("stream"):
-                return page_resp  # page fetch
-            if "cdn.streamff.gg" in url:
-                # matched-domain host is dead → connection reset every attempt
+                return page_resp  # page fetch (secondary)
+            if url == "https://cdn.streamff.pro/89b5d5c1.mp4":
                 raise requests.exceptions.ConnectionError(
                     "('Connection aborted.', ConnectionResetError(104, 'reset'))"
                 )
-            return good_resp  # next host works
+            return good_resp  # the page-resolved source downloads fine
 
         session = MagicMock()
         session.get = MagicMock(side_effect=_get)
         d = MediaDownloader(session=session)
         dest = tmp_path / "out.mp4"
 
-        result = d._download_streamff("https://streamff.gg/v/deadbeef", dest)
+        result = d._download_streamff("https://streamff.pro/v/89b5d5c1", dest)
 
         assert result == dest
-        # Dead host attempted (with retries) before falling to a working host.
-        assert any("cdn.streamff.gg/deadbeef.mp4" in u for u in seen)
-        assert any(
-            "cdn.streamff.gg" not in u and u.endswith("deadbeef.mp4") for u in seen
-        )
+        # Derived CDN attempted first, then the page-scraped source.
+        assert seen[0] == "https://cdn.streamff.pro/89b5d5c1.mp4"
+        assert "https://media.streamff.pro/real.mp4" in seen
 
     def test_connection_reset_is_retried_then_succeeds(self, tmp_path, monkeypatch):
-        """A transient connection reset on the resolved URL is retried."""
+        """A transient connection reset on the derived CDN URL is retried."""
         monkeypatch.setattr("worldcup_bot.reddit.downloader.time.sleep", lambda *_: None)
-
-        page_resp = MagicMock()
-        page_resp.raise_for_status = MagicMock()
-        page_resp.text = '<source src="https://cdn.streamff.pro/r.mp4">'
 
         good_resp = MagicMock()
         good_resp.__enter__ = MagicMock(return_value=good_resp)
@@ -212,8 +194,6 @@ class TestDownloadStreamff:
         calls = {"n": 0}
 
         def _get(url, **kwargs):
-            if not kwargs.get("stream"):
-                return page_resp
             calls["n"] += 1
             if calls["n"] == 1:
                 raise requests.exceptions.ConnectionError("reset by peer")
@@ -227,22 +207,10 @@ class TestDownloadStreamff:
         result = d._download_streamff("https://streamff.pro/v/abc", dest)
 
         assert result == dest
-        assert calls["n"] == 2  # first reset, retry succeeded
+        assert calls["n"] == 2  # first reset, retry succeeded on the same URL
 
-    def test_page_scrape_fallback_when_no_cdn_id(self, tmp_path):
-        """URL with no ``/v/{id}`` → page-resolved video source."""
-        page_html = '<source src="https://cdn.streamff.one/scraped.mp4" type="video/mp4">'
-        session = _make_session_for_page_scrape(page_html)
-        d = MediaDownloader(session=session)
-        dest = tmp_path / "out.mp4"
-
-        result = d._download_streamff("https://streamff.link/embed/page", dest)
-
-        assert result == dest
-        assert session.get.call_count == 2
-
-    def test_returns_none_when_page_and_cdn_all_fail(self, tmp_path, monkeypatch):
-        """No page source AND every CDN host dead → None (graceful)."""
+    def test_returns_none_when_cdn_dead_and_page_has_no_source(self, tmp_path, monkeypatch):
+        """Derived CDN dead AND page has no source → None (graceful, no yt-dlp)."""
         monkeypatch.setattr("worldcup_bot.reddit.downloader.time.sleep", lambda *_: None)
 
         page_resp = MagicMock()
@@ -262,8 +230,20 @@ class TestDownloadStreamff:
         result = d._download_streamff("https://streamff.pro/v/gone", dest)
         assert result is None
 
-    def test_returns_none_when_no_mp4_and_no_id(self, tmp_path):
-        """No mp4 in page and no ``/v/{id}`` → None without a CDN guess."""
+    def test_no_id_falls_back_to_page_scrape(self, tmp_path):
+        """URL with no ``/v/{id}`` (no derivable CDN) → page-scraped source."""
+        page_html = '<source src="https://media.streamff.link/scraped.mp4" type="video/mp4">'
+        session = _make_session_for_page_scrape(page_html)
+        d = MediaDownloader(session=session)
+        dest = tmp_path / "out.mp4"
+
+        result = d._download_streamff("https://streamff.link/embed/page", dest)
+
+        assert result == dest
+        assert session.get.call_args_list[-1][0][0] == "https://media.streamff.link/scraped.mp4"
+
+    def test_returns_none_when_no_id_and_no_source(self, tmp_path):
+        """No derivable CDN and no mp4 in page → None."""
         page_resp = MagicMock()
         page_resp.raise_for_status = MagicMock()
         page_resp.text = "<html>nothing useful here</html>"
@@ -279,18 +259,8 @@ class TestDownloadStreamff:
 
 class TestStreamffPatterns:
     def test_host_regex_captures_matched_domain(self):
-        from worldcup_bot.reddit.downloader import STREAMFF_HOST_RE
-
         m = STREAMFF_HOST_RE.search("https://streamff.pro/v/abc")
         assert m and m.group(1) == "streamff.pro"
-
-    def test_cdn_candidates_put_matched_host_first(self):
-        d = MediaDownloader(session=MagicMock())
-        hosts = d._streamff_cdn_candidates("https://streamff.pro/v/abc")
-        assert hosts[0] == "cdn.streamff.pro"
-        # Known hosts are still present (no duplicates).
-        assert set(STREAMFF_CDN_HOSTS).issubset(set(hosts))
-        assert len(hosts) == len(set(hosts))
 
     def test_video_re_extracts_keyed_sources(self):
         assert STREAMFF_VIDEO_RE.search(
@@ -463,31 +433,29 @@ class TestYtDlpFallback:
         session.get.assert_not_called()
 
     async def test_download_routes_streamff_pro_to_streamff_handler(self, tmp_path):
-        """download() with streamff.pro routes to _download_streamff (page-resolved),
-        and never falls through to yt-dlp."""
-        page_html = '<source src="https://cdn.streamff.pro/89b5d5c1.mp4">'
-        session = _make_session_for_page_scrape(page_html, b"videobytes")
+        """download() with streamff.pro downloads from the DERIVED CDN host and
+        never falls through to yt-dlp."""
+        session = _make_session_for_download(b"videobytes")
         d = MediaDownloader(session=session)
 
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             result = await d.download("https://streamff.pro/v/89b5d5c1")
 
         assert result is not None
-        # Resolved from the page, and yt-dlp was NOT invoked for streamff.
-        assert session.get.call_args_list[1][0][0] == "https://cdn.streamff.pro/89b5d5c1.mp4"
+        # Derived from the matched domain, and yt-dlp was NOT invoked for streamff.
+        assert session.get.call_args[0][0] == "https://cdn.streamff.pro/89b5d5c1.mp4"
         mock_exec.assert_not_called()
 
     async def test_download_routes_streamff_gg_to_streamff_handler(self, tmp_path):
-        """download() with streamff.gg resolves via page and skips yt-dlp."""
-        page_html = '<source src="https://cdn.streamff.gg/cafebabe.mp4">'
-        session = _make_session_for_page_scrape(page_html, b"videobytes")
+        """download() with streamff.gg uses the derived CDN and skips yt-dlp."""
+        session = _make_session_for_download(b"videobytes")
         d = MediaDownloader(session=session)
 
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             result = await d.download("https://streamff.gg/v/cafebabe")
 
         assert result is not None
-        assert session.get.call_args_list[1][0][0] == "https://cdn.streamff.gg/cafebabe.mp4"
+        assert session.get.call_args[0][0] == "https://cdn.streamff.gg/cafebabe.mp4"
         mock_exec.assert_not_called()
 
     async def test_download_streamff_failure_does_not_call_ytdlp(self, tmp_path):

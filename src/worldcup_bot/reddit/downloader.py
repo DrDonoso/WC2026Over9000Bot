@@ -5,11 +5,11 @@ Supports streamff (.pro/.one/.com/.link/.gg/… — domain rotates), streamin
 use ``requests`` (synchronous) wrapped in ``asyncio.to_thread``; yt-dlp uses
 ``asyncio.create_subprocess_exec`` directly.
 
-streamff domains and their CDN hosts change periodically, so the streamff path
-RESOLVES the real ``.mp4`` from the actual matched page first and only falls
-back to guessing a direct-CDN host (derived from the matched domain) when the
-page cannot be parsed.  yt-dlp does not support streamff, so streamff never
-falls through to it.
+streamff rotates domains, so the direct-download host is DERIVED from the domain
+of the matched clip URL — ``https://streamff.pro/v/{id}`` →
+``https://cdn.streamff.pro/{id}.mp4`` — never a hardcoded TLD.  If that derived
+CDN host fails, the matched page is scraped for the real ``<source>`` src.
+yt-dlp does not support streamff, so streamff never falls through to it.
 """
 
 from __future__ import annotations
@@ -38,22 +38,12 @@ STREAMFF_VIDEO_RE = re.compile(
 ANY_MP4_RE = re.compile(r'https?://[^"\'>\s]+\.mp4[^"\'>\s]*', re.IGNORECASE)
 
 STREAMFF_CDN_ID_RE = re.compile(r"streamff\.[a-z]+/v/([a-zA-Z0-9]+)")
-# Capture the matched streamff host (e.g. ``streamff.pro``) so a fallback CDN
-# host can be derived from the SAME domain the clip was matched on.
+# Capture the matched streamff host (e.g. ``streamff.pro``) so the direct-CDN
+# host is DERIVED from the SAME domain the clip was matched on — no hardcoded
+# TLD, so a future streamff domain change works with no code edit.
 STREAMFF_HOST_RE = re.compile(
     r"https?://(?:www\.)?(streamff\.[a-z]+)", re.IGNORECASE
 )
-# Direct-CDN host candidates tried (in order) only when page extraction fails.
-# The matched domain's ``cdn.<domain>`` is prepended at call time.  This list is
-# a best-effort of hosts seen in the wild; domains rotate, so the page-resolved
-# path above is the durable fix.
-STREAMFF_CDN_HOSTS: tuple[str, ...] = (
-    "cdn.streamff.one",
-    "cdn.streamff.pro",
-    "cdn.streamff.com",
-)
-# Back-compat: first known host as a base URL.
-STREAMFF_CDN_BASE = f"https://{STREAMFF_CDN_HOSTS[0]}"
 
 STREAMIN_CDN_ID_RE = re.compile(r"streamin\.(?:link|me)/v/([a-zA-Z0-9]+)")
 STREAMIN_CDN_BASE = "https://c-cdn.streamin.top/uploads"
@@ -181,9 +171,9 @@ class MediaDownloader:
     def _resolve_streamff_source(self, url: str) -> str | None:
         """Fetch the streamff ``/v/{id}`` page and extract the real ``.mp4`` URL.
 
-        This is the durable, domain-independent path: rather than guessing a
-        ``cdn.<domain>/{id}.mp4`` host (which breaks every time streamff rotates
-        domains), we read the source the page itself references.
+        Secondary path used when the derived-CDN host is unreachable: read the
+        source the page itself references (``<source>``/``<video>`` src or an
+        embedded JSON url), so a dead CDN edge still yields a working download.
         """
         try:
             resp = self._session.get(url, timeout=15)
@@ -198,40 +188,39 @@ class MediaDownloader:
             return None
         return m.group(1) if m.re is STREAMFF_VIDEO_RE else m.group(0)
 
-    def _streamff_cdn_candidates(self, url: str) -> list[str]:
-        """Return direct-CDN hosts to try, matched-domain host first."""
-        hosts = list(STREAMFF_CDN_HOSTS)
-        host_m = STREAMFF_HOST_RE.search(url)
-        if host_m:
-            matched = f"cdn.{host_m.group(1).lower()}"
-            if matched in hosts:
-                hosts.remove(matched)
-            hosts.insert(0, matched)
-        return hosts
+    def _streamff_cdn_url(self, url: str) -> str | None:
+        """Derive ``https://cdn.<matched-domain>/<id>.mp4`` from the matched URL.
+
+        The CDN host is taken from the domain the clip was actually matched on
+        (e.g. ``streamff.pro`` → ``cdn.streamff.pro``) — never a hardcoded TLD —
+        so a future streamff domain rotation is handled with no code change.
+        """
+        id_match = STREAMFF_CDN_ID_RE.search(url)
+        host_match = STREAMFF_HOST_RE.search(url)
+        if not id_match or not host_match:
+            return None
+        domain = host_match.group(1).lower()
+        return f"https://cdn.{domain}/{id_match.group(1)}.mp4"
 
     def _download_streamff(self, url: str, dest: Path) -> Path | None:
-        # 1. Durable path: resolve the real mp4 from the actual matched page.
+        # 1. PRIMARY: direct CDN derived from the SAME domain the clip was
+        #    matched on (cdn.<matched-domain>/<id>.mp4). No hardcoded TLD.
+        cdn_url = self._streamff_cdn_url(url)
+        if cdn_url:
+            log.info("streamff: trying derived CDN %s", cdn_url)
+            result = self._download_file(cdn_url, dest)
+            if result:
+                return result
+            log.info("streamff: derived CDN failed, scraping page for source")
+
+        # 2. SECONDARY: scrape the matched page for the real <source> src.
         video_url = self._resolve_streamff_source(url)
         if video_url:
             log.info("streamff: resolved page source %s", video_url)
             result = self._download_file(video_url, dest)
             if result:
                 return result
-            log.info("streamff: page-resolved source failed, trying direct CDN")
 
-        # 2. Fallback: guess a direct-CDN URL, derived from the matched domain
-        #    first, then other known streamff CDN hosts.
-        id_match = STREAMFF_CDN_ID_RE.search(url)
-        if not id_match:
-            log.warning("streamff: no video id in %s and page resolution failed", url)
-            return None
-        vid = id_match.group(1)
-        for host in self._streamff_cdn_candidates(url):
-            cdn_url = f"https://{host}/{vid}.mp4"
-            log.info("streamff: trying direct CDN %s", cdn_url)
-            result = self._download_file(cdn_url, dest)
-            if result:
-                return result
         log.warning("streamff: all download paths failed for %s", url)
         return None
 
