@@ -5,6 +5,14 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260704.04] - 2026-07-04
+
+- Primary: _resolve_streamff_source() fetches the actual matched /v/{id} page and extracts the real .mp4 (STREAMFF_VIDEO_RE keyed on source src/file/src/ videoUrl/url; ANY_MP4_RE last resort). Domain-independent - survives future domain rotations instead of chasing them.
+- Fallback: direct-CDN guess derived from the SAME matched domain first (cdn.streamff.pro), then a known host list.
+- _download_file retries transient connection resets twice with backoff.
+- streamff no longer falls through to yt-dlp (unsupported); streamin/streamain keep their yt-dlp fallback. Order: page-resolved -> matched CDN -> known CDNs.
+
+
 ## [20260704.03] - 2026-07-04
 
 - perf(mem): reuse single football-data client, evict reddit body cache, close AI httpx clients
