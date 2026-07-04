@@ -8,8 +8,11 @@ Spanish user-facing strings throughout.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
+import io
 import logging
+import os
 import random
 import time
 from dataclasses import asdict
@@ -17,7 +20,7 @@ from pathlib import Path
 
 import requests as _requests
 
-from telegram import InputMediaPhoto, InlineKeyboardMarkup, Update
+from telegram import InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from worldcup_bot.api.cache import get_default_cache
@@ -199,6 +202,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/endirecto — partidos en directo\n"
         "/mispredicciones — ver tus predicciones\n"
         "/participantes — lista de participantes\n"
+        "/elecciones — ver las predicciones de todos por fase 🗳️\n"
         "/estadisticas — quién ve más goles 🏆\n"
         "/tongo — revelar la verdad 👀"
     )
@@ -1404,3 +1408,249 @@ async def cmd_evolucion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception:
         log.exception("cmd_evolucion: error rendering or sending chart")
         await update.message.reply_text("❌ Error al generar el gráfico. Intenta más tarde.")
+
+
+# ── /elecciones — per-phase picks viewer ─────────────────────────────────────
+
+# Reverse of STAGE_YAML_KEYS: yaml_key → API stage name
+_YAML_TO_API_KEY: dict[str, str] = {v: k for k, v in STAGE_YAML_KEYS.items()}
+
+# Max cache entries — one per phase (6 phases max)
+_MAX_ELECCIONES_CACHE = 6
+
+
+def _elecciones_results_version(context: ContextTypes.DEFAULT_TYPE, yaml_key: str) -> str:
+    """Return a short hash of current API results for a knockout phase (cache key).
+
+    Returns ``"none"`` for grupos (no API dependency) or on any error so the
+    cache still works — it simply won't be invalidated by results changes in
+    that error case, only by predictions mtime.
+    """
+    if yaml_key == "grupos":
+        return "none"
+    api_key = _YAML_TO_API_KEY.get(yaml_key)
+    if not api_key:
+        return "none"
+    try:
+        client = _football_client(context)
+        results = client.get_stage_results(api_key)
+        serialized = "|".join(
+            f"{r.home_tla}:{r.away_tla}:{r.winner_tla or ''}"
+            for r in sorted(results, key=lambda r: (r.home_tla, r.away_tla))
+        )
+        return hashlib.md5(serialized.encode()).hexdigest()[:12]
+    except Exception:
+        return "none"
+
+
+def _elecciones_cache_put(cache: dict, key: tuple, value: dict) -> None:
+    """Store *value* under *key*, evicting stale entries for the same phase."""
+    phase = key[0]
+    # Evict any other entries for this phase (different mtime or results)
+    for stale in [k for k in list(cache) if k[0] == phase and k != key]:
+        del cache[stale]
+    cache[key] = value
+    # Hard cap — drop oldest if we somehow exceed the limit
+    while len(cache) > _MAX_ELECCIONES_CACHE:
+        del cache[next(iter(cache))]
+
+
+async def _generate_elecciones_artifact(
+    yaml_key: str,
+    participants: dict,
+    settings: "Settings",
+    context: ContextTypes.DEFAULT_TYPE,
+) -> dict | None:
+    """Generate the display artifact for a phase.
+
+    Returns one of:
+    - ``{"messages": [str, ...]}``   — plain-text (send with send_message)
+    - ``{"data": bytes}``            — PNG image (send with send_photo)
+    - ``None``                       — unrecoverable failure
+    """
+    from worldcup_bot.porra.elecciones import (
+        build_groups_text,
+        build_knockout_text,
+        phase_label,
+    )
+
+    choices_type = getattr(settings, "choices_type", "text")
+
+    if yaml_key == "grupos":
+        if choices_type == "image":
+            log.info(
+                "cmd_elecciones: grupos image not yet implemented; using text renderer"
+            )
+        messages = build_groups_text(participants, team_flag)
+        return {"messages": messages}
+
+    # Knockout: fetch bracket from API
+    api_key = _YAML_TO_API_KEY.get(yaml_key)
+    try:
+        client = _football_client(context)
+        all_matches = client.get_all_matches()
+    except FootballAPIError as exc:
+        return {"messages": [_api_error_msg(exc)]}
+    except Exception as exc:
+        log.exception("_generate_elecciones_artifact: unexpected API error: %s", exc)
+        return {"messages": ["❌ Error de API. Intenta más tarde."]}
+
+    ties = [
+        (m.home_tla, m.away_tla)
+        for m in sorted(all_matches, key=lambda m: m.utc_date)
+        if api_key and m.stage == api_key and m.home_tla and m.away_tla
+    ]
+
+    if not ties:
+        return {
+            "messages": [
+                f"⏳ El cuadro de {phase_label(yaml_key)} no está disponible todavía."
+            ]
+        }
+
+    if choices_type == "image":
+        results_by_tie: dict[tuple[str, str], str | None] = {}
+        try:
+            if api_key:
+                for r in client.get_stage_results(api_key):
+                    results_by_tie[(r.home_tla, r.away_tla)] = r.winner_tla
+        except Exception:
+            pass  # results column will be blank — non-fatal
+
+        from worldcup_bot.bot.elecciones_image import render_knockout_matrix
+
+        buf = await asyncio.to_thread(
+            render_knockout_matrix,
+            ties, participants, yaml_key, results_by_tie, settings,
+        )
+        if buf is not None:
+            return {"data": buf.read()}
+        log.warning(
+            "_generate_elecciones_artifact: image render failed; falling back to text"
+        )
+
+    # Text renderer (primary or fallback)
+    messages = build_knockout_text(ties, participants, yaml_key, team_flag)
+    return {"messages": messages}
+
+
+async def _serve_elecciones(
+    query,
+    artifact: dict | None,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Send the cached/generated artifact to the chat."""
+    chat_id = query.message.chat_id
+
+    if artifact is None:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="❌ Error inesperado generando las predicciones. Intenta de nuevo.",
+        )
+        return
+
+    if "data" in artifact:
+        try:
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=io.BytesIO(artifact["data"]),
+            )
+            return
+        except Exception as exc:
+            log.warning("_serve_elecciones: photo send failed: %s", exc)
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="❌ Error enviando la imagen. Intenta de nuevo.",
+            )
+            return
+
+    for msg in artifact.get("messages", []):
+        await context.bot.send_message(chat_id=chat_id, text=msg)
+
+
+async def cmd_elecciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show an inline keyboard listing tournament phases that have picks."""
+    from worldcup_bot.porra.elecciones import active_phases, phase_label
+
+    settings: Settings = context.bot_data["settings"]
+    predictions = pred_loader.load(settings.predictions_path)
+
+    if not predictions.get("participants"):
+        await update.message.reply_text(_msg_no_predictions(settings.predictions_path))
+        return
+
+    phases = active_phases(predictions)
+    if not phases:
+        await update.message.reply_text(
+            "No hay predicciones disponibles todavía para ninguna fase."
+        )
+        return
+
+    buttons = [
+        InlineKeyboardButton(phase_label(p), callback_data=f"elecciones|{p}")
+        for p in phases
+    ]
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    await update.message.reply_text(
+        "📊 Elige una fase para ver las predicciones:",
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def cmd_elecciones_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle phase tap: remove the keyboard, then serve picks for the chosen phase."""
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        _, yaml_key = query.data.split("|", 1)
+    except ValueError:
+        await query.answer("Datos inválidos.", show_alert=True)
+        return
+
+    # Delete the inline keyboard immediately
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as exc:
+        log.warning("cmd_elecciones_callback: could not remove keyboard: %s", exc)
+
+    settings: Settings = context.bot_data["settings"]
+    predictions = pred_loader.load(settings.predictions_path)
+    participants = predictions.get("participants", {})
+
+    if not participants:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=_msg_no_predictions(settings.predictions_path),
+        )
+        return
+
+    # ── Cache key ────────────────────────────────────────────────────────────
+    try:
+        mtime = os.path.getmtime(settings.predictions_path)
+    except OSError:
+        mtime = 0.0
+
+    try:
+        results_ver = _elecciones_results_version(context, yaml_key)
+    except Exception:
+        results_ver = "none"
+
+    cache: dict = context.bot_data.setdefault("elecciones_cache", {})
+    cache_key = (yaml_key, mtime, results_ver)
+
+    cached = cache.get(cache_key)
+    if cached is not None:
+        await _serve_elecciones(query, cached, context)
+        return
+
+    # ── Cache miss: generate ─────────────────────────────────────────────────
+    artifact = await _generate_elecciones_artifact(
+        yaml_key, participants, settings, context
+    )
+    if artifact is not None:
+        _elecciones_cache_put(cache, cache_key, artifact)
+
+    await _serve_elecciones(query, artifact, context)

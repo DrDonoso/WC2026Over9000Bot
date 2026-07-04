@@ -70,6 +70,9 @@ services:
       # --- Marca con 📺 los partidos que da TVE (vía API de RTVE). "0" para desactivar. ---
       TVE_ENABLED: "${TVE_ENABLED:-1}"
 
+      # --- Modo de visualización de /elecciones: "text" (defecto) o "image" (matriz PIL) ---
+      CHOICES_TYPE: "${CHOICES_TYPE:-text}"
+
       # --- Persistent state directory for porra snapshot ---
       STATE_DIR: /app/state
 
