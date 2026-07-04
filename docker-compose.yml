@@ -2,6 +2,8 @@ services:
   worldcup-bot:
     image: drdonoso/worldcup2026
     restart: unless-stopped
+    mem_limit: 512m        # hard cap — kernel OOM-kills + restart if exceeded
+    mem_reservation: 256m  # soft floor — scheduler hint, not a hard limit
 
     environment:
       # --- Telegram Bot (via @BotFather) ---
