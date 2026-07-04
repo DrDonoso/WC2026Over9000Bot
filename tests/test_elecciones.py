@@ -511,6 +511,8 @@ def _make_context(settings=None) -> MagicMock:
     ctx.bot_data = {"settings": settings}
     ctx.bot.send_message = AsyncMock()
     ctx.bot.send_photo = AsyncMock()
+    ctx.bot.delete_message = AsyncMock()
+    ctx.bot.edit_message_text = AsyncMock()
     return ctx
 
 
@@ -629,7 +631,9 @@ class TestCmdEleccionesCallback:
         query.data = data
         query.answer = AsyncMock()
         query.edit_message_reply_markup = AsyncMock()
+        query.edit_message_text = AsyncMock()
         query.message.chat_id = 12345
+        query.message.message_id = 999
         return query
 
     @patch("worldcup_bot.bot.handlers.pred_loader.load")
@@ -649,7 +653,8 @@ class TestCmdEleccionesCallback:
             from worldcup_bot.bot.handlers import cmd_elecciones_callback
             await cmd_elecciones_callback(update, context)
 
-        query.edit_message_reply_markup.assert_called_once_with(reply_markup=None)
+        # Keyboard must be removed by editing to the hourglass (not edit_message_reply_markup)
+        query.edit_message_text.assert_called_once_with("⏳ Generando…", reply_markup=None)
 
     @patch("worldcup_bot.bot.handlers.pred_loader.load")
     @patch("worldcup_bot.bot.handlers._elecciones_results_version", return_value="none")
@@ -671,8 +676,12 @@ class TestCmdEleccionesCallback:
             from worldcup_bot.bot.handlers import cmd_elecciones_callback
             await cmd_elecciones_callback(update, context)
 
+        # Placeholder deleted, then result sent as new message
+        context.bot.delete_message.assert_called_once_with(
+            chat_id=12345, message_id=999
+        )
         context.bot.send_message.assert_called()
-        sent_text = context.bot.send_message.call_args.kwargs.get("text") or context.bot.send_message.call_args[1].get("text", "")
+        sent_text = context.bot.send_message.call_args.kwargs.get("text") or ""
         assert "FASE DE GRUPOS" in sent_text
 
     @patch("worldcup_bot.bot.handlers.pred_loader.load")
@@ -692,9 +701,11 @@ class TestCmdEleccionesCallback:
         from worldcup_bot.bot.handlers import cmd_elecciones_callback
         await cmd_elecciones_callback(update, context)
 
+        # Placeholder deleted, cached result sent
+        context.bot.delete_message.assert_called_once_with(
+            chat_id=12345, message_id=999
+        )
         context.bot.send_message.assert_called_once()
-        sent = context.bot.send_message.call_args.kwargs.get("text", "") or context.bot.send_message.call_args[0][0] if context.bot.send_message.call_args[0] else ""
-        # Accept kwargs or positional
         call_args = context.bot.send_message.call_args
         text_sent = call_args.kwargs.get("text") or (call_args.args[0] if call_args.args else "")
         assert "cached text" in text_sent
@@ -721,7 +732,10 @@ class TestCmdEleccionesCallback:
             from worldcup_bot.bot.handlers import cmd_elecciones_callback
             await cmd_elecciones_callback(update, context)
 
-        # Should have sent new text, not old cache
+        # Placeholder deleted, new text sent
+        context.bot.delete_message.assert_called_once_with(
+            chat_id=12345, message_id=999
+        )
         context.bot.send_message.assert_called()
         call_args = context.bot.send_message.call_args
         text_sent = call_args.kwargs.get("text") or (call_args.args[0] if call_args.args else "")
@@ -1068,7 +1082,7 @@ class TestGroupsImage:
     async def test_grupos_image_mode_sends_photo(
         self, mock_render, mock_client, mock_mtime, mock_rv, mock_load
     ):
-        """In image mode, tapping 'grupos' sends a photo — not a text message."""
+        """In image mode, tapping 'grupos' deletes placeholder and sends a photo."""
         preds = _make_predictions()
         mock_load.return_value = preds
         mock_client.return_value.get_standings.return_value = []
@@ -1085,8 +1099,9 @@ class TestGroupsImage:
         query = MagicMock()
         query.data = "elecciones|grupos"
         query.answer = AsyncMock()
-        query.edit_message_reply_markup = AsyncMock()
+        query.edit_message_text = AsyncMock()
         query.message.chat_id = 12345
+        query.message.message_id = 999
         update = MagicMock()
         update.callback_query = query
         context = _make_context(settings)
@@ -1095,6 +1110,7 @@ class TestGroupsImage:
         from worldcup_bot.bot.handlers import cmd_elecciones_callback
         await cmd_elecciones_callback(update, context)
 
+        context.bot.delete_message.assert_called_once_with(chat_id=12345, message_id=999)
         context.bot.send_photo.assert_called_once()
         context.bot.send_message.assert_not_called()
 
@@ -1106,7 +1122,7 @@ class TestGroupsImage:
     async def test_grupos_image_mode_falls_back_to_text_on_render_failure(
         self, mock_render, mock_client, mock_mtime, mock_rv, mock_load
     ):
-        """If render fails, image mode falls back to text (graceful degradation)."""
+        """If render fails, image mode falls back to text; placeholder deleted first."""
         preds = _make_predictions()
         mock_load.return_value = preds
         mock_client.return_value.get_standings.return_value = []
@@ -1122,8 +1138,9 @@ class TestGroupsImage:
         query = MagicMock()
         query.data = "elecciones|grupos"
         query.answer = AsyncMock()
-        query.edit_message_reply_markup = AsyncMock()
+        query.edit_message_text = AsyncMock()
         query.message.chat_id = 12345
+        query.message.message_id = 999
         update = MagicMock()
         update.callback_query = query
         context = _make_context(settings)
@@ -1132,8 +1149,46 @@ class TestGroupsImage:
         from worldcup_bot.bot.handlers import cmd_elecciones_callback
         await cmd_elecciones_callback(update, context)
 
-        # Render returned None → should fall back to text
+        # Render returned None → falls back to text; placeholder deleted, text sent
+        context.bot.delete_message.assert_called_once_with(chat_id=12345, message_id=999)
         context.bot.send_message.assert_called()
+
+    @patch("worldcup_bot.bot.handlers.pred_loader.load")
+    @patch("worldcup_bot.bot.handlers._elecciones_results_version", return_value="none")
+    @patch("worldcup_bot.bot.handlers.os.path.getmtime", return_value=1000.0)
+    async def test_generation_failure_edits_placeholder_to_error(
+        self, mock_mtime, mock_rv, mock_load
+    ):
+        """If _generate_elecciones_artifact raises, placeholder is edited to error (no crash)."""
+        preds = _make_predictions()
+        mock_load.return_value = preds
+        context = _make_context()
+        context.bot_data["elecciones_cache"] = {}
+        query = MagicMock()
+        query.data = "elecciones|grupos"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        query.message.chat_id = 12345
+        query.message.message_id = 999
+        update = MagicMock()
+        update.callback_query = query
+
+        with patch(
+            "worldcup_bot.bot.handlers._generate_elecciones_artifact",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
+            from worldcup_bot.bot.handlers import cmd_elecciones_callback
+            await cmd_elecciones_callback(update, context)
+
+        # No delete/send; error injected via edit_message_text on the bot
+        context.bot.delete_message.assert_not_called()
+        context.bot.send_message.assert_not_called()
+        context.bot.send_photo.assert_not_called()
+        context.bot.edit_message_text.assert_called_once()
+        call_args = context.bot.edit_message_text.call_args
+        error_text = call_args.kwargs.get("text", "") or ""
+        assert "❌" in error_text or "Error" in error_text
 
 
 # ── tile cache eviction ───────────────────────────────────────────────────────

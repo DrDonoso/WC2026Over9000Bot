@@ -1557,20 +1557,33 @@ async def _generate_elecciones_artifact(
     return {"messages": messages}
 
 
-async def _serve_elecciones(
-    query,
-    artifact: dict | None,
+async def _serve_after_placeholder(
     context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    placeholder_id: int,
+    artifact: dict | None,
 ) -> None:
-    """Send the cached/generated artifact to the chat."""
-    chat_id = query.message.chat_id
+    """Delete the ⏳ placeholder and send the artifact, or edit it to an error.
 
+    Success path: delete placeholder → send photo (image mode) or text messages.
+    Error path  : edit placeholder text to an error message (no dangling hourglass).
+    """
     if artifact is None:
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text="❌ Error inesperado generando las predicciones. Intenta de nuevo.",
-        )
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=placeholder_id,
+                text="❌ Error inesperado generando las predicciones. Intenta de nuevo.",
+            )
+        except Exception as exc:
+            log.warning("_serve_after_placeholder: error edit failed: %s", exc)
         return
+
+    # Delete the hourglass placeholder before sending the real result.
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=placeholder_id)
+    except Exception as exc:
+        log.warning("_serve_after_placeholder: delete placeholder failed: %s", exc)
 
     if "data" in artifact:
         try:
@@ -1580,7 +1593,7 @@ async def _serve_elecciones(
             )
             return
         except Exception as exc:
-            log.warning("_serve_elecciones: photo send failed: %s", exc)
+            log.warning("_serve_after_placeholder: photo send failed: %s", exc)
             await context.bot.send_message(
                 chat_id=chat_id,
                 text="❌ Error enviando la imagen. Intenta de nuevo.",
@@ -1623,7 +1636,7 @@ async def cmd_elecciones(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def cmd_elecciones_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle phase tap: remove the keyboard, then serve picks for the chosen phase."""
+    """Handle phase tap: show hourglass, generate, delete placeholder, send result."""
     query = update.callback_query
     await query.answer()
 
@@ -1633,21 +1646,28 @@ async def cmd_elecciones_callback(
         await query.answer("Datos inválidos.", show_alert=True)
         return
 
-    # Delete the inline keyboard immediately
+    chat_id = query.message.chat_id
+    placeholder_id = query.message.message_id
+
+    # Step 1: Replace the phase-selector message with an hourglass (removes keyboard).
     try:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await query.edit_message_text("⏳ Generando…", reply_markup=None)
     except Exception as exc:
-        log.warning("cmd_elecciones_callback: could not remove keyboard: %s", exc)
+        log.warning("cmd_elecciones_callback: hourglass edit failed: %s", exc)
 
     settings: Settings = context.bot_data["settings"]
     predictions = pred_loader.load(settings.predictions_path)
     participants = predictions.get("participants", {})
 
     if not participants:
-        await context.bot.send_message(
-            chat_id=query.message.chat_id,
-            text=_msg_no_predictions(settings.predictions_path),
-        )
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=placeholder_id,
+                text=_msg_no_predictions(settings.predictions_path),
+            )
+        except Exception:
+            pass
         return
 
     # ── Cache key ────────────────────────────────────────────────────────────
@@ -1664,16 +1684,18 @@ async def cmd_elecciones_callback(
     cache: dict = context.bot_data.setdefault("elecciones_cache", {})
     cache_key = (yaml_key, mtime, results_ver)
 
-    cached = cache.get(cache_key)
-    if cached is not None:
-        await _serve_elecciones(query, cached, context)
-        return
+    artifact = cache.get(cache_key)
+    if artifact is None:
+        # ── Cache miss: generate ─────────────────────────────────────────────
+        try:
+            artifact = await _generate_elecciones_artifact(
+                yaml_key, participants, settings, context
+            )
+        except Exception as exc:
+            log.exception("cmd_elecciones_callback: generation error: %s", exc)
+            artifact = None
+        if artifact is not None:
+            _elecciones_cache_put(cache, cache_key, artifact)
 
-    # ── Cache miss: generate ─────────────────────────────────────────────────
-    artifact = await _generate_elecciones_artifact(
-        yaml_key, participants, settings, context
-    )
-    if artifact is not None:
-        _elecciones_cache_put(cache, cache_key, artifact)
-
-    await _serve_elecciones(query, artifact, context)
+    # Step 2: Delete hourglass → send result (or edit hourglass to error).
+    await _serve_after_placeholder(context, chat_id, placeholder_id, artifact)
