@@ -793,6 +793,86 @@ class TestEleccionesImageImport:
         assert "twemoji" in url or "cdn.jsdelivr" in url
 
     @patch("worldcup_bot.bot.elecciones_image._requests.get")
+    def test_fetch_flag_tile_returns_circular_image(self, mock_get):
+        """_fetch_flag_tile returns an RGBA image with circular alpha mask."""
+        import io as _io
+        from PIL import Image as _Image
+
+        # Build a solid-color 72×72 PNG (simulating a twemoji flag response)
+        flag_img = _Image.new("RGBA", (72, 72), (200, 80, 80, 255))
+        buf = _io.BytesIO()
+        flag_img.save(buf, format="PNG")
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.content = buf.getvalue()
+
+        from worldcup_bot.bot.elecciones_image import _fetch_flag_tile
+        result = _fetch_flag_tile("ESP", 26, None)
+
+        assert result is not None
+        assert result.mode == "RGBA"
+        assert result.size == (26, 26)
+        # Corner pixels must be transparent (circular mask applied)
+        assert result.getpixel((0, 0))[3] == 0
+        assert result.getpixel((25, 0))[3] == 0
+        assert result.getpixel((0, 25))[3] == 0
+        # Centre pixel must be opaque (inside the circle)
+        assert result.getpixel((13, 13))[3] > 200
+
+    @patch("worldcup_bot.bot.elecciones_image._requests.get")
+    @patch("worldcup_bot.bot.podium_image._fetch_tile")
+    def test_render_knockout_matrix_with_flags_succeeds(self, mock_tile, mock_get):
+        """render_knockout_matrix renders PNG when flag fetches succeed."""
+        import io as _io
+        from PIL import Image as _Image
+
+        flag_img = _Image.new("RGBA", (72, 72), (80, 120, 200, 255))
+        buf = _io.BytesIO()
+        flag_img.save(buf, format="PNG")
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.content = buf.getvalue()
+        stub_tile = _Image.new("RGBA", (42, 42), (100, 100, 100, 255))
+        mock_tile.return_value = stub_tile
+
+        from worldcup_bot.config import Settings
+        from worldcup_bot.bot.elecciones_image import render_knockout_matrix
+        settings = Settings(telegram_bot_token="t", football_data_api_key="k", state_dir=".")
+        ties = [("ESP", "FRA"), ("GER", "BRA")]
+        participants = {
+            "u1": {"display_name": "Alice", "knockout": {"round_of_32": ["ESP", "GER"]}},
+        }
+        result = render_knockout_matrix(ties, participants, "round_of_32", {}, settings)
+
+        assert result is not None
+        assert result.read()[:4] == b"\x89PNG"
+
+    @patch("worldcup_bot.bot.elecciones_image._requests.get")
+    @patch("worldcup_bot.bot.podium_image._fetch_tile")
+    def test_render_groups_matrix_with_flags_succeeds(self, mock_tile, mock_get):
+        """render_groups_matrix renders PNG when flag fetches succeed."""
+        import io as _io
+        from PIL import Image as _Image
+
+        flag_img = _Image.new("RGBA", (72, 72), (80, 200, 120, 255))
+        buf = _io.BytesIO()
+        flag_img.save(buf, format="PNG")
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.content = buf.getvalue()
+        stub_tile = _Image.new("RGBA", (42, 42), (100, 100, 100, 255))
+        mock_tile.return_value = stub_tile
+
+        from worldcup_bot.config import Settings
+        from worldcup_bot.bot.elecciones_image import render_groups_matrix
+        settings = Settings(telegram_bot_token="t", football_data_api_key="k", state_dir=".")
+        participants = {
+            "u1": {"display_name": "Alice", "groups": {g: ["MEX", "KOR", "CZE"] for g in "ABCDEFGHIJKL"}},
+        }
+        group_comps = {g: ["MEX", "KOR", "CZE", "ZAF"] for g in "ABCDEFGHIJKL"}
+        result = render_groups_matrix(group_comps, participants, settings)
+
+        assert result is not None
+        assert result.read()[:4] == b"\x89PNG"
+
+    @patch("worldcup_bot.bot.elecciones_image._requests.get")
     @patch("worldcup_bot.bot.podium_image._fetch_tile")
     def test_render_knockout_matrix_returns_bytes_io(self, mock_tile, mock_get):
         """render_knockout_matrix returns a BytesIO (or None if PIL unavailable)."""

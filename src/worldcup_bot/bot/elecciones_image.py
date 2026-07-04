@@ -19,6 +19,7 @@ from worldcup_bot.bot.podium_image import (
     _BG,
     _TEXT_GREY,
     _TEXT_WHITE,
+    _circular_crop,
     _fetch_tile,
     _font,
     _text_centered,
@@ -43,6 +44,9 @@ _HEADER_BG   = (12, 17, 26)
 _DIVIDER     = (50, 60, 80)
 _NAME_FONT_SIZE = 9
 _CELL_FONT_SIZE = 10
+_TLA_FONT_SIZE  = 7   # small TLA caption below flag tiles in tie/group labels
+# Circular flag in the tie-label column:
+_TIE_FLAG_D = 18      # diameter (px) — fits inside _ROW_H=42 with room for TLA below
 
 # Twemoji CDN for standard country flag PNGs (ISO 3166-1 alpha-2 only).
 _TWEMOJI_BASE = "https://cdn.jsdelivr.net/npm/twemoji@14.0.2/assets/72x72"
@@ -119,7 +123,13 @@ def _flag_url(tla: str) -> str | None:
 
 
 def _fetch_flag_tile(tla: str, size: int, tile_cache_dir: str | None) -> Image.Image | None:
-    """Fetch a flag PNG from twemoji CDN with on-disk cache. Returns None on failure."""
+    """Fetch a circular flag PNG from twemoji CDN with on-disk cache.
+
+    The returned image is always RGBA with a circular alpha mask (round flag).
+    The disk cache stores the raw resized image; the circular mask is applied
+    in memory so old cache entries remain valid after this change.
+    Returns None on failure — callers must fall back to TLA text.
+    """
     url = _flag_url(tla)
     if not url:
         return None
@@ -130,11 +140,12 @@ def _fetch_flag_tile(tla: str, size: int, tile_cache_dir: str | None) -> Image.I
         cache_path = Path(tile_cache_dir) / f"flag_{cache_key}.png"
         if cache_path.exists():
             try:
-                return (
+                img = (
                     Image.open(cache_path)
                     .convert("RGBA")
                     .resize((size, size), Image.LANCZOS)
                 )
+                return _circular_crop(img, size)
             except Exception:
                 pass  # stale/corrupt file — re-fetch
 
@@ -149,10 +160,11 @@ def _fetch_flag_tile(tla: str, size: int, tile_cache_dir: str | None) -> Image.I
             if tile_cache_dir:
                 try:
                     os.makedirs(tile_cache_dir, exist_ok=True)
+                    # Cache the rectangular image; circular crop is applied on load.
                     img.save(Path(tile_cache_dir) / f"flag_{cache_key}.png", format="PNG")
                 except Exception:
                     pass
-            return img
+            return _circular_crop(img, size)
     except Exception:
         log.debug("_fetch_flag_tile: fetch failed for TLA=%s url=%s", tla, url)
     return None
@@ -255,11 +267,32 @@ def _render(
         draw.rectangle([0, y0, cw, y1], fill=row_bg)
         draw.line([(0, y1 - 1), (cw, y1 - 1)], fill=_DIVIDER, width=1)
 
-        # Tie label (TLAs only — flag tiles for the tie itself would be redundant)
-        tie_text = f"{home_tla} · {away_tla}"
-        _text_centered(
-            draw, _TIE_COL_W // 2, y0 + _ROW_H // 2, tie_text, fnt_cell, _TEXT_WHITE
-        )
+        # Tie label: circular flag for each team + small TLA caption below.
+        # Falls back to TLA text when a flag cannot be fetched (e.g. non-standard
+        # ISO codes like GBENG for England).
+        fnt_tla = _font(_TLA_FONT_SIZE)
+        home_cx = _TIE_COL_W // 4         # 38 px
+        away_cx = 3 * _TIE_COL_W // 4     # 114 px
+        mid_cx  = _TIE_COL_W // 2         # 76 px — separator "·"
+        flag_y  = y0 + (_ROW_H - _TIE_FLAG_D) // 2   # vertically centred flag top
+        tla_y   = flag_y + _TIE_FLAG_D + 3             # TLA text centre (below flag)
+
+        home_flag = _fetch_flag_tile(home_tla, _TIE_FLAG_D, tile_dir)
+        if home_flag is not None:
+            canvas.paste(home_flag, (home_cx - _TIE_FLAG_D // 2, flag_y), home_flag)
+            _text_centered(draw, home_cx, tla_y + 4, home_tla, fnt_tla, _TEXT_GREY)
+        else:
+            _text_centered(draw, home_cx, y0 + _ROW_H // 2, home_tla, fnt_cell, _TEXT_WHITE)
+
+        _text_centered(draw, mid_cx, y0 + _ROW_H // 2, "·", fnt_cell, _TEXT_GREY)
+
+        away_flag = _fetch_flag_tile(away_tla, _TIE_FLAG_D, tile_dir)
+        if away_flag is not None:
+            canvas.paste(away_flag, (away_cx - _TIE_FLAG_D // 2, flag_y), away_flag)
+            _text_centered(draw, away_cx, tla_y + 4, away_tla, fnt_tla, _TEXT_GREY)
+        else:
+            _text_centered(draw, away_cx, y0 + _ROW_H // 2, away_tla, fnt_cell, _TEXT_WHITE)
+
         draw.line([(_TIE_COL_W, y0), (_TIE_COL_W, y1)], fill=_DIVIDER, width=1)
 
         # Per-participant cells
