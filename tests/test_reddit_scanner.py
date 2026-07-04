@@ -914,3 +914,38 @@ class TestScannerThreadBodyCache:
 
         assert result_a == "body_A"
         assert result_b == "body_B"
+
+    def test_cache_evicts_old_entries_when_over_limit(self):
+        """Once the cache exceeds _THREAD_BODY_CACHE_MAX, entries older than
+        _THREAD_BODY_CACHE_TTL_FACTOR × _THREAD_BODY_TTL are swept out.
+
+        Regression: finished-match permalinks are never re-read, so without this
+        sweep the cache would grow unbounded for the whole tournament."""
+        from unittest.mock import patch as _patch
+        from worldcup_bot.reddit.scanner import (
+            _THREAD_BODY_CACHE_MAX,
+            _THREAD_BODY_CACHE_TTL_FACTOR,
+            _THREAD_BODY_TTL,
+        )
+
+        scanner = RedditMatchScanner(session=FakeSession([]))
+
+        with _patch("worldcup_bot.reddit.scanner.time") as mock_time, _patch.object(
+            scanner, "_fetch_thread_body_json", return_value="body"
+        ):
+            # Insert MAX+1 distinct permalinks all at t=0: over the limit, but
+            # none old enough to sweep yet, so the cache holds them all.
+            mock_time.monotonic.return_value = 0.0
+            n = _THREAD_BODY_CACHE_MAX + 1
+            for i in range(n):
+                scanner.get_thread_body(f"/r/soccer/comments/old{i}/")
+            assert len(scanner._thread_body_cache) == n
+
+            # A later insert past the sweep horizon evicts all the t=0 entries.
+            mock_time.monotonic.return_value = (
+                _THREAD_BODY_TTL * _THREAD_BODY_CACHE_TTL_FACTOR + 1.0
+            )
+            scanner.get_thread_body("/r/soccer/comments/fresh/")
+
+        assert len(scanner._thread_body_cache) == 1
+        assert "/r/soccer/comments/fresh/" in scanner._thread_body_cache

@@ -29,6 +29,18 @@ class AIClient:
         self.model = model
         self._client = _client or AsyncOpenAI(api_key=api_key, base_url=base_url)
 
+    async def aclose(self) -> None:
+        """Close the underlying AsyncOpenAI httpx client.
+
+        Per-event AIClient instances (goal enrichment, match recap) must be
+        closed after use or their httpx connection pools accumulate and leak
+        memory.  Best-effort: never raises.
+        """
+        try:
+            await self._client.close()
+        except Exception as exc:
+            log.debug("AIClient.aclose error: %s", exc)
+
     async def complete(
         self,
         system: str,

@@ -2217,3 +2217,25 @@ class TestProvisionalLateFinal:
         ctx.bot.send_message.assert_not_awaited()
         assert 9007 in ctx.bot_data["finished_announced"]
         assert ctx.bot_data["finished_seeded"] is True
+
+
+class TestSharedFootballClient:
+    """PART C #1: the football-data client is created once at startup and reused
+    per tick (not rebuilt on every job run)."""
+
+    @pytest.mark.asyncio
+    async def test_job_uses_shared_client_and_does_not_call_make_client(self, tmp_path):
+        settings = _make_settings(tmp_path, ai=False)
+        ctx = _make_context(settings)
+        ctx.bot_data["finished_seeded"] = True
+        ctx.bot_data["finished_announced"] = set()
+
+        shared = MagicMock()
+        shared.get_all_matches.return_value = []
+        ctx.bot_data["football_client"] = shared
+
+        with patch("worldcup_bot.__main__.make_client") as mk:
+            await poll_finished_matches_job(ctx)
+
+        shared.get_all_matches.assert_called_once()
+        mk.assert_not_called()

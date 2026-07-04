@@ -46,6 +46,12 @@ _FETCH_DELAY_SECONDS = 1
 _MATCH_THREADS_TTL = 30   # seconds — shared across all consumers (goal poller, /endirecto, …)
 _THREAD_BODY_TTL = 90     # seconds per permalink
 
+# Bound the thread-body cache: finished-match permalinks are never re-read (their
+# TTL only expires on a subsequent read of the SAME permalink), so without an
+# explicit sweep they live for the whole tournament and leak memory.
+_THREAD_BODY_CACHE_MAX = 40           # entries before a sweep is triggered
+_THREAD_BODY_CACHE_TTL_FACTOR = 5     # sweep entries older than N × _THREAD_BODY_TTL
+
 # ── browser headers (proven to work from Docker) ─────────────────────────────
 
 _DEFAULT_UA = (
@@ -464,6 +470,7 @@ class RedditMatchScanner:
             if body is None:
                 body = self._fetch_thread_body_html(permalink)
             self._thread_body_cache[permalink] = (now, body)
+            self._evict_thread_body_cache(now)
             return body
         except Exception as exc:
             log.warning("get_thread_body(%s) failed: %s", permalink, exc)
@@ -472,6 +479,30 @@ class RedditMatchScanner:
                 log.warning("get_thread_body: returning stale cached result for %s", permalink)
                 return stale
             return ""
+
+    def _evict_thread_body_cache(self, now: float) -> None:
+        """Bound the thread-body cache: once it exceeds _THREAD_BODY_CACHE_MAX
+        entries, drop every entry older than
+        ``_THREAD_BODY_CACHE_TTL_FACTOR × _THREAD_BODY_TTL`` seconds.
+
+        Finished-match permalinks are otherwise never revisited, so their cache
+        entries would live forever without this sweep.
+        """
+        if len(self._thread_body_cache) <= _THREAD_BODY_CACHE_MAX:
+            return
+        max_age = _THREAD_BODY_TTL * _THREAD_BODY_CACHE_TTL_FACTOR
+        stale = [
+            key
+            for key, (ts, _body) in self._thread_body_cache.items()
+            if now - ts > max_age
+        ]
+        for key in stale:
+            self._thread_body_cache.pop(key, None)
+        if stale:
+            log.debug(
+                "get_thread_body: evicted %d stale cache entries (size now %d)",
+                len(stale), len(self._thread_body_cache),
+            )
 
     def get_espn_game_id(self, home: str, away: str) -> str | None:
         """Find the ESPN game ID embedded in the r/soccer match thread.

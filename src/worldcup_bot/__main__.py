@@ -153,7 +153,7 @@ async def daily_update_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Daily job: post AI-generated Spanish recap to the Telegram group."""
     try:
         settings: Settings = context.bot_data["settings"]
-        client = make_client(settings)
+        client = _football_client(context)
         ai = AIClient(
             settings.openai_api_key,
             settings.openai_base_url,
@@ -184,7 +184,7 @@ async def history_backfill_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not predictions.get("participants"):
             log.info("history_backfill_job: no predictions loaded, skipping")
             return
-        client = make_client(settings)
+        client = _football_client(context)
         history_path = f"{settings.state_dir}/porra_history.json"
         history = await asyncio.to_thread(
             ensure_history, client, predictions, settings, history_path
@@ -209,7 +209,7 @@ async def rich_image_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Fetch yesterday's winners — best-effort, never fatal
     winners: list[str] = []
     try:
-        client = make_client(settings)
+        client = _football_client(context)
         matches = client.get_football_day_matches(
             settings.timezone, day_offset=-1, anchor_hour=settings.football_day_start_hour
         )
@@ -273,15 +273,18 @@ async def _enrich_scorer(
                 settings.openai_base_url,
                 settings.openai_model,
             )
-            scorer, minute = await extract_scorer(
-                ai=ai,
-                thread_text=thread_text,
-                scoring_team=delta.scoring_team,
-                home_team=match.home_name,
-                away_team=match.away_name,
-                new_home=delta.new_home,
-                new_away=delta.new_away,
-            )
+            try:
+                scorer, minute = await extract_scorer(
+                    ai=ai,
+                    thread_text=thread_text,
+                    scoring_team=delta.scoring_team,
+                    home_team=match.home_name,
+                    away_team=match.away_name,
+                    new_home=delta.new_home,
+                    new_away=delta.new_away,
+                )
+            finally:
+                await ai.aclose()
             if scorer:
                 return scorer, minute
 
@@ -794,7 +797,7 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         scanner: RedditMatchScanner = context.bot_data["reddit_scanner"]
 
-        client = make_client(settings)
+        client = _football_client(context)
         try:
             all_matches = client.get_all_matches()
         except FootballAPIError as exc:
@@ -1034,7 +1037,7 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         scanner: RedditMatchScanner = context.bot_data["reddit_scanner"]
 
-        client = make_client(settings)
+        client = _football_client(context)
         try:
             live_matches = client.get_live_matches()
         except FootballAPIError as exc:
@@ -1510,7 +1513,7 @@ async def poll_kickoff_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         announced: set = context.bot_data["kickoff_announced"]
         path = f"{settings.state_dir}/kickoff_announced.json"
 
-        client = make_client(settings)
+        client = _football_client(context)
         try:
             all_matches = client.get_all_matches()
         except FootballAPIError as exc:
@@ -1673,7 +1676,7 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
         scanner: RedditMatchScanner = context.bot_data["reddit_scanner"]
 
-        client = make_client(settings)
+        client = _football_client(context)
         try:
             all_matches = client.get_all_matches()
         except FootballAPIError as exc:
@@ -1835,7 +1838,10 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         )
                         persona = pick_commentator()
                         context_text = render_porra_context(live_diff, ranking)
-                        raw_commentary = await generate_porra_commentary(ai, persona, context_text)
+                        try:
+                            raw_commentary = await generate_porra_commentary(ai, persona, context_text)
+                        finally:
+                            await ai.aclose()
                         commentary_text = bold_person_names(raw_commentary, participant_names)
                         log.info(
                             "Generated porra commentary (%s) for match %d", persona, match_id
@@ -2148,6 +2154,11 @@ def build_app(settings: Settings) -> Application:
 
     # Store settings in bot_data for handler access
     app.bot_data["settings"] = settings
+    # ONE long-lived football-data client shared by every handler and job.
+    # Reuses a single requests.Session (HTTP keep-alive) instead of building a
+    # new session + urllib3 pool on every tick — the previous per-call behaviour
+    # created ~10k client objects/day and drove the RSS blowup.
+    app.bot_data["football_client"] = make_client(settings)
     app.bot_data["reddit_scanner"] = None
     # Pre-load live score state so both poll_goals_job and poll_thread_goals_job
     # share the same in-memory dict for race-free deduplication.

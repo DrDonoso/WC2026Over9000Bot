@@ -113,6 +113,22 @@ def make_client(settings: Settings) -> FootballDataClient:
     )
 
 
+def _football_client(context: ContextTypes.DEFAULT_TYPE) -> FootballDataClient:
+    """Return the process-wide shared FootballDataClient.
+
+    build_app() creates ONE long-lived client and stores it in
+    ``bot_data["football_client"]`` so every handler/job reuses the same
+    ``requests.Session`` (HTTP keep-alive) instead of constructing a fresh
+    session + urllib3 pool on every call — the previous behaviour leaked memory
+    at ~10k client objects/day.  Falls back to a one-off ``make_client`` only
+    when the shared client is absent (e.g. unit tests that don't build the app).
+    """
+    client = context.bot_data.get("football_client")
+    if client is not None:
+        return client
+    return make_client(context.bot_data["settings"])
+
+
 # ── error translation ─────────────────────────────────────────────────────────
 
 
@@ -253,7 +269,7 @@ async def _send_ranking_with_top3_photos(
 
 async def cmd_clasificacion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
-    client = make_client(settings)
+    client = _football_client(context)
 
     # Parse optional group letter: first token (any position) that is a single A–L letter.
     letter: str | None = None
@@ -300,7 +316,7 @@ async def cmd_actual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(_msg_no_predictions(settings.predictions_path))
         return
 
-    client = make_client(settings)
+    client = _football_client(context)
     try:
         rows = engine.compute_general_ranking(predictions, client, official=False)
     except FootballAPIError as exc:
@@ -320,7 +336,7 @@ async def cmd_general(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(_msg_no_predictions(settings.predictions_path))
         return
 
-    client = make_client(settings)
+    client = _football_client(context)
     try:
         rows = engine.compute_general_ranking(predictions, client, official=True)
         finished = client.get_finished_groups()
@@ -366,7 +382,7 @@ async def _send_user_detail(
         await update.message.reply_text(_MSG_USER_NOT_FOUND.format(name=name))
         return
 
-    client = make_client(settings)
+    client = _football_client(context)
     try:
         detail = engine.compute_user_detail(target_username, predictions, client, official=official)
     except FootballAPIError as exc:
@@ -392,7 +408,7 @@ async def cmd_lista_aciertos_actual(update: Update, context: ContextTypes.DEFAUL
 
 async def cmd_en_directo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
-    client = make_client(settings)
+    client = _football_client(context)
 
     try:
         live = client.get_live_matches()
@@ -488,7 +504,7 @@ async def cmd_en_directo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
-    client = make_client(settings)
+    client = _football_client(context)
     h = settings.football_day_start_hour
 
     # Walk forward up to 15 windows (today .. +14 days) to find the first window
@@ -552,7 +568,7 @@ async def cmd_hoy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_ayer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
-    client = make_client(settings)
+    client = _football_client(context)
     h = settings.football_day_start_hour
 
     try:
@@ -574,7 +590,7 @@ async def cmd_ayer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_siguiente(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.bot_data["settings"]
-    client = make_client(settings)
+    client = _football_client(context)
 
     try:
         nxt = client.get_next_match(settings.timezone)
@@ -1188,7 +1204,7 @@ async def cmd_simula_gol(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     The goal notification is sent WITHOUT a keyboard (same flow as real goals).
     """
     settings: Settings = context.bot_data["settings"]
-    client = make_client(settings)
+    client = _football_client(context)
 
     scanner: RedditMatchScanner | None = context.bot_data.get("reddit_scanner")
     if scanner is None:
@@ -1258,7 +1274,7 @@ async def cmd_update_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     await update.message.reply_text("⏳ Generando el resumen del día…")
 
-    client = make_client(settings)
+    client = _football_client(context)
     ai = AIClient(
         settings.openai_api_key,
         settings.openai_base_url,
@@ -1325,7 +1341,7 @@ async def cmd_recalcular(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(_msg_no_predictions(settings.predictions_path))
         return
 
-    client = make_client(settings)
+    client = _football_client(context)
     history_path = f"{settings.state_dir}/porra_history.json"
 
     await update.message.reply_text("⏳ Recalculando histórico desde cero…")
@@ -1357,7 +1373,7 @@ async def cmd_evolucion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(_msg_no_predictions(settings.predictions_path))
         return
 
-    client = make_client(settings)
+    client = _football_client(context)
     history_path = f"{settings.state_dir}/porra_history.json"
 
     try:

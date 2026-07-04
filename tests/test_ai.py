@@ -285,6 +285,24 @@ class TestAIClientComplete:
         with pytest.raises(AIError):
             await client.complete("sys", "usr")
 
+    async def test_aclose_closes_underlying_client(self):
+        """PART C: aclose() must close the AsyncOpenAI httpx client to avoid leaks."""
+        mock_openai = MagicMock()
+        mock_openai.close = AsyncMock()
+        client = AIClient("key", "http://base", "model", _client=mock_openai)
+
+        await client.aclose()
+        mock_openai.close.assert_awaited_once()
+
+    async def test_aclose_never_raises(self):
+        """aclose() is best-effort and swallows close errors."""
+        mock_openai = MagicMock()
+        mock_openai.close = AsyncMock(side_effect=Exception("boom"))
+        client = AIClient("key", "http://base", "model", _client=mock_openai)
+
+        await client.aclose()  # must not raise
+        mock_openai.close.assert_awaited_once()
+
 
 # ── build_ai_user_message ─────────────────────────────────────────────────────
 
