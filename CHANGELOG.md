@@ -5,6 +5,13 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260704.11] - 2026-07-04
+
+- tests/test_chat_edge_cases.py: add _frozen_datetime_active_cls() helper and an autouse fixture on TestReviveInactiveJob that wraps every test in the patch context.
+- tests/test_revive_schedule.py: add the same helper and apply it explicitly to test_success_path_reschedules.
+- docs(squad): kante hourglass UX learnings + decision note
+
+
 ## [20260704.10] - 2026-07-04
 
 - Replace _serve_elecciones with _serve_after_placeholder(context, chat_id, placeholder_id, artifact): delete-then-send on success, edit- to-error on failure.
