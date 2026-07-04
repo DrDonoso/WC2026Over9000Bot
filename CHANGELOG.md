@@ -5,6 +5,13 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260704.05] - 2026-07-04
+
+- PRIMARY: _streamff_cdn_url() builds https://cdn.<matched-domain>/<id>.mp4 from the matched URL (streamff.pro -> cdn.streamff.pro). No .one/.pro/.com literals remain, so a future streamff domain rotation needs no code edit. This directly fixes the live failure where a .pro clip was downloaded from the stale hardcoded cdn.streamff.one -> ConnectionReset.
+- SECONDARY: when the derived CDN host is dead, the matched page is scraped for the real <source> src.
+- _download_file retries transient connection resets 2x with backoff; streamff never routes to yt-dlp (unsupported). Removed the hardcoded STREAMFF_CDN_HOSTS list, STREAMFF_CDN_BASE and _streamff_cdn_candidates.
+
+
 ## [20260704.04] - 2026-07-04
 
 - Primary: _resolve_streamff_source() fetches the actual matched /v/{id} page and extracts the real .mp4 (STREAMFF_VIDEO_RE keyed on source src/file/src/ videoUrl/url; ANY_MP4_RE last resort). Domain-independent - survives future domain rotations instead of chasing them.
