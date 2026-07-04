@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260704.07] - 2026-07-04
+
+- feat(elecciones): /elecciones command — phase keyboard + per-user text (knockout & groups) + knockout image + CHOICES_TYPE + lazy cache
+
+
 ## [20260704.06] - 2026-07-04
 
 - fix(goals): startup seed must not consume final dedup for non-FINISHED matches
