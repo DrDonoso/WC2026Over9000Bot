@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260704.08] - 2026-07-04
+
+- feat(elecciones): groups 2x2 image + tile-cache eviction + defensive text split
+
+
 ## [20260704.07] - 2026-07-04
 
 - feat(elecciones): /elecciones command — phase keyboard + per-user text (knockout & groups) + knockout image + CHOICES_TYPE + lazy cache
