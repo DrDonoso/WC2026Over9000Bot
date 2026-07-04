@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260704.06] - 2026-07-04
+
+- fix(goals): startup seed must not consume final dedup for non-FINISHED matches
+
+
 ## [20260704.05] - 2026-07-04
 
 - PRIMARY: _streamff_cdn_url() builds https://cdn.<matched-domain>/<id>.mp4 from the matched URL (streamff.pro -> cdn.streamff.pro). No .one/.pro/.com literals remain, so a future streamff domain rotation needs no code edit. This directly fixes the live failure where a .pro clip was downloaded from the stale hardcoded cdn.streamff.one -> ConnectionReset.
