@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260704.09] - 2026-07-04
+
+- feat(elecciones): circular flag images in knockout & groups images (replace TLA text)
+
+
 ## [20260704.08] - 2026-07-04
 
 - feat(elecciones): groups 2x2 image + tile-cache eviction + defensive text split
