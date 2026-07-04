@@ -27,7 +27,7 @@ from worldcup_bot.data.tla_map import tla_to_iso
 
 log = logging.getLogger(__name__)
 
-# ── Layout constants ──────────────────────────────────────────────────────────
+# ── Layout constants (knockout matrix) ───────────────────────────────────────
 
 _HEADER_H = 76          # header row height (px)
 _PHOTO_D = 42           # profile photo diameter in header (px)
@@ -46,6 +46,59 @@ _CELL_FONT_SIZE = 10
 
 # Twemoji CDN for standard country flag PNGs (ISO 3166-1 alpha-2 only).
 _TWEMOJI_BASE = "https://cdn.jsdelivr.net/npm/twemoji@14.0.2/assets/72x72"
+
+# ── Tile disk-cache cap ───────────────────────────────────────────────────────
+
+_MAX_TILE_CACHE_FILES = 200  # max flag PNG files kept on disk per state_dir
+
+# ── Groups image layout constants ─────────────────────────────────────────────
+
+_GROUP_HEADER_H = 76     # header row height (same as knockout)
+_GROUP_CELL_H = 82       # group data row height
+_GROUP_LABEL_W = 38      # group-letter column width
+_GROUP_PART_COL_W = 84   # participant column width
+_MINI_FLAG = 28          # flag tile size inside a 2×2 cell
+_MINI_GAP = 3            # gap between flags in the 2×2 arrangement
+# Alpha levels for pick weighting:
+_ALPHA_FULL = 255        # picks 1 & 2 (direct qualifiers) — full brightness
+_ALPHA_DIM  = 165        # pick 3 (tercero) — ~65 % — visibly dimmed
+_ALPHA_FADE = 65         # not picked — ~25 % — clearly faded
+
+
+# ── Tile cache helpers ────────────────────────────────────────────────────────
+
+
+def _evict_tile_cache(tile_dir: str, max_files: int = _MAX_TILE_CACHE_FILES) -> None:
+    """Remove oldest flag-tile cache files when the directory exceeds max_files.
+
+    Called at the start of every render so the on-disk cache stays bounded
+    throughout the tournament without any background sweep.
+    """
+    path = Path(tile_dir)
+    if not path.exists():
+        return
+    files = list(path.glob("flag_*.png"))
+    if len(files) <= max_files:
+        return
+    # Sort oldest-first and remove the surplus.
+    files.sort(key=lambda f: f.stat().st_mtime)
+    for f in files[: len(files) - max_files]:
+        try:
+            f.unlink()
+        except Exception:
+            pass
+
+
+def _apply_alpha(img: Image.Image, alpha: int) -> Image.Image:
+    """Return a copy of *img* with its alpha channel scaled by alpha/255.
+
+    Preserves the original per-pixel alpha shape (e.g. antialiased edges)
+    while globally dimming or fading the image.
+    """
+    img = img.convert("RGBA")
+    r, g, b, a_ch = img.split()
+    a_ch = a_ch.point(lambda x: x * alpha // 255)
+    return Image.merge("RGBA", (r, g, b, a_ch))
 
 
 # ── Flag tile helpers ─────────────────────────────────────────────────────────
@@ -152,6 +205,7 @@ def _render(
     n_users = len(p_list)
     n_ties = len(ties)
     tile_dir = str(Path(settings.state_dir) / "elecciones_tiles")
+    _evict_tile_cache(tile_dir)
 
     cw = _TIE_COL_W + n_users * _PART_COL_W + _RESULT_COL_W
     ch = _HEADER_H + n_ties * _ROW_H
@@ -250,6 +304,173 @@ def _render(
                 )
             else:
                 _text_centered(draw, res_cx2, res_cy, winner[:3], fnt_cell, _TEXT_WHITE)
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+# ── Groups image ──────────────────────────────────────────────────────────────
+
+
+def render_groups_matrix(
+    group_compositions: dict[str, list[str]],
+    participants: dict,
+    settings,
+) -> io.BytesIO | None:
+    """Render a grupos 2×2 matrix as PNG and return a BytesIO.
+
+    This is a CPU-bound PIL function.  Always call via ``asyncio.to_thread``
+    to avoid blocking the Telegram event loop.  It is a short-lived, single
+    invocation — not a background loop or persistent thread — so it carries
+    no risk of runaway CPU/RAM usage.
+
+    Rows    = groups A–L (12 rows).
+    Columns = participants in YAML order (circular profile-photo headers).
+    Cells   = 2×2 flag grid of the 4 teams in that group (API standings order).
+
+    Visual weighting per team in a cell:
+        - Participant's predicted 1st and 2nd → full brightness (alpha 255).
+        - Participant's predicted 3rd (tercero) → intermediate (alpha ~65 %).
+        - Unpicked team → clearly faded (alpha ~25 %).
+
+    Note: a separate "terceros strip" was considered but not added — the
+    intermediate-alpha rendering in each cell already makes tercero picks
+    clearly visible, and fitting 12 tercero flags into an 84 px column cleanly
+    is not feasible.
+
+    Args:
+        group_compositions: {letter: [tla, tla, tla, tla]} in standings order,
+            built from ``get_standings()`` via ``build_group_compositions()``.
+        participants: YAML participants dict (insertion order = column order).
+        settings: Settings (photo_base_url, state_dir).
+
+    Returns:
+        PNG BytesIO, or None on any rendering failure.
+    """
+    try:
+        return _render_groups(group_compositions, participants, settings)
+    except Exception as exc:
+        log.warning("render_groups_matrix: %s", exc, exc_info=True)
+        return None
+
+
+def _render_groups(
+    group_compositions: dict[str, list[str]],
+    participants: dict,
+    settings,
+) -> io.BytesIO:
+    from worldcup_bot.data.stages import GROUPS as GROUP_LETTERS
+
+    p_list = list(participants.items())
+    n_users = len(p_list)
+    tile_dir = str(Path(settings.state_dir) / "elecciones_tiles")
+    _evict_tile_cache(tile_dir)
+
+    cw = _GROUP_LABEL_W + n_users * _GROUP_PART_COL_W
+    ch = _GROUP_HEADER_H + len(GROUP_LETTERS) * _GROUP_CELL_H
+
+    canvas = Image.new("RGB", (cw, ch), _BG)
+    draw = ImageDraw.Draw(canvas)
+    fnt_name = _font(_NAME_FONT_SIZE)
+    fnt_cell = _font(_CELL_FONT_SIZE)
+
+    # ── Header row ────────────────────────────────────────────────────────────
+    draw.rectangle([0, 0, cw, _GROUP_HEADER_H], fill=_HEADER_BG)
+    _text_centered(
+        draw, _GROUP_LABEL_W // 2, _GROUP_HEADER_H // 2, "GRUPOS", fnt_cell, _TEXT_WHITE
+    )
+
+    for i, (uname, udata) in enumerate(p_list):
+        col_cx = _GROUP_LABEL_W + i * _GROUP_PART_COL_W + _GROUP_PART_COL_W // 2
+        dname = udata.get("display_name") or f"@{uname}"
+        short = (dname[:5] + "…") if len(dname) > 6 else dname
+
+        tile = _fetch_tile(uname, dname, settings.photo_base_url, _PHOTO_D, i)
+        ty = max(2, (_GROUP_HEADER_H - _PHOTO_D - 14) // 2)
+        canvas.paste(tile, (col_cx - _PHOTO_D // 2, ty), tile)
+        name_y = ty + _PHOTO_D + _NAME_Y_GAP + 4
+        _text_centered(draw, col_cx, name_y, short, fnt_name, _TEXT_GREY)
+
+    draw.line([(0, _GROUP_HEADER_H), (cw, _GROUP_HEADER_H)], fill=_DIVIDER, width=1)
+    draw.line([(_GROUP_LABEL_W, 0), (_GROUP_LABEL_W, _GROUP_HEADER_H)], fill=_DIVIDER, width=1)
+
+    # ── Group rows (A–L) ──────────────────────────────────────────────────────
+    # Inner 2×2 grid dimensions (px)
+    _inner_w = 2 * _MINI_FLAG + _MINI_GAP
+    _inner_h = 2 * _MINI_FLAG + _MINI_GAP
+
+    for row_idx, grp_letter in enumerate(GROUP_LETTERS):
+        y0 = _GROUP_HEADER_H + row_idx * _GROUP_CELL_H
+        y1 = y0 + _GROUP_CELL_H
+        row_bg = _ROW_BG_EVEN if row_idx % 2 == 0 else _ROW_BG_ODD
+        draw.rectangle([0, y0, cw, y1], fill=row_bg)
+        draw.line([(0, y1 - 1), (cw, y1 - 1)], fill=_DIVIDER, width=1)
+
+        # Group letter label
+        _text_centered(
+            draw, _GROUP_LABEL_W // 2, (y0 + y1) // 2, grp_letter, fnt_cell, _TEXT_WHITE
+        )
+        draw.line([(_GROUP_LABEL_W, y0), (_GROUP_LABEL_W, y1)], fill=_DIVIDER, width=1)
+
+        # API group composition (4 teams in standings position order)
+        grp_teams = [t.upper() for t in group_compositions.get(grp_letter, [])]
+
+        for i, (uname, udata) in enumerate(p_list):
+            col_x0 = _GROUP_LABEL_W + i * _GROUP_PART_COL_W
+            col_x1 = col_x0 + _GROUP_PART_COL_W
+
+            picks = udata.get("groups", {}).get(grp_letter, [])
+            p1 = (picks[0] if picks else "**").upper()
+            p2 = (picks[1] if len(picks) > 1 else "**").upper()
+            p3 = (picks[2] if len(picks) > 2 else "**").upper()
+
+            # Top-left of the centered 2×2 grid inside the cell
+            ox = col_x0 + (_GROUP_PART_COL_W - _inner_w) // 2
+            oy = y0 + (_GROUP_CELL_H - _inner_h) // 2
+
+            # (column, row) → pixel offset for each of the 4 positions
+            flag_positions = [
+                (ox,                      oy),                       # TL
+                (ox + _MINI_FLAG + _MINI_GAP, oy),                   # TR
+                (ox,                      oy + _MINI_FLAG + _MINI_GAP),  # BL
+                (ox + _MINI_FLAG + _MINI_GAP, oy + _MINI_FLAG + _MINI_GAP),  # BR
+            ]
+
+            for j, tla in enumerate(grp_teams[:4]):
+                if j >= len(flag_positions):
+                    break
+
+                if tla == p1 and p1 != "**":
+                    alpha = _ALPHA_FULL
+                elif tla == p2 and p2 != "**":
+                    alpha = _ALPHA_FULL
+                elif tla == p3 and p3 != "**":
+                    alpha = _ALPHA_DIM
+                else:
+                    alpha = _ALPHA_FADE
+
+                px, py = flag_positions[j]
+                ftile = _fetch_flag_tile(tla, _MINI_FLAG, tile_dir)
+                if ftile is not None:
+                    if alpha < 255:
+                        ftile = _apply_alpha(ftile, alpha)
+                    canvas.paste(ftile, (px, py), ftile)
+                else:
+                    # ISO code not mappable to twemoji — show TLA text
+                    txt_color = _TEXT_WHITE if alpha >= _ALPHA_DIM else _TEXT_GREY
+                    _text_centered(
+                        draw,
+                        px + _MINI_FLAG // 2,
+                        py + _MINI_FLAG // 2,
+                        tla[:3],
+                        fnt_cell,
+                        txt_color,
+                    )
+
+            # Right-edge vertical divider for this participant column
+            draw.line([(col_x1, y0), (col_x1, y1)], fill=_DIVIDER, width=1)
 
     buf = io.BytesIO()
     canvas.save(buf, format="PNG")

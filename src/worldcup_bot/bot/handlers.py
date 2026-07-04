@@ -1478,8 +1478,29 @@ async def _generate_elecciones_artifact(
 
     if yaml_key == "grupos":
         if choices_type == "image":
-            log.info(
-                "cmd_elecciones: grupos image not yet implemented; using text renderer"
+            from worldcup_bot.porra.elecciones import build_group_compositions
+            try:
+                client = _football_client(context)
+                standings = client.get_standings()
+                group_compositions = build_group_compositions(standings)
+            except Exception as exc:
+                log.warning(
+                    "_generate_elecciones_artifact: could not fetch group compositions: %s",
+                    exc,
+                )
+                group_compositions = {}
+
+            # PIL render is CPU-bound — offloaded via asyncio.to_thread (short-lived,
+            # single invocation, no background loop or persistent thread) so the
+            # Telegram event loop stays responsive.
+            from worldcup_bot.bot.elecciones_image import render_groups_matrix
+            buf = await asyncio.to_thread(
+                render_groups_matrix, group_compositions, participants, settings
+            )
+            if buf is not None:
+                return {"data": buf.read()}
+            log.warning(
+                "_generate_elecciones_artifact: grupos image render failed; falling back to text"
             )
         messages = build_groups_text(participants, team_flag)
         return {"messages": messages}
@@ -1519,6 +1540,8 @@ async def _generate_elecciones_artifact(
 
         from worldcup_bot.bot.elecciones_image import render_knockout_matrix
 
+        # PIL render is CPU-bound — offloaded via asyncio.to_thread (short-lived,
+        # single invocation, no background loop or persistent thread).
         buf = await asyncio.to_thread(
             render_knockout_matrix,
             ties, participants, yaml_key, results_by_tie, settings,

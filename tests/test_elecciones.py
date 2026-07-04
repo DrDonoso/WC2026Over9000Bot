@@ -1,11 +1,13 @@
 """Tests for /elecciones command — phase keyboard, text renderers, image renderer,
-phase filtering, split logic, caching, and CHOICES_TYPE config.
+phase filtering, split logic, caching, CHOICES_TYPE config, groups image, tile
+cache eviction, and defensive line split.
 """
 
 from __future__ import annotations
 
 import io
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,7 +22,6 @@ from worldcup_bot.porra.elecciones import (
     build_knockout_text,
     phase_label,
 )
-
 
 # ── Shared fixtures / helpers ─────────────────────────────────────────────────
 
@@ -841,3 +842,265 @@ class TestStartHelpText:
         await cmd_start(update, context)
         text = update.message.reply_text.call_args[0][0]
         assert "/elecciones" in text
+
+
+# ── build_group_compositions ──────────────────────────────────────────────────
+
+
+class TestBuildGroupCompositions:
+    def _make_standings(self, group: str, tlas: list[str]):
+        """Return mock Standing objects for a group."""
+        standings = []
+        for pos, tla in enumerate(tlas, start=1):
+            s = MagicMock()
+            s.group = f"GROUP_{group}"
+            s.position = pos
+            s.tla = tla
+            standings.append(s)
+        return standings
+
+    def test_builds_dict_from_standings(self):
+        from worldcup_bot.porra.elecciones import build_group_compositions
+        standings = (
+            self._make_standings("A", ["MEX", "KOR", "CZE", "ZAF"])
+            + self._make_standings("B", ["BRA", "ARG", "COL", "ECU"])
+        )
+        result = build_group_compositions(standings)
+        assert result["A"] == ["MEX", "KOR", "CZE", "ZAF"]
+        assert result["B"] == ["BRA", "ARG", "COL", "ECU"]
+
+    def test_preserves_position_order(self):
+        from worldcup_bot.porra.elecciones import build_group_compositions
+        # Standings passed in reverse order — must be sorted by position
+        standings = self._make_standings("C", ["GER", "FRA", "ESP", "POR"])
+        # Reverse them
+        standings.reverse()
+        result = build_group_compositions(standings)
+        assert result["C"] == ["GER", "FRA", "ESP", "POR"]
+
+    def test_empty_standings_returns_empty_dict(self):
+        from worldcup_bot.porra.elecciones import build_group_compositions
+        assert build_group_compositions([]) == {}
+
+    def test_ignores_entries_without_group(self):
+        from worldcup_bot.porra.elecciones import build_group_compositions
+        s = MagicMock()
+        s.group = None
+        s.position = 1
+        s.tla = "TST"
+        result = build_group_compositions([s])
+        assert result == {}
+
+
+# ── defensive line-level split (_split_block_at_lines) ───────────────────────
+
+
+class TestDefensiveLineSplit:
+    def test_short_block_unchanged(self):
+        from worldcup_bot.porra.elecciones import _split_block_at_lines
+        block = "line1\nline2\nline3"
+        result = _split_block_at_lines(block, 4090)
+        assert result == [block]
+
+    def test_multi_line_block_split_at_boundary(self):
+        from worldcup_bot.porra.elecciones import _split_block_at_lines
+        # 5 lines × 1000 chars each; hard limit = 3500 so splits needed
+        lines = ["X" * 1000 for _ in range(5)]
+        block = "\n".join(lines)
+        result = _split_block_at_lines(block, 3500)
+        assert len(result) > 1
+        for piece in result:
+            assert len(piece) <= 3500
+
+    def test_single_oversized_line_not_split(self):
+        """A single line > max_len cannot be split further — returned as-is."""
+        from worldcup_bot.porra.elecciones import _split_block_at_lines
+        long_line = "A" * 5000
+        result = _split_block_at_lines(long_line, 4090)
+        assert result == [long_line]
+
+    def test_split_messages_no_message_exceeds_hard_limit(self):
+        """_split_messages never emits a message > _HARD_LIMIT even with fat blocks."""
+        from worldcup_bot.porra.elecciones import _HARD_LIMIT, _split_messages
+        # Build a block with many lines totalling >4090 chars
+        lines = ["👤 BigUser"] + [f"  line {i}: " + "🏆" * 40 for i in range(60)]
+        big_block = "\n".join(lines)
+        result = _split_messages("Header", [big_block])
+        for msg in result:
+            assert len(msg) <= _HARD_LIMIT + 10  # allow tiny part-number prefix overhead
+
+    def test_split_messages_single_block_within_threshold_unchanged(self):
+        """A block < _SPLIT_THRESHOLD is not touched by the defensive pre-pass."""
+        from worldcup_bot.porra.elecciones import _split_messages
+        block = "👤 User\n  " + "X" * 100
+        result = _split_messages("H", [block])
+        assert len(result) == 1
+        assert "👤 User" in result[0]
+
+
+# ── groups image renderer ─────────────────────────────────────────────────────
+
+
+class TestGroupsImage:
+    @patch("worldcup_bot.bot.elecciones_image._requests.get")
+    @patch("worldcup_bot.bot.podium_image._fetch_tile")
+    def test_render_groups_matrix_returns_bytes_io(self, mock_tile, mock_get):
+        """render_groups_matrix returns a BytesIO PNG with valid group compositions."""
+        from PIL import Image as _Image
+
+        stub_img = _Image.new("RGBA", (28, 28), (100, 150, 200, 255))
+        mock_tile.return_value = stub_img
+        mock_get.return_value.status_code = 404  # flag fetches fail → TLA fallback
+
+        from worldcup_bot.config import Settings
+        from worldcup_bot.bot.elecciones_image import render_groups_matrix
+
+        settings = Settings(telegram_bot_token="t", football_data_api_key="k", state_dir=".")
+        participants = {
+            "user1": {"display_name": "Alice", "groups": {g: ["MEX", "KOR", "CZE"] for g in "ABCDEFGHIJKL"}},
+        }
+        group_comps = {g: ["MEX", "KOR", "CZE", "ZAF"] for g in "ABCDEFGHIJKL"}
+
+        result = render_groups_matrix(group_comps, participants, settings)
+
+        assert result is not None
+        assert isinstance(result, io.BytesIO)
+        data = result.read()
+        assert data[:4] == b"\x89PNG"
+
+    @patch("worldcup_bot.bot.elecciones_image._render_groups", side_effect=RuntimeError("boom"))
+    def test_render_groups_matrix_returns_none_on_exception(self, _mock):
+        from worldcup_bot.bot.elecciones_image import render_groups_matrix
+        from worldcup_bot.config import Settings
+        settings = Settings(telegram_bot_token="t", football_data_api_key="k", state_dir=".")
+        result = render_groups_matrix({}, {}, settings)
+        assert result is None
+
+    def test_render_groups_matrix_importable(self):
+        from worldcup_bot.bot.elecciones_image import render_groups_matrix
+        assert callable(render_groups_matrix)
+
+    @patch("worldcup_bot.bot.handlers.pred_loader.load")
+    @patch("worldcup_bot.bot.handlers._elecciones_results_version", return_value="none")
+    @patch("worldcup_bot.bot.handlers.os.path.getmtime", return_value=1000.0)
+    @patch("worldcup_bot.bot.handlers._football_client")
+    @patch("worldcup_bot.bot.elecciones_image.render_groups_matrix")
+    async def test_grupos_image_mode_sends_photo(
+        self, mock_render, mock_client, mock_mtime, mock_rv, mock_load
+    ):
+        """In image mode, tapping 'grupos' sends a photo — not a text message."""
+        preds = _make_predictions()
+        mock_load.return_value = preds
+        mock_client.return_value.get_standings.return_value = []
+        mock_render.return_value = io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+        from worldcup_bot.config import Settings
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            predictions_path="fake.yml",
+            choices_type="image",
+        )
+
+        query = MagicMock()
+        query.data = "elecciones|grupos"
+        query.answer = AsyncMock()
+        query.edit_message_reply_markup = AsyncMock()
+        query.message.chat_id = 12345
+        update = MagicMock()
+        update.callback_query = query
+        context = _make_context(settings)
+        context.bot_data["elecciones_cache"] = {}
+
+        from worldcup_bot.bot.handlers import cmd_elecciones_callback
+        await cmd_elecciones_callback(update, context)
+
+        context.bot.send_photo.assert_called_once()
+        context.bot.send_message.assert_not_called()
+
+    @patch("worldcup_bot.bot.handlers.pred_loader.load")
+    @patch("worldcup_bot.bot.handlers._elecciones_results_version", return_value="none")
+    @patch("worldcup_bot.bot.handlers.os.path.getmtime", return_value=1000.0)
+    @patch("worldcup_bot.bot.handlers._football_client")
+    @patch("worldcup_bot.bot.elecciones_image.render_groups_matrix", return_value=None)
+    async def test_grupos_image_mode_falls_back_to_text_on_render_failure(
+        self, mock_render, mock_client, mock_mtime, mock_rv, mock_load
+    ):
+        """If render fails, image mode falls back to text (graceful degradation)."""
+        preds = _make_predictions()
+        mock_load.return_value = preds
+        mock_client.return_value.get_standings.return_value = []
+
+        from worldcup_bot.config import Settings
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            predictions_path="fake.yml",
+            choices_type="image",
+        )
+
+        query = MagicMock()
+        query.data = "elecciones|grupos"
+        query.answer = AsyncMock()
+        query.edit_message_reply_markup = AsyncMock()
+        query.message.chat_id = 12345
+        update = MagicMock()
+        update.callback_query = query
+        context = _make_context(settings)
+        context.bot_data["elecciones_cache"] = {}
+
+        from worldcup_bot.bot.handlers import cmd_elecciones_callback
+        await cmd_elecciones_callback(update, context)
+
+        # Render returned None → should fall back to text
+        context.bot.send_message.assert_called()
+
+
+# ── tile cache eviction ───────────────────────────────────────────────────────
+
+
+class TestTileCacheEviction:
+    def _make_tile_dir(self, tmp_path, n: int) -> str:
+        """Create n dummy flag PNG files in a temp dir and return the path."""
+        tile_dir = tmp_path / "elecciones_tiles"
+        tile_dir.mkdir()
+        import time
+        for i in range(n):
+            f = tile_dir / f"flag_{i:04d}.png"
+            f.write_bytes(b"\x89PNG")
+            # Vary mtime so eviction can distinguish old vs new
+            os.utime(f, (1000000 + i, 1000000 + i))
+        return str(tile_dir)
+
+    def test_eviction_removes_oldest_files(self, tmp_path):
+        from worldcup_bot.bot.elecciones_image import _evict_tile_cache
+        tile_dir = self._make_tile_dir(tmp_path, 205)  # 5 over the 200-file cap
+        _evict_tile_cache(tile_dir, max_files=200)
+        remaining = list((tmp_path / "elecciones_tiles").glob("flag_*.png"))
+        assert len(remaining) == 200
+
+    def test_eviction_keeps_newest_files(self, tmp_path):
+        from worldcup_bot.bot.elecciones_image import _evict_tile_cache
+        tile_dir = self._make_tile_dir(tmp_path, 10)
+        _evict_tile_cache(tile_dir, max_files=5)
+        remaining = sorted(
+            (tmp_path / "elecciones_tiles").glob("flag_*.png"),
+            key=lambda f: f.stat().st_mtime,
+        )
+        # The newest 5 should survive; flag_0000..flag_0004 were oldest
+        names = [f.name for f in remaining]
+        assert "flag_0000.png" not in names
+        assert "flag_0009.png" in names
+
+    def test_no_eviction_when_under_limit(self, tmp_path):
+        from worldcup_bot.bot.elecciones_image import _evict_tile_cache
+        tile_dir = self._make_tile_dir(tmp_path, 50)
+        _evict_tile_cache(tile_dir, max_files=200)
+        remaining = list((tmp_path / "elecciones_tiles").glob("flag_*.png"))
+        assert len(remaining) == 50
+
+    def test_no_op_on_missing_dir(self, tmp_path):
+        from worldcup_bot.bot.elecciones_image import _evict_tile_cache
+        # Should not raise even if the directory doesn't exist
+        _evict_tile_cache(str(tmp_path / "nonexistent"), max_files=10)
+

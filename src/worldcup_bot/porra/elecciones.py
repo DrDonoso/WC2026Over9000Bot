@@ -36,6 +36,8 @@ _KNOCKOUT_HEADERS: dict[str, str] = {
 
 # Split threshold — buffer below Telegram's 4096-char hard limit.
 _SPLIT_THRESHOLD = 3800
+# Hard limit for a single message — used by the defensive line-level split.
+_HARD_LIMIT = 4090
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -91,6 +93,50 @@ def _pick_for_tie(udata: dict, home_tla: str, away_tla: str, yaml_key: str) -> s
     if away_tla.upper() in picks:
         return away_tla.upper()
     return None
+
+
+def build_group_compositions(standings: list) -> dict[str, list[str]]:
+    """Build {letter: [tla, tla, tla, tla]} from API standings.
+
+    Args:
+        standings: list of Standing(group="GROUP_A", position=1, tla="MEX", …).
+
+    Returns:
+        {"A": ["MEX", "KOR", "CZE", "ZAF"], …} in position order (1–4).
+        Groups with fewer than 4 teams in the standings are returned as-is.
+    """
+    result: dict[str, list[str]] = {}
+    for s in sorted(standings, key=lambda x: (x.group or "", x.position)):
+        if s.group:
+            letter = s.group.replace("GROUP_", "")
+            result.setdefault(letter, []).append(s.tla)
+    return result
+
+
+def _split_block_at_lines(block: str, max_len: int) -> list[str]:
+    """Split a single user block into ≤max_len pieces at line boundaries.
+
+    Used as a defensive guard when a single user's block exceeds the hard
+    Telegram message limit — e.g. when a participant has many picks and each
+    picks string is long.  Normal usage (compact flags) will never hit this.
+    """
+    if len(block) <= max_len:
+        return [block]
+    parts: list[str] = []
+    current_lines: list[str] = []
+    current_len = 0
+    for line in block.split("\n"):
+        add_len = len(line) + (1 if current_lines else 0)  # +1 for joining \n
+        if current_lines and current_len + add_len > max_len:
+            parts.append("\n".join(current_lines))
+            current_lines = [line]
+            current_len = len(line)
+        else:
+            current_lines.append(line)
+            current_len += add_len
+    if current_lines:
+        parts.append("\n".join(current_lines))
+    return parts
 
 
 def build_knockout_text(
@@ -182,11 +228,21 @@ def build_groups_text(
 def _split_messages(header: str, user_blocks: list[str]) -> list[str]:
     """Assemble user blocks into 1+ messages, splitting at user boundaries when needed.
 
-    Greedy fill: add blocks until _SPLIT_THRESHOLD is exceeded, then flush
-    to a new message.  Part numbers are prepended when >1 message is produced.
+    Defensive pre-pass: any block that alone exceeds _HARD_LIMIT (edge case —
+    happens only if a single user has many very long pick strings) is split at
+    line boundaries so no emitted message exceeds Telegram's 4096-char limit.
+
+    Main pass: greedy fill up to _SPLIT_THRESHOLD, flushing to a new message
+    at user-block boundaries.  Part numbers are prepended when >1 message.
     """
     if not user_blocks:
         return [header]
+
+    # Defensive line-level split for oversized individual blocks.
+    processed: list[str] = []
+    for block in user_blocks:
+        processed.extend(_split_block_at_lines(block, _HARD_LIMIT))
+    user_blocks = processed
 
     full = header + "\n\n" + "\n\n".join(user_blocks)
     if len(full) <= _SPLIT_THRESHOLD:
