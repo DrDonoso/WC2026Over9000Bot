@@ -5,6 +5,12 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260704.03] - 2026-07-04
+
+- perf(mem): reuse single football-data client, evict reddit body cache, close AI httpx clients
+- fix(goals): provisional late-final that preserves official recap + bound keyboard retries
+
+
 ## [20260704] - 2026-07-04
 
 - clip_store.py: add keyboard_attached=False to the entry schema in add_entry.
