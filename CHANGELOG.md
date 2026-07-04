@@ -5,6 +5,23 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260704] - 2026-07-04
+
+- clip_store.py: add keyboard_attached=False to the entry schema in add_entry.
+- __main__.py poll_goal_clips_job: set entry['keyboard_attached']=True after a successful edit_message_reply_markup.  Collect pending_retry (ready + not keyboard_attached) before the early-return guard so the retry loop runs even when there is no new clip-searching work.  On every tick, retry edit_message_reply_markup for all unattached ready entries until success.
+- __main__.py poll_finished_matches_job: compute now_utc in the main loop and also collect stale_live_ids — matches where _match_is_over(m, now_utc) is True (kickoff >4h ago, MATCH_OVER_AGE) AND m.status in ('IN_PLAY', 'PAUSED').  Union with finished_ids before the already-announced filter. This caps worst-case delay at MATCH_OVER_AGE (4h from kickoff) regardless of API lag, without touching the dedup set logic or the seed pass.
+- tests/test_poll_goal_clips_job.py TestKeyboardRetry (8 new tests): keyboard_attached tracking, retry loop fires for unattached entries, skips already-attached and timeout entries, multiple entries in one tick, failed retry keeps keyboard_attached False for next tick.
+- tests/test_poll_finished_job.py TestWallClockFallback (6 new tests): IN_PLAY >4h announced, PAUSED >4h announced, IN_PLAY <4h NOT announced, TIMED >4h NOT announced (only live statuses), already-announced not re-fired, first-run seed still seeds stale IN_PLAY without sending.
+- Merged 2 inbox decision files (kante + pirlo VAR reviews) → decisions.md
+- Deleted processed inbox files
+- Created orchestration logs for kante, buffon, pirlo (ISO 8601 UTC timestamps)
+- Created session log for VAR final-correction deployment
+- Updated pirlo history with VAR review summary
+- Verified all history files < 15360-byte threshold
+- No archive trigger (decisions.md = 12.7 KB < 51200-byte gate)
+- Inbox processed: 2 files → 0 remaining
+
+
 ## [20260703.02] - 2026-07-03
 
 - fix(goals): post-final VAR correction for wrong final score
