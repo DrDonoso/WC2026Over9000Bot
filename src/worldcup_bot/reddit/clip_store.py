@@ -26,6 +26,7 @@ Entry schema::
         "file_id":           str | null,  # Telegram file_id once sent
         "attempts":          int,
         "keyboard_attached": bool,        # True once edit_message_reply_markup succeeded
+        "keyboard_attempts": int,         # failed keyboard-edit attempts (give up after 5)
         "created_at":        str,         # ISO-8601 UTC
     }
 """
@@ -114,6 +115,7 @@ def add_entry(
         "file_id": None,
         "attempts": 0,
         "keyboard_attached": False,
+        "keyboard_attempts": 0,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 

@@ -27,6 +27,7 @@ from worldcup_bot.bot.formatters import (
     format_final_result,
     format_match_camps,
     format_match_start,
+    format_provisional_result,
     format_var_correction,
     match_result_is_final,
     team_flag,
@@ -101,9 +102,29 @@ log = logging.getLogger(__name__)
 # window for ET / half-time goals whose clips can be posted 20-30 min late)
 _MAX_CLIP_ATTEMPTS = 40
 
+# Max failed keyboard-edit attempts before giving up.  A permanently-failed edit
+# (message deleted, bot blocked/kicked) must not retry every 45 s for 7 days and
+# hammer the Telegram API — after this many failures we mark the entry
+# keyboard_attached=True to stop the retry loop.
+_MAX_KEYBOARD_ATTEMPTS = 5
+
 # A football match (including ET + penalties) never exceeds ~3 h; 4 h is a safe
 # ceiling for "this match is definitely over regardless of football-data status".
 MATCH_OVER_AGE = timedelta(hours=4)
+
+
+def _football_client(context: ContextTypes.DEFAULT_TYPE):
+    """Return the process-wide shared FootballDataClient (see handlers._football_client).
+
+    build_app() stores one long-lived client in ``bot_data["football_client"]``
+    so every job reuses the same ``requests.Session`` instead of building a new
+    session + connection pool on every tick.  Falls back to a one-off
+    ``make_client`` only when the shared client is absent (unit tests).
+    """
+    client = context.bot_data.get("football_client")
+    if client is not None:
+        return client
+    return make_client(context.bot_data["settings"])
 
 
 def _match_is_over(match, now_utc: datetime) -> bool:
@@ -628,6 +649,10 @@ async def _backfill_scorer_in_clip_store(
                 edit_kwargs["reply_markup"] = build_goal_keyboard(tok)
             try:
                 await context.bot.edit_message_text(**edit_kwargs)
+                # The edit re-attached the keyboard (reply_markup was passed),
+                # so record it to avoid a redundant keyboard-retry edit later.
+                if entry.get("status") == "ready":
+                    entry["keyboard_attached"] = True
                 log.info(
                     "_backfill_scorer: edited message %d for %s vs %s (%d-%d) → scorer=%s%s",
                     entry["message_id"],
@@ -1370,14 +1395,25 @@ async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         )
                         entry["keyboard_attached"] = True
                     except Exception as edit_exc:
+                        entry["keyboard_attempts"] = entry.get("keyboard_attempts", 0) + 1
                         log.warning(
-                            "poll_goal_clips_job: could not edit message for token %s: %s",
+                            "poll_goal_clips_job: could not edit message for token %s "
+                            "(keyboard attempt %d/%d): %s",
                             token,
+                            entry["keyboard_attempts"],
+                            _MAX_KEYBOARD_ATTEMPTS,
                             edit_exc,
                         )
                         # keyboard_attached stays False — the retry loop will re-try
                         # on the next tick so a transient Telegram error never
-                        # permanently hides the 'Ver gol' button.
+                        # permanently hides the 'Ver gol' button (bounded below).
+                        if entry["keyboard_attempts"] >= _MAX_KEYBOARD_ATTEMPTS:
+                            entry["keyboard_attached"] = True
+                            log.warning(
+                                "poll_goal_clips_job: giving up on keyboard for token %s "
+                                "after %d attempts",
+                                token, entry["keyboard_attempts"],
+                            )
 
                     log.info(
                         "poll_goal_clips_job: clip ready for token %s → %s",
@@ -1409,8 +1445,9 @@ async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Telegram API blip), the entry sits at status="ready" with
         # keyboard_attached=False.  Since it is no longer "searching", the main
         # loop above never revisits it.  This retry loop catches those entries and
-        # re-attempts the edit every tick until it succeeds (or the entry is pruned
-        # after 7 days by prune_old_entries).
+        # re-attempts the edit every tick until it succeeds OR _MAX_KEYBOARD_ATTEMPTS
+        # failures accumulate (then keyboard_attached is forced True to stop
+        # hammering the Telegram API for a permanently-dead message).
         for token, entry in pending_retry:
             try:
                 await context.bot.edit_message_reply_markup(
@@ -1425,11 +1462,23 @@ async def poll_goal_clips_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     token,
                 )
             except Exception as retry_exc:
+                entry["keyboard_attempts"] = entry.get("keyboard_attempts", 0) + 1
+                changed = True
                 log.warning(
-                    "poll_goal_clips_job: keyboard retry failed for token %s: %s",
+                    "poll_goal_clips_job: keyboard retry failed for token %s "
+                    "(attempt %d/%d): %s",
                     token,
+                    entry["keyboard_attempts"],
+                    _MAX_KEYBOARD_ATTEMPTS,
                     retry_exc,
                 )
+                if entry["keyboard_attempts"] >= _MAX_KEYBOARD_ATTEMPTS:
+                    entry["keyboard_attached"] = True
+                    log.warning(
+                        "poll_goal_clips_job: giving up on keyboard for token %s "
+                        "after %d attempts",
+                        token, entry["keyboard_attempts"],
+                    )
 
         if changed:
             save_clips(clips_path, clip_data)
@@ -1588,9 +1637,24 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
       This catches stale IN_PLAY/PAUSED matches whose football-data status lags.
       Persist immediately and return (no sends).
     - SUBSEQUENT RUNS: for each match newly showing FINISHED whose id is NOT in
-      `finished_announced`, send the recap (Part A ESPN stats + Part B porra
-      commentary), then add the id and persist (one save per match so a crash
-      mid-batch doesn't replay).
+      `finished_announced`, send the OFFICIAL recap (Part A ESPN stats + Part B porra
+      commentary + 🏁 Final), then add the id and persist (one save per match so a
+      crash mid-batch doesn't replay).
+
+    Provisional late-final (Bug #2, reviewer-approved design):
+    - The football-data.org free tier can stay IN_PLAY for hours after real
+      full-time (Australia vs Egypt: ~9.5 h).  To bound announcement latency we
+      send a clearly-labelled ⏳ PROVISIONAL notice for any match still IN_PLAY
+      past MATCH_OVER_AGE (4 h from kickoff), tracked in the SEPARATE persisted
+      set `provisional_announced` — it does NOT consume `finished_announced`.
+    - Because the provisional path never marks the match FINISHED-dedup'd, the
+      OFFICIAL 🏁 Final recap still fires (with the API-confirmed score) whenever
+      the status finally flips to FINISHED — even hours later.  A stale/null
+      provisional score is therefore self-correcting and never persisted as a
+      wrong final.
+    - PAUSED is deliberately EXCLUDED from the provisional path: football-data
+      uses PAUSED for half-time and for weather/security/medical suspensions,
+      which can resume; only a stuck IN_PLAY reliably means "match really over".
     """
     try:
         settings: Settings = context.bot_data["settings"]
@@ -1644,19 +1708,58 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         now_utc = datetime.now(timezone.utc)
         finished_ids = {m.id for m in all_matches if m.status == "FINISHED"}
-        # Wall-clock fallback: if the football-data.org free-tier API is slow to
-        # update a match to FINISHED (as happened for Australia vs Egypt: ended
-        # ~22:30 but API stayed IN_PLAY until ~06:00 next day, a 9h lag), use the
-        # wall-clock guard — any match with kickoff >MATCH_OVER_AGE (4h) ago that
-        # is still showing as IN_PLAY or PAUSED is treated as finished.  This caps
-        # the worst-case announcement delay at MATCH_OVER_AGE from kickoff rather
-        # than waiting indefinitely for the API status to update.
-        stale_live_ids = {
+
+        # ── Provisional late-final (Bug #2) ───────────────────────────────────
+        # Only the OFFICIAL FINISHED status produces a real 🏁 Final recap and
+        # consumes `finished_announced`.  For a match that the API keeps IN_PLAY
+        # past MATCH_OVER_AGE (4 h) we instead send a clearly-labelled ⏳
+        # provisional notice, tracked in the SEPARATE `provisional_announced`
+        # set so the official recap still fires when the status finally flips.
+        # PAUSED is excluded — it may be a resumable suspension, not full-time.
+        provisional_announced: set = context.bot_data.setdefault(
+            "provisional_announced", set()
+        )
+        provisional_path = f"{settings.state_dir}/provisional_announced.json"
+        stale_inplay_ids = {
             m.id for m in all_matches
-            if _match_is_over(m, now_utc) and m.status in ("IN_PLAY", "PAUSED")
+            if _match_is_over(m, now_utc)
+            and m.status == "IN_PLAY"
+            and m.id not in announced
+            and m.id not in provisional_announced
         }
-        new_ids = (finished_ids | stale_live_ids) - announced
+
+        new_ids = finished_ids - announced
         matches_by_id = {m.id: m for m in all_matches}
+
+        if not new_ids and not stale_inplay_ids:
+            await _var_correction_watch(context, matches_by_id, settings)
+            return
+
+        # ── send provisional notices (does NOT consume finished_announced) ────
+        for match_id in stale_inplay_ids:
+            m = matches_by_id.get(match_id)
+            if m is None:
+                continue
+            try:
+                await context.bot.send_message(
+                    chat_id=settings.telegram_group_id,
+                    text=format_provisional_result(m),
+                    parse_mode="HTML",
+                )
+                log.info(
+                    "poll_finished_matches_job: sent PROVISIONAL late-final for "
+                    "match %d (%s vs %s) — API still IN_PLAY past %dh",
+                    match_id, m.home_name, m.away_name,
+                    int(MATCH_OVER_AGE.total_seconds() // 3600),
+                )
+            except Exception as exc:
+                log.error(
+                    "poll_finished_matches_job: provisional send failed for match %d: %s",
+                    match_id, exc,
+                )
+            finally:
+                provisional_announced.add(match_id)
+                save_finished(provisional_path, provisional_announced)
 
         if not new_ids:
             await _var_correction_watch(context, matches_by_id, settings)
@@ -1811,6 +1914,11 @@ async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             finally:
                 announced.add(match_id)
                 save_finished(finished_path, announced)
+                # Official recap fired — clear any provisional marker so the
+                # provisional set never grows unbounded.
+                if match_id in provisional_announced:
+                    provisional_announced.discard(match_id)
+                    save_finished(provisional_path, provisional_announced)
 
         # ── post-final VAR-correction watch ──────────────────────────────────
         await _var_correction_watch(context, matches_by_id, settings)
@@ -1895,6 +2003,10 @@ async def _mark_goal_annulled(
 
         try:
             await context.bot.edit_message_text(**edit_kwargs)
+            # The edit re-attached the keyboard (reply_markup was passed for a
+            # 'ready' clip), so record it to avoid a redundant keyboard retry.
+            if entry.get("status") == "ready":
+                entry["keyboard_attached"] = True
             log.info(
                 "_mark_goal_annulled: edited message %d for match %d (annulled %d-%d)%s",
                 entry["message_id"], match_id, annulled_home, annulled_away,
@@ -2056,6 +2168,12 @@ def build_app(settings: Settings) -> Application:
     app.bot_data["finished_announced"] = load_finished(finished_path)
     # False until first poll_finished_matches_job run completes its seed pass.
     app.bot_data["finished_seeded"] = False
+    # Provisional late-final tracker: match ids for which a ⏳ provisional notice
+    # has been sent because the API stayed IN_PLAY past MATCH_OVER_AGE.  Kept
+    # SEPARATE from finished_announced so the official 🏁 Final recap still fires
+    # when the API eventually reports FINISHED.  Persisted for restart safety.
+    provisional_path = f"{settings.state_dir}/provisional_announced.json"
+    app.bot_data["provisional_announced"] = load_finished(provisional_path)
     app.bot_data["espn_client"] = None
     # kickoff-start tracker: persisted set of match ids already announced or seeded.
     kickoff_path = f"{settings.state_dir}/kickoff_announced.json"

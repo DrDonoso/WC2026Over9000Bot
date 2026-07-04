@@ -172,9 +172,12 @@ class TestAddEntry:
             "chat_id", "message_id", "home_name", "away_name",
             "home_tla", "away_tla", "home_score", "away_score",
             "scoring_team", "scorer", "minute",
-            "status", "clip_path", "file_id", "attempts", "created_at",
+            "status", "clip_path", "file_id", "attempts",
+            "keyboard_attached", "keyboard_attempts", "created_at",
         ):
             assert field in entry, f"missing field: {field}"
+        assert entry["keyboard_attempts"] == 0
+        assert entry["keyboard_attached"] is False
 
     def test_attempts_starts_at_zero(self):
         data: dict = {}

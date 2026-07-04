@@ -1826,6 +1826,9 @@ class TestVARCorrectionWatch:
         ekw = edit_calls[0][1]
         assert "reply_markup" in ekw
         assert ekw["reply_markup"] == build_goal_keyboard(tok)
+        # PART B: a successful text edit that re-attached the keyboard records it
+        # so the retry loop won't redundantly re-edit the message.
+        assert ctx.bot_data["clip_store"][tok]["keyboard_attached"] is True
 
     @pytest.mark.asyncio
     async def test_no_correction_when_score_stable(self, tmp_path):
@@ -1993,18 +1996,22 @@ class TestVARCorrectionWatch:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Regression — wall-clock fallback for late API updates (Bug #2 fix)
+# Regression — provisional late-final for stuck-IN_PLAY API (Bug #2 corrected fix)
 # ══════════════════════════════════════════════════════════════════════════════
 
 
-class TestWallClockFallback:
-    """Regression tests for Bug #2: FINAL announced ~9h late.
 
-    Root cause: poll_finished_matches_job only announced matches where
-    m.status == "FINISHED".  When football-data.org delayed updating the
-    Australia-Egypt match to FINISHED for ~9.5h, the bot never announced.
-    Fix: add a wall-clock fallback that also fires for IN_PLAY/PAUSED matches
-    whose kickoff is >MATCH_OVER_AGE (4h) ago.
+class TestProvisionalLateFinal:
+    """Corrected Bug #2: provisional late-final that never suppresses the official recap.
+
+    The football-data.org free tier can stay IN_PLAY for hours past real
+    full-time (Australia vs Egypt: ~9.5 h).  The corrected design sends a
+    clearly-labelled PROVISIONAL notice bounded at MATCH_OVER_AGE (4 h) from
+    kickoff, tracked in the SEPARATE ``provisional_announced`` set so the
+    OFFICIAL 🏁 Final recap still fires (with the API-confirmed score) when the
+    status finally flips to FINISHED.  PAUSED is excluded (may be a resumable
+    suspension).  These replace the earlier tests, which encoded the rejected
+    behaviour (a real Final card from a stale IN_PLAY score).
     """
 
     def _make_stale_inplay(
@@ -2012,8 +2019,10 @@ class TestWallClockFallback:
         mid: int = 9001,
         status: str = "IN_PLAY",
         kickoff_hours_ago: float = 5.0,
+        home_score: int = 1,
+        away_score: int = 0,
+        winner=None,
     ) -> "Match":
-        """An IN_PLAY match whose kickoff is `kickoff_hours_ago` hours in the past."""
         from datetime import datetime, timedelta, timezone
 
         kickoff = datetime.now(timezone.utc) - timedelta(hours=kickoff_hours_ago)
@@ -2027,29 +2036,111 @@ class TestWallClockFallback:
             away_tla="EGY",
             home_name="Australia",
             away_name="Egypt",
-            home_score=1,
-            away_score=0,
-            winner=None,
+            home_score=home_score,
+            away_score=away_score,
+            winner=winner,
         )
 
-    @pytest.mark.asyncio
-    async def test_inplay_match_over_4h_gets_announced(self, tmp_path):
-        """An IN_PLAY match with kickoff >4h ago must be announced (wall-clock fallback).
-
-        This is the core regression: before the fix, this match would be silently
-        skipped until the football-data API eventually updated to FINISHED.
-        """
-        settings = _make_settings(tmp_path, ai=False)
+    def _ready_ctx(self, settings, match):
         ctx = _make_context(settings)
         ctx.bot_data["finished_seeded"] = True
         ctx.bot_data["finished_announced"] = set()
-
-        match = self._make_stale_inplay(mid=9001, status="IN_PLAY", kickoff_hours_ago=5.0)
+        ctx.bot_data["provisional_announced"] = set()
         mock_client = MagicMock()
         mock_client.get_all_matches.return_value = [match]
         mock_scanner = MagicMock()
         mock_scanner.get_espn_game_id = MagicMock(return_value=None)
         ctx.bot_data["reddit_scanner"] = mock_scanner
+        return ctx, mock_client
+
+    @pytest.mark.asyncio
+    async def test_stale_inplay_sends_provisional_not_official(self, tmp_path):
+        """IN_PLAY >4h → a ⏳ PROVISIONAL notice, NOT a 🏁 Final, and NOT dedup'd as final."""
+        settings = _make_settings(tmp_path, ai=False)
+        match = self._make_stale_inplay(mid=9001, status="IN_PLAY", kickoff_hours_ago=5.0)
+        ctx, mock_client = self._ready_ctx(settings, match)
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_awaited_once()
+        text = ctx.bot.send_message.call_args_list[0][1]["text"]
+        assert "provisional" in text.lower()
+        assert "🏁" not in text
+        # Provisional path must NOT consume the official-final dedup state.
+        assert 9001 not in ctx.bot_data["finished_announced"]
+        assert 9001 in ctx.bot_data["provisional_announced"]
+
+    @pytest.mark.asyncio
+    async def test_paused_match_over_4h_not_announced(self, tmp_path):
+        """PAUSED >4h may be a resumable suspension → NO provisional, NO final."""
+        settings = _make_settings(tmp_path, ai=False)
+        match = self._make_stale_inplay(mid=9002, status="PAUSED", kickoff_hours_ago=5.0)
+        ctx, mock_client = self._ready_ctx(settings, match)
+
+        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        assert 9002 not in ctx.bot_data["finished_announced"]
+        assert 9002 not in ctx.bot_data["provisional_announced"]
+
+    @pytest.mark.asyncio
+    async def test_inplay_under_4h_no_provisional(self, tmp_path):
+        """IN_PLAY <4h is a genuinely live match → never announced."""
+        settings = _make_settings(tmp_path, ai=False)
+        match = self._make_stale_inplay(mid=9003, status="IN_PLAY", kickoff_hours_ago=1.5)
+        ctx, mock_client = self._ready_ctx(settings, match)
+
+        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        assert 9003 not in ctx.bot_data["provisional_announced"]
+
+    @pytest.mark.asyncio
+    async def test_scheduled_over_4h_no_provisional(self, tmp_path):
+        """A TIMED/SCHEDULED match >4h in the past must NOT trigger the provisional path."""
+        settings = _make_settings(tmp_path, ai=False)
+        match = self._make_stale_inplay(mid=9004, status="TIMED", kickoff_hours_ago=5.0)
+        ctx, mock_client = self._ready_ctx(settings, match)
+
+        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        assert 9004 not in ctx.bot_data["provisional_announced"]
+
+    @pytest.mark.asyncio
+    async def test_provisional_not_resent_when_already_marked(self, tmp_path):
+        """Once provisional has been sent, a still-IN_PLAY match is not re-announced each tick."""
+        settings = _make_settings(tmp_path, ai=False)
+        match = self._make_stale_inplay(mid=9005, status="IN_PLAY", kickoff_hours_ago=6.0)
+        ctx, mock_client = self._ready_ctx(settings, match)
+        ctx.bot_data["provisional_announced"] = {9005}
+
+        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_official_final_fires_after_provisional(self, tmp_path):
+        """KEY blocker fix: a match that got a provisional notice still fires the
+        OFFICIAL 🏁 Final recap (with the confirmed score) once the API reports FINISHED."""
+        settings = _make_settings(tmp_path, ai=False)
+        # API now confirms FINISHED with the settled score 2-1 (winner AUS).
+        match = self._make_stale_inplay(
+            mid=9101, status="FINISHED", kickoff_hours_ago=9.5,
+            home_score=2, away_score=1, winner="HOME_TEAM",
+        )
+        ctx, mock_client = self._ready_ctx(settings, match)
+        # Provisional was already sent earlier; official dedup still empty.
+        ctx.bot_data["provisional_announced"] = {9101}
 
         with (
             patch("worldcup_bot.__main__.make_client", return_value=mock_client),
@@ -2060,23 +2151,43 @@ class TestWallClockFallback:
 
         ctx.bot.send_message.assert_awaited()
         text = ctx.bot.send_message.call_args_list[0][1]["text"]
-        assert "🏁" in text
-        assert 9001 in ctx.bot_data["finished_announced"]
+        assert "🏁" in text          # official Final card, not provisional
+        assert "2-1" in text
+        # Official recap consumes the final dedup and clears the provisional marker.
+        assert 9101 in ctx.bot_data["finished_announced"]
+        assert 9101 not in ctx.bot_data["provisional_announced"]
 
     @pytest.mark.asyncio
-    async def test_paused_match_over_4h_gets_announced(self, tmp_path):
-        """A PAUSED match (e.g. HT stuck) with kickoff >4h ago must also be announced."""
+    async def test_no_double_official_on_later_tick(self, tmp_path):
+        """After the official recap fires, a subsequent FINISHED tick must not re-announce."""
         settings = _make_settings(tmp_path, ai=False)
-        ctx = _make_context(settings)
-        ctx.bot_data["finished_seeded"] = True
-        ctx.bot_data["finished_announced"] = set()
+        match = self._make_stale_inplay(
+            mid=9102, status="FINISHED", kickoff_hours_ago=10.0,
+            home_score=2, away_score=1, winner="HOME_TEAM",
+        )
+        ctx, mock_client = self._ready_ctx(settings, match)
+        ctx.bot_data["provisional_announced"] = {9102}
 
-        match = self._make_stale_inplay(mid=9002, status="PAUSED", kickoff_hours_ago=5.0)
-        mock_client = MagicMock()
-        mock_client.get_all_matches.return_value = [match]
-        mock_scanner = MagicMock()
-        mock_scanner.get_espn_game_id = MagicMock(return_value=None)
-        ctx.bot_data["reddit_scanner"] = mock_scanner
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)   # official fires
+            first = ctx.bot.send_message.await_count
+            await poll_finished_matches_job(ctx)   # must NOT re-fire
+
+        assert first == 1
+        assert ctx.bot.send_message.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_provisional_persisted_for_restart_safety(self, tmp_path):
+        """provisional_announced is persisted so a restart never re-sends the notice."""
+        from worldcup_bot.reddit.finished_state import load_finished
+
+        settings = _make_settings(tmp_path, ai=False)
+        match = self._make_stale_inplay(mid=9006, status="IN_PLAY", kickoff_hours_ago=5.0)
+        ctx, mock_client = self._ready_ctx(settings, match)
 
         with (
             patch("worldcup_bot.__main__.make_client", return_value=mock_client),
@@ -2085,76 +2196,18 @@ class TestWallClockFallback:
         ):
             await poll_finished_matches_job(ctx)
 
-        ctx.bot.send_message.assert_awaited()
-        assert 9002 in ctx.bot_data["finished_announced"]
-
-    @pytest.mark.asyncio
-    async def test_inplay_match_under_4h_not_announced(self, tmp_path):
-        """An IN_PLAY match with kickoff <4h ago must NOT be prematurely announced."""
-        settings = _make_settings(tmp_path, ai=False)
-        ctx = _make_context(settings)
-        ctx.bot_data["finished_seeded"] = True
-        ctx.bot_data["finished_announced"] = set()
-
-        match = self._make_stale_inplay(mid=9003, status="IN_PLAY", kickoff_hours_ago=1.5)
-        mock_client = MagicMock()
-        mock_client.get_all_matches.return_value = [match]
-
-        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
-            await poll_finished_matches_job(ctx)
-
-        ctx.bot.send_message.assert_not_awaited()
-        assert 9003 not in ctx.bot_data["finished_announced"]
-
-    @pytest.mark.asyncio
-    async def test_scheduled_match_over_4h_not_announced(self, tmp_path):
-        """A TIMED/SCHEDULED match >4h in the past must NOT be announced via wall-clock.
-
-        Only IN_PLAY and PAUSED matches trigger the fallback (a postponed or
-        cancelled match should not be announced as a final).
-        """
-        settings = _make_settings(tmp_path, ai=False)
-        ctx = _make_context(settings)
-        ctx.bot_data["finished_seeded"] = True
-        ctx.bot_data["finished_announced"] = set()
-
-        match = self._make_stale_inplay(mid=9004, status="TIMED", kickoff_hours_ago=5.0)
-        mock_client = MagicMock()
-        mock_client.get_all_matches.return_value = [match]
-
-        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
-            await poll_finished_matches_job(ctx)
-
-        ctx.bot.send_message.assert_not_awaited()
-        assert 9004 not in ctx.bot_data["finished_announced"]
-
-    @pytest.mark.asyncio
-    async def test_stale_inplay_already_announced_not_re_announced(self, tmp_path):
-        """Once a wall-clock-announced match is in `finished_announced`, never re-fire."""
-        settings = _make_settings(tmp_path, ai=False)
-        ctx = _make_context(settings)
-        ctx.bot_data["finished_seeded"] = True
-        ctx.bot_data["finished_announced"] = {9005}  # already announced
-
-        match = self._make_stale_inplay(mid=9005, status="IN_PLAY", kickoff_hours_ago=6.0)
-        mock_client = MagicMock()
-        mock_client.get_all_matches.return_value = [match]
-
-        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
-            await poll_finished_matches_job(ctx)
-
-        ctx.bot.send_message.assert_not_awaited()
+        persisted = load_finished(f"{settings.state_dir}/provisional_announced.json")
+        assert 9006 in persisted
 
     @pytest.mark.asyncio
     async def test_stale_inplay_seeded_on_first_run_not_announced(self, tmp_path):
-        """On first run, stale IN_PLAY is seeded (no send) — same as seed behavior."""
+        """On first run a stale IN_PLAY match is seeded into finished_announced (no send)."""
         settings = _make_settings(tmp_path, ai=False)
         ctx = _make_context(settings)
-        # finished_seeded=False → first-run seed path
         ctx.bot_data["finished_seeded"] = False
         ctx.bot_data["finished_announced"] = set()
 
-        match = self._make_stale_inplay(mid=9006, status="IN_PLAY", kickoff_hours_ago=5.0)
+        match = self._make_stale_inplay(mid=9007, status="IN_PLAY", kickoff_hours_ago=5.0)
         mock_client = MagicMock()
         mock_client.get_all_matches.return_value = [match]
 
@@ -2162,5 +2215,5 @@ class TestWallClockFallback:
             await poll_finished_matches_job(ctx)
 
         ctx.bot.send_message.assert_not_awaited()
-        assert 9006 in ctx.bot_data["finished_announced"]
+        assert 9007 in ctx.bot_data["finished_announced"]
         assert ctx.bot_data["finished_seeded"] is True

@@ -576,6 +576,35 @@ def format_final_result(match: Match) -> str:
     return "\n".join(lines)
 
 
+def format_provisional_result(match: Match) -> str:
+    """Build the ⏳ provisional-result card (HTML) for a match whose FINISHED
+    status is delayed by the football-data.org free tier.
+
+    Format::
+
+        ⏳ Resultado provisional
+        🇦🇺 Australia 1-0 Egypt 🇪🇬
+        El partido parece haber terminado, pero la API aún no lo confirma.
+        El resultado oficial llegará en cuanto se confirme.
+
+    Deliberately NOT the 🏁 Final card: the score is the still-live
+    football-data value and may be stale.  When the API later reports FINISHED,
+    the official 🏁 Final recap fires with the confirmed score.
+    """
+    h_flag = team_flag(match.home_tla)
+    a_flag = team_flag(match.away_tla)
+    hs = match.home_score if match.home_score is not None else 0
+    as_ = match.away_score if match.away_score is not None else 0
+    h_name = html.escape(match.home_name, quote=False)
+    a_name = html.escape(match.away_name, quote=False)
+    return "\n".join([
+        "⏳ <b>Resultado provisional</b>",
+        f"{h_flag} {h_name} {hs}-{as_} {a_name} {a_flag}",
+        "El partido parece haber terminado, pero la API aún no lo confirma. "
+        "El resultado oficial llegará en cuanto se confirme.",
+    ])
+
+
 def match_result_is_final(match: Match) -> bool:
     """True when a FINISHED match's result is safe to announce.
 

@@ -689,3 +689,51 @@ class TestKeyboardRetry:
             await poll_goal_clips_job(ctx)
 
         assert entry["keyboard_attached"] is False
+
+class TestKeyboardRetryGiveUp:
+    """PART B: bound the keyboard-retry loop so a permanently-dead message
+    (deleted / bot blocked) stops retrying after _MAX_KEYBOARD_ATTEMPTS."""
+
+    @pytest.mark.asyncio
+    async def test_gives_up_after_fifth_failure(self, tmp_path):
+        """On the 5th consecutive failed retry, keyboard_attached is forced True."""
+        settings = _make_settings(tmp_path)
+        token = "deadmsg"
+        entry = _ready_entry_no_keyboard(token)
+        entry["keyboard_attempts"] = 4  # one more failure hits the limit
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+        ctx.bot.edit_message_reply_markup = AsyncMock(side_effect=Exception("message to edit not found"))
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value=None),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            await poll_goal_clips_job(ctx)
+
+        assert entry["keyboard_attempts"] == 5
+        assert entry["keyboard_attached"] is True
+
+    @pytest.mark.asyncio
+    async def test_stops_retrying_once_given_up(self, tmp_path):
+        """Across many ticks, a permanently failing edit is retried at most 5 times."""
+        settings = _make_settings(tmp_path)
+        token = "deadmsg2"
+        entry = _ready_entry_no_keyboard(token)
+        clip_data = {token: entry}
+        ctx = _make_context(settings, clip_data)
+        ctx.bot.edit_message_reply_markup = AsyncMock(side_effect=Exception("chat not found"))
+
+        with (
+            patch("worldcup_bot.__main__.find_goal_clip", return_value=None),
+            patch("worldcup_bot.__main__.save_clips"),
+            patch("worldcup_bot.__main__.prune_old_entries"),
+        ):
+            for _ in range(10):
+                await poll_goal_clips_job(ctx)
+
+        # Exactly 5 edit attempts, then give-up flips keyboard_attached True.
+        assert ctx.bot.edit_message_reply_markup.call_count == 5
+        assert entry["keyboard_attached"] is True
+        assert entry["keyboard_attempts"] == 5
