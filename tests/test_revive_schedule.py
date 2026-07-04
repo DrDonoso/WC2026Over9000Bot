@@ -112,6 +112,29 @@ def _frozen_datetime_cls(hour: int, minute: int = 0) -> type:
     return _FrozenDt
 
 
+def _frozen_datetime_active_cls() -> type:
+    """Return a datetime subclass frozen to today at 14:00 Madrid.
+
+    Uses the real current date so _inactive_ts() timestamps (5 real days old)
+    remain > inactive_days (3) from the frozen perspective, while hour 14 is
+    always outside the default quiet window (23→06).
+    """
+    now_utc = _dt.datetime.now(_dt.timezone.utc)
+    now_madrid = now_utc.astimezone(_TZ_MADRID)
+    frozen = _TZ_MADRID.localize(
+        _dt.datetime(now_madrid.year, now_madrid.month, now_madrid.day, 14, 0, 0)
+    )
+
+    class _FrozenDt(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            if tz is not None:
+                return frozen.astimezone(tz)
+            return frozen
+
+    return _FrozenDt
+
+
 # ── is_quiet_hours — all boundary vectors ─────────────────────────────────────
 
 
@@ -413,12 +436,14 @@ class TestReviveInactiveJobReschedule:
     # ── ALWAYS-RESCHEDULE on every non-disabled exit path ────────────────────
 
     async def test_success_path_reschedules(self, tmp_path):
+        _ActiveDt = _frozen_datetime_active_cls()
         ctx = _make_ctx(
             porra_usernames=["alice"],
             last_seen={"alice": _inactive_ts()},
             state_path=str(tmp_path / "state.json"),
         )
-        await revive_inactive_job(ctx)
+        with patch("worldcup_bot.chat.revive.datetime", _ActiveDt):
+            await revive_inactive_job(ctx)
         ctx.bot.send_message.assert_called_once()   # confirm it was a real run
         ctx.job_queue.run_once.assert_called_once()
 

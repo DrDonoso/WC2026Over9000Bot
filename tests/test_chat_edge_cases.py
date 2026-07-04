@@ -17,11 +17,13 @@ Covers beyond the smoke tests in test_chat.py:
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytz
 import pytest
 
 from worldcup_bot.ai.client import AIError
@@ -923,6 +925,32 @@ class TestSelectCandidateEdgeCases:
 
 # ── revive_inactive_job ───────────────────────────────────────────────────────
 
+_TZ_MADRID = pytz.timezone("Europe/Madrid")
+
+
+def _frozen_datetime_active_cls() -> type:
+    """Return a datetime subclass frozen to today at 14:00 Madrid.
+
+    Using today's date (not a hardcoded one) keeps the frozen 'now' close
+    enough to real-now that _inactive_ts(days=5) timestamps remain > 3 days
+    stale from the frozen perspective.  Hour 14 is always outside the default
+    quiet window (23→06).
+    """
+    now_utc = _dt.datetime.now(_dt.timezone.utc)
+    now_madrid = now_utc.astimezone(_TZ_MADRID)
+    frozen = _TZ_MADRID.localize(
+        _dt.datetime(now_madrid.year, now_madrid.month, now_madrid.day, 14, 0, 0)
+    )
+
+    class _FrozenDt(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            if tz is not None:
+                return frozen.astimezone(tz)
+            return frozen
+
+    return _FrozenDt
+
 
 class TestReviveInactiveJob:
     def _inactive_ts(self, days: float = 5.0) -> str:
@@ -930,6 +958,17 @@ class TestReviveInactiveJob:
 
     def _active_ts(self) -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    @pytest.fixture(autouse=True)
+    def _freeze_clock_to_daytime(self):
+        """Pin worldcup_bot.chat.revive.datetime to today at 14:00 Madrid.
+
+        Ensures every test in this class runs as if it's midday — always
+        outside the default quiet window (23:00–06:00) — regardless of when
+        the test suite actually executes.
+        """
+        with patch("worldcup_bot.chat.revive.datetime", _frozen_datetime_active_cls()):
+            yield
 
     async def test_sends_message_prefixed_with_at_username(self, tmp_path):
         ctx = _make_revive_ctx(
