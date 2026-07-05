@@ -5,6 +5,16 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260705] - 2026-07-05
+
+- cache: include scheduled tie identity in version + never cache transient 'no disponible'/API-error/fallback artifacts (BLOCKER 1)
+- split: guarantee every emitted part <=4096 incl header/prefix, hard-split a single overlong line at char boundary (BLOCKER 2)
+- flags: switch twemoji base to gh path (npm 404s); add ENG/SCO/WAL tag-sequence flags, NIR falls back to text
+- groups image API failure -> text fallback (no blank image)
+- hourglass delete failure -> neutral placeholder edit
+- 14 new/updated tests; full suite 2346 passed
+
+
 ## [20260704.11] - 2026-07-04
 
 - tests/test_chat_edge_cases.py: add _frozen_datetime_active_cls() helper and an autouse fixture on TestReviveInactiveJob that wraps every test in the patch context.
