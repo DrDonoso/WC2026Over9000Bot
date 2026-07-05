@@ -1,4 +1,4 @@
-# Decision: "Ver gol" Button Missing — Clip-Pipeline Fix (2026-07-02 SHIPPED)
+﻿# Decision: "Ver gol" Button Missing — Clip-Pipeline Fix (2026-07-02 SHIPPED)
 
 **Date:** 2026-07-02  
 **Authors:** Kanté (Backend Implementation), Pirlo (Lead Review)  
@@ -2348,3 +2348,1448 @@ Both fixes are surgical and regression-safe. The regex is properly anchored (`^`
 `\s+`), the rollover arithmetic is identity for hour<24, and all parse failures remain
 non-fatal. 2157 tests pass. Ship it.
 
+
+
+---
+
+# Decision: Freeze Clock in Revive Success-Path Tests (2026-07-04)
+
+**Date:** 2026-07-04  
+**Author:** Buffon (QA)  
+**Status:** ✅ SHIPPED (commit e832645)
+
+---
+
+## Problem
+
+`revive_inactive_job` has a quiet-hours guard (default 23:00–06:00 Europe/Madrid).
+Eight success-path tests asserted `send_message` was called but never froze the clock.
+Running the suite between 23:00 and 06:00 caused the guard to skip the send and fail
+all eight tests. Outside that window they passed — classic time-dependent flakiness.
+
+Affected:
+- `tests/test_chat_edge_cases.py::TestReviveInactiveJob` (7 tests)
+- `tests/test_revive_schedule.py::TestReviveInactiveJobReschedule::test_success_path_reschedules` (1 test)
+
+---
+
+## Key Gotcha: Frozen Date Must Be Today, Not a Hardcoded Past Date
+
+The existing `_frozen_datetime_cls(hour)` freezes to 2026-06-30. That works for
+quiet-hours tests (which short-circuit before the inactivity check), but NOT for
+success-path tests.
+
+`_inactive_ts(5)` computes timestamps as **real_now − 5 days**.  
+A frozen `now` of 2026-06-30 14:00 is only ~14 hours after that timestamp when the
+test runs in July 2026 — well under `inactive_days = 3`. Alice would not appear as
+a candidate and the send would never happen.
+
+**Solution:** Freeze to **today at 14:00 Madrid** (real current date, synthetic hour):
+
+```python
+def _frozen_datetime_active_cls() -> type:
+    now_utc = _dt.datetime.now(_dt.timezone.utc)
+    now_madrid = now_utc.astimezone(_TZ_MADRID)
+    frozen = _TZ_MADRID.localize(
+        _dt.datetime(now_madrid.year, now_madrid.month, now_madrid.day, 14, 0, 0)
+    )
+    class _FrozenDt(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not None:
+                return frozen.astimezone(tz)
+            return frozen
+    return _FrozenDt
+```
+
+This keeps `frozen_now − _inactive_ts(5)` ≈ 5 days > `inactive_days = 3`, while
+hour 14 is always outside the 23→06 quiet window.
+
+---
+
+## Pattern Applied
+
+- `tests/test_chat_edge_cases.py`: `autouse=True` fixture on `TestReviveInactiveJob`
+  that patches `worldcup_bot.chat.revive.datetime` for the entire class.
+- `tests/test_revive_schedule.py`: explicit `with patch(...)` block in
+  `test_success_path_reschedules`.
+
+Quiet-hours tests (frozen to 23:30) are intentionally unchanged.
+
+---
+
+## Rule for Future Revive Tests
+
+> Any test that calls `revive_inactive_job` and asserts `send_message` IS called
+> **must** freeze `worldcup_bot.chat.revive.datetime` to a non-quiet hour.
+> Use `_frozen_datetime_active_cls()` (freezes to today at 14:00 Madrid) — not
+> `_frozen_datetime_cls(hour)` (hardcoded 2026-06-30) — so that inactivity timestamps
+> computed with `datetime.now()` remain > `inactive_days` from the frozen perspective.
+
+
+---
+
+# Decision — Final (Bug #2) revision + memory fixes
+
+Author: Cannavaro (backend, escalation)
+Date: 2026-07-04
+Re: revision of a61757d (rejected by Pirlo). Fix-forward on `main`.
+Requested by: danielrdon
+
+## Why the previous fix was rejected (recap)
+Kanté's wall-clock fallback announced a real `🏁 Final` from a still-`IN_PLAY`/
+`PAUSED` football-data object and marked the match in `finished_announced`. If
+that score was stale/null it persisted a WRONG final AND suppressed the later
+real `FINISHED` recap. It also treated `PAUSED` >4h as final, which can be a
+resumable suspension.
+
+## Corrected FINAL design (fixes both blockers)
+Two distinct announcements, two distinct dedup states:
+
+1. Official recap — unchanged. Only `status == "FINISHED"` (and shootout-settled)
+   produces the `🏁 Final` recap and consumes `finished_announced`.
+2. Provisional notice — for a match the API keeps `IN_PLAY` past `MATCH_OVER_AGE`
+   (4 h from kickoff), send a clearly-labelled `⏳ Resultado provisional`
+   (`format_provisional_result`). It is tracked in a NEW, SEPARATE persisted set
+   `provisional_announced` (`{state_dir}/provisional_announced.json`) and does
+   NOT touch `finished_announced`.
+
+Because the provisional path never consumes the final dedup state:
+- The OFFICIAL `🏁 Final` recap still fires when the API eventually reports
+  `FINISHED` — even 9 h later — with the API-confirmed score. That official
+  message IS the correction; a stale/null provisional score is self-correcting
+  and is never persisted as a final. → fixes Blocker 1.
+- On the official recap the id is removed from `provisional_announced` (bounded
+  set), giving exactly one provisional + one official message, each idempotent.
+
+`PAUSED` handling → fixes Blocker 2: `PAUSED` is EXCLUDED from the provisional
+path. football-data uses `PAUSED` for half-time and for weather/security/medical
+suspensions that can resume; only a stuck `IN_PLAY` reliably means "match really
+over" (and IN_PLAY was the actual Australia-Egypt failure mode). A PAUSED match
+is announced only once it legitimately reaches `FINISHED`.
+
+Why not reuse `finished_scores`/VAR-correction as the primary mechanism: its
+window is `final_correction_window_minutes` (30 min) and entries are pruned long
+before a multi-hour-late `FINISHED` flip, so it cannot carry a 9 h correction.
+The provisional-then-official split is the natural, correct fit. (The existing
+VAR-correction watch remains untouched and still handles genuine post-final score
+changes within its window.)
+
+Guarantees: worst-case latency for a genuinely-finished match is bounded at
+`MATCH_OVER_AGE` (provisional notice); no uncorrectable wrong final is ever
+emitted; no double official announcement; restart-safe (both sets persisted,
+first-run seed still seeds stale matches into `finished_announced`).
+
+## Keyboard follow-ups (Bug #1)
+- Bounded retries: `keyboard_attempts` added to the clip entry schema
+  (`clip_store.add_entry`). `poll_goal_clips_job` increments it on every failed
+  keyboard edit (initial + retry loop) and, at `_MAX_KEYBOARD_ATTEMPTS = 5`,
+  forces `keyboard_attached = True` to stop retrying a permanently-dead message
+  (deleted / bot blocked) — previously it retried every 45 s until 7-day pruning.
+- Preserve on text edit: `_backfill_scorer_in_clip_store` and `_mark_goal_annulled`
+  now set `keyboard_attached = True` after a successful `edit_message_text` that
+  re-attached the keyboard (`reply_markup=` passed for a `ready` clip), avoiding
+  redundant retry edits. (`editMessageText` without `reply_markup` clears the
+  keyboard — that path is unchanged and still omits it when not ready.)
+
+## Memory fixes
+1. Shared football-data client: `build_app` creates one `make_client(settings)`
+   into `bot_data["football_client"]`. 19 call sites (7 in `__main__.py`, 12 in
+   `bot/handlers.py`) now use `_football_client(context)`, which returns the
+   shared client (single `requests.Session`, HTTP keep-alive) and only falls back
+   to a one-off `make_client` when absent (unit tests). Kills ~10.4k
+   session/pool objects/day — the main RSS driver. Safe to share: no per-call
+   mutation on `FootballDataClient`.
+2. Reddit body-cache eviction: `get_thread_body` now sweeps entries older than
+   `5 × _THREAD_BODY_TTL` once the cache exceeds 40 entries; finished-match
+   permalinks no longer live forever.
+3. Keyboard retry give-up (as above) — bounds a runaway Telegram API loop.
+4. AI httpx clients closed: `AIClient.aclose()` (wraps `AsyncOpenAI.close()`);
+   per-event clients in `_enrich_scorer` and the recap job's Part B are closed in
+   `try/finally`.
+
+## Verification
+- Full suite `.venv\Scripts\python.exe -m pytest -q`: 2218 passed (~63 s).
+- Rewrote `TestWallClockFallback` → `TestProvisionalLateFinal` (provisional on
+  stale IN_PLAY; official FINISHED still fires/corrects; PAUSED not finalized; no
+  double-announce; restart persistence). Added shared-client, keyboard give-up,
+  scanner-eviction and `AIClient.aclose` tests.
+- `docker-compose*.yml` untouched (Maldini's memory cap left as-is).
+
+
+---
+
+# Decision: streamff goal-clip download — resolve source from page, resilient CDN fallback
+
+**Author:** Cannavaro (backend reliability)
+**Date:** 2026-07-04T21:37+02:00
+**Scope:** `src/worldcup_bot/reddit/downloader.py`, `tests/test_downloader.py`
+**Commit:** separate from Parts A/B/C (see hash below)
+
+## Problem (hit live during Canada vs Morocco)
+
+A goal clip was matched on `streamff.pro/v/92cb0999`, but the downloader:
+
+1. Built the direct-CDN URL on a **stale hardcoded host** `cdn.streamff.one/{id}.mp4`
+   → `ConnectionResetError(104, 'Connection reset by peer')` (dead host).
+2. Fell through to yt-dlp with a `streamff.com/v/{id}` URL → `Unsupported URL`.
+
+`download()` returned `None`, so `poll_goal_clips_job` never attached the
+"Ver gol" inline keyboard to the goal message.
+
+## Root cause
+
+streamff **rotates domains** (streamff.pro / .one / .com / .link / .gg / …) and
+their CDN hosts move with them. The old code hardcoded a single CDN base and
+routed streamff to yt-dlp (which does not support streamff). Both assumptions
+break every time the domain changes — we were chasing domains.
+
+## Decision
+
+**Derive the CDN host from the domain of the matched clip URL — never hardcode a TLD.**
+
+- **Primary:** `_streamff_cdn_url(url)` builds
+  `https://cdn.<matched-domain>/<id>.mp4`, taking `<matched-domain>` from the
+  domain the clip was actually matched on (`streamff.pro → cdn.streamff.pro`).
+  There is **no hardcoded `.one`/`.pro`/`.com`** anywhere, so a future streamff
+  domain rotation works with zero code changes. `_download_file` retries a
+  transient `ConnectionResetError` twice with short backoff before giving up.
+- **Secondary:** `_resolve_streamff_source(url)` scrapes the matched page for the
+  real `<source>`/`<video>` src (or an embedded JSON url / any `.mp4`) when the
+  derived CDN host is unreachable.
+- **yt-dlp:** streamff never falls through to it (unsupported). streamin/streamain
+  keep their yt-dlp fallback unchanged.
+
+**Fallback order:** derived `cdn.<matched-domain>/<id>.mp4` → page-scraped source.
+
+## Why this fixes it for good
+
+The durable fix is reading the source the page itself references, so a domain
+change no longer requires a code change. The CDN list is only a best-effort
+backstop and is derived from the matched domain, not a single frozen host.
+
+## Verification
+
+- `tests/test_downloader.py`: `TestDownloadStreamff` rewritten (was CDN-first);
+  added JSON/bare-URL extraction, matched-domain-first CDN fallback,
+  dead-host iteration, connection-reset retry, total-failure → None (no yt-dlp),
+  and `TestStreamffPatterns` for the regexes. A future domain/scheme change is
+  now caught by a failing unit test rather than in production.
+- Full suite: **2226 passed**.
+- End-to-end: once `download()` returns a path, `poll_goal_clips_job`
+  (`__main__.py` ~1368–1399) attaches the keyboard and sets
+  `keyboard_attached=True` — the success path is not gated by anything else.
+
+
+---
+
+# Decision: /elecciones increment 2 — groups image + tile-cache eviction + defensive text split
+
+**Date:** 2026-07-04  
+**Author:** Kanté  
+**Commit:** 7a0dcfc  
+**Status:** Ready for Pirlo review  
+**Follows:** `pirlo-elecciones-design.md` B4, Pirlo approve-with-followups on increment 1
+
+---
+
+## Summary
+
+Implements the three follow-ups from Pirlo's increment-1 review plus the deferred groups image (B4):
+
+1. **Groups 2×2 image** — `CHOICES_TYPE=image` now renders a PIL matrix for "Fase de grupos"
+2. **Tile-cache disk eviction** — `_evict_tile_cache()` caps `{state_dir}/elecciones_tiles/` at 200 files
+3. **asyncio.to_thread documentation** — comments in both renderer docstrings explain the short-lived single-invocation pattern (no background loop, no runaway CPU/RAM)
+4. **Defensive line-level text split** — `_split_block_at_lines()` ensures no single message ever exceeds 4090 chars, even if a single user block is oversized
+
+---
+
+## Groups Image Design (B4)
+
+### Architecture
+
+```
+Handler (_generate_elecciones_artifact, "grupos" branch, image mode):
+  1. client.get_standings()          → list[Standing]   (I/O, on event loop, TTL-cached)
+  2. build_group_compositions(...)   → dict[letter → [tla×4]]  (pure, porra/elecciones.py)
+  3. asyncio.to_thread(render_groups_matrix, compositions, participants, settings)
+                                     → BytesIO | None   (CPU-bound PIL, off event loop)
+  4. buf is not None → {"data": bytes}
+     else            → text fallback (graceful degradation)
+```
+
+### Layout
+
+- Canvas: `(38 + n_users × 84) × (76 + 12 × 82)` px
+  - 11 participants → `970 × 1060 px`
+- Header row (76 px): circular profile photos + short names (same pattern as knockout image)
+- 12 group rows (82 px each): alternating dark rows
+  - Left column (38 px): group letter A–L
+  - Each participant column (84 px): 2×2 flag grid, centered in cell
+
+### 2×2 Cell Rendering
+
+Teams come from `group_compositions[letter]` in standings position order (1st in top-left, etc.).
+
+| Alpha | Meaning |
+|-------|---------|
+| 255 | Participant's predicted 1st or 2nd (direct qualifier) |
+| 165 | Participant's predicted 3rd (tercero, advances only if best-thirds) |
+| 65  | Not picked by this participant (implicitly eliminated) |
+
+`_apply_alpha(img, alpha)` scales the existing RGBA alpha channel (`point(lambda x: x*alpha//255)`), preserving antialiasing.  TLA text fallback when flag tile is unavailable (non-standard ISO codes like GBENG).
+
+### Terceros Strip — Not Added
+
+Considered adding a strip below the 12 group rows showing each participant's tercero picks. Decided against it:
+- The intermediate-alpha (165) 2×2 rendering already makes tercero picks clearly visible
+- Fitting 12 tercero flags per participant into an 84 px column is not clean at any reasonable flag size
+- Can be revisited as a separate increment if owner requests it
+
+---
+
+## Tile-Cache Eviction
+
+`_evict_tile_cache(tile_dir, max_files=200)`:
+- Globs `flag_*.png` in the cache dir
+- If count > max_files: sorts by mtime (oldest first), unlinks surplus
+- Called at the start of both `_render` (knockout) and `_render_groups` (grupos)
+- No background thread — runs inline, best-effort (exceptions swallowed)
+- 200-file cap is generous: the WC has 48 teams × a few sizes = ~50–100 unique tiles
+
+---
+
+## asyncio.to_thread Pattern
+
+Both `render_knockout_matrix` and `render_groups_matrix` docstrings now state:
+
+> "Always call via `asyncio.to_thread` to avoid blocking the Telegram event loop. It is a short-lived, single invocation — not a background loop or persistent thread — so it carries no risk of runaway CPU/RAM usage."
+
+API calls (`get_standings`, `get_all_matches`, `get_stage_results`) are I/O-bound and stay on the event loop (they're behind the TTL cache, typically returning instantly on cache hits). Only the PIL rendering is offloaded.
+
+---
+
+## Defensive Line-Level Split
+
+`_split_block_at_lines(block, max_len)` in `porra/elecciones.py`:
+- Splits at `\n` boundaries when a block exceeds `_HARD_LIMIT = 4090`
+- A single line > max_len is returned as-is (cannot split without breaking the content)
+- `_split_messages` now pre-processes every block through this function before the main greedy threshold splitting
+
+This guarantees no Telegram message exceeds 4090 chars even in edge cases (many participants with long flag sequences).
+
+---
+
+## Tests
+
+18 new tests (97 total in `test_elecciones.py`):
+
+| Class | Tests | What |
+|-------|-------|------|
+| `TestBuildGroupCompositions` | 4 | dict from standings, position order, empty, no-group |
+| `TestDefensiveLineSplit` | 5 | short unchanged, multi-line split, single oversized line, no-message-exceeds, within-threshold |
+| `TestGroupsImage` | 5 | PNG produced, None on exception, importable, image-mode sends photo (not text), render-failure → text fallback |
+| `TestTileCacheEviction` | 4 | removes oldest, keeps newest, no-op under limit, no-op missing dir |
+
+**2328 tests total, 0 failures.**
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/porra/elecciones.py` | `_HARD_LIMIT`, `_split_block_at_lines`, updated `_split_messages`, `build_group_compositions` |
+| `src/worldcup_bot/bot/elecciones_image.py` | `_MAX_TILE_CACHE_FILES`, groups layout constants, `_evict_tile_cache`, `_apply_alpha`, call `_evict_tile_cache` in `_render`, `render_groups_matrix`, `_render_groups` |
+| `src/worldcup_bot/bot/handlers.py` | Replace grupos-image fallback with actual image rendering; asyncio.to_thread comment |
+| `tests/test_elecciones.py` | 4 new test classes (18 new tests) |
+
+
+---
+
+# Decision: /elecciones hourglass UX
+
+**Author:** Kanté  
+**Date:** 2026-07-04  
+**Commit:** `8922308`  
+**Status:** pending-review (Pirlo)
+
+## Problem
+
+When the user tapped a phase button in `/elecciones`, the bot immediately removed the keyboard (via `edit_message_reply_markup`) and sent the result as a separate message. For image mode this created a bad experience: the keyboard disappeared but nothing happened for several seconds while PIL was rendering. There was no feedback that work was in progress, and errors left silent failures.
+
+## Decision
+
+Implement a **tap → hourglass → delete + send** flow:
+
+1. `query.edit_message_text("⏳ Generando…", reply_markup=None)` — edits the phase-selector message in-place to show a spinner and atomically removes the keyboard. Captures `placeholder_id = query.message.message_id`.
+2. Generate the artifact (cache hit or fresh render, inside a `try/except`).
+3. **Success:** `context.bot.delete_message(chat_id, placeholder_id)` then `send_photo` (image) or `send_message` (text). Text mode is also delete-then-send for consistency (the ⏳ flash is negligible).
+4. **Failure (exception):** `context.bot.edit_message_text(chat_id, placeholder_id, "❌ Error…")` — placeholder becomes the error notice; no dangling hourglass.
+
+## Implementation
+
+- `_serve_elecciones` replaced by `_serve_after_placeholder(context, chat_id, placeholder_id, artifact)`.
+- `cmd_elecciones_callback` refactored to the four-step flow above.
+- All defensive paths (missing participants, invalid callback data) also edit the placeholder rather than sending a new message.
+
+## Tests
+
+- `test_removes_keyboard` — asserts `query.edit_message_text("⏳ Generando…", reply_markup=None)`.
+- `test_sends_text_result_for_grupos` / `test_cache_hit_serves_without_regeneration` / `test_cache_invalidated_on_mtime_change` — assert `context.bot.delete_message` then `context.bot.send_message`.
+- `test_grupos_image_mode_sends_photo` — assert delete + `send_photo`.
+- `test_grupos_image_mode_falls_back_to_text_on_render_failure` — assert delete + `send_message`.
+- `test_generation_failure_edits_placeholder_to_error` (new) — patches `_generate_elecciones_artifact` to raise; asserts `context.bot.edit_message_text` called with `❌` text and no delete/send.
+
+Full suite: 2324 passed, 8 pre-existing failures (unrelated).
+
+
+---
+
+# Decision: /elecciones command implementation
+
+**Date:** 2026-07-04  
+**Author:** Kanté  
+**Commit:** 38e00b2  
+**Status:** Ready for Pirlo review
+
+---
+
+## Summary
+
+Implemented the `/elecciones` command per Pirlo's locked design (`pirlo-elecciones-design.md`). Shows tournament-phase predictions per participant, via an inline keyboard phase selector, with text and image rendering modes.
+
+---
+
+## Files Added / Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/porra/elecciones.py` | NEW — pure data helpers |
+| `src/worldcup_bot/bot/elecciones_image.py` | NEW — PIL knockout matrix renderer |
+| `src/worldcup_bot/config.py` | `choices_type` field + env var |
+| `src/worldcup_bot/bot/handlers.py` | 8 new functions/constants |
+| `src/worldcup_bot/__main__.py` | register CommandHandler + CallbackQueryHandler |
+| `docker-compose.yml` | `CHOICES_TYPE: "${CHOICES_TYPE:-text}"` |
+| `docker-compose.local.yml` | same |
+| `.env.example` | `# CHOICES_TYPE=text` |
+| `tests/test_elecciones.py` | NEW — 79 tests |
+
+---
+
+## Architecture
+
+### Phase keyboard + filtering
+
+`cmd_elecciones` calls `active_phases(participants)` from `porra/elecciones.py`. A phase is included only if ≥1 participant has ≥1 non-`**` pick:
+- grupos: any non-`**` in any group position across all users
+- knockout: any non-`**` in the list for that round
+
+With current predictions.yml (example data), quarter_finals / semi_finals / final have empty pick lists → those buttons are absent from the keyboard. Callback data: `elecciones|<yaml_key>`; pattern: `^elecciones\|`.
+
+### Text renderers
+
+Both in `porra/elecciones.py`; accept `team_flag_fn` arg for testability (no I/O).
+
+- **Knockout** (`build_knockout_text`): one block per user, rows = ties in round order. Picks via `_pick_for_tie` (wraps `_side_for` from `porra/camps.py`). No-pick → `❓`. `**` in list → `❓`. TERCEROS derived via `best_qualifying_thirds` from `porra/scoring.py` for grupos phase.
+- **Groups** (`build_groups_text`): one block per user, one line per group. Format: `A: 🇲🇽 🇰🇷 | 3º🇨🇿`. `**` rendered inline.
+- **Splitting**: `_split_messages` greedily fills up to 3800 chars, splitting at `\n\n👤` boundaries. Single block >3800 stays as-is (can't split within a user block). Part headers `(1/N)\n` prepended when >1 message.
+
+### Knockout image
+
+`bot/elecciones_image.py` — PIL matrix: rows = ties from API bracket, columns = participants (yaml order) with circular profile-photo headers (initials fallback), flag cells, RESULTS column (blank until results exist). Reuses `podium_image.py` helpers (`_circular_crop`, `_fetch_tile`, `_placeholder_tile`, `_font`). Flag tiles fetched from twemoji CDN; cached on disk in `{state_dir}/elecciones_tiles/` (bounded). Non-2-char ISO codes (GBENG/GBSCT/GBWLS) → `_flag_url` returns `None` → cell shows TLA text.
+
+**Groups image NOT in this increment.** In image mode, tapping grupos transparently falls back to the grupos text renderer (logged at INFO level). No user-facing error.
+
+### Caching
+
+Cache lives in `bot_data["elecciones_cache"]` — dict keyed by `(yaml_key, mtime, results_hash)`. At most 6 entries (one per phase). On tap: compute key → cache hit → serve immediately; miss → regenerate INLINE in handler (PTB event loop, no background thread) → store → serve. Eviction: stale entries for same phase deleted when new entry added; hard cap via deleting oldest when >6. `results_hash` = MD5 of sorted stage results (home_tla, away_tla, score) — artifact regenerates automatically when results change, not just when predictions.yml changes.
+
+### CHOICES_TYPE wiring
+
+- `config.py` `Settings`: `choices_type: str = "text"`
+- `load_settings()`: `choices_type=os.getenv("CHOICES_TYPE", "text")`
+- `docker-compose.yml` + `docker-compose.local.yml`: `CHOICES_TYPE: "${CHOICES_TYPE:-text}"`
+- `.env.example`: `# CHOICES_TYPE=text  # Options: text, image`
+
+---
+
+## Tests (2310 total, 0 failures)
+
+79 new tests across 11 classes in `tests/test_elecciones.py`:
+- `TestPhaseLabel` — label mapping for all 6 phases
+- `TestHasPicks` — grupos/knockout has-picks logic with wildcards
+- `TestActivePhases` — keyboard buttons present/absent per data
+- `TestPickForTie` — side-for tie + no-pick → ❓
+- `TestBuildKnockoutText` — per-user blocks, ❓ on no-pick, multiple users
+- `TestBuildGroupsText` — per-user groups, terceros shown, ** handling
+- `TestSplitMessages` — threshold splitting, part numbers, single large block
+- `TestChoicesTypeConfig` — default text, image from env
+- `TestCmdElecciones` — keyboard present, phases filtered, error on no participants
+- `TestCmdEleccionesCallback` — keyboard removed, text served, cache hit/miss/invalidation
+- `TestEleccionesCache` — stale eviction, coexistence, bounded to 6, results-version invalidation
+- `TestEleccionesImageImport` — importability, _flag_url, render returns BytesIO
+- `TestStartHelpText` — /elecciones in /start help text
+
+---
+
+## Gotchas for next session
+
+- `InlineKeyboardButton` was not in handlers.py imports — added.
+- `hashlib`, `io`, `os` not in handlers.py stdlib imports — added.
+- Lazy imports inside `_generate_elecciones_artifact` → patch target for tests = `worldcup_bot.porra.elecciones.*`.
+- Twemoji `_flag_url` returns `None` for non-2-char ISO codes (England/Scotland/Wales) → image cells show TLA instead of flag.
+- `_split_messages` threshold is soft — a single user block > 3800 chars is NOT split; it's a "best-effort" approach to keep messages under 4096.
+
+
+---
+
+# Decision: Production Bug Fixes — Keyboard Never Attached & FINAL 9h Late
+
+**Date:** 2026-07-04  
+**Author:** Kanté (Backend Developer)  
+**Commit:** `a61757d` (branch: `main`)  
+**Tests:** 2209 passed, 0 failures
+
+---
+
+## Bug #1 — "Ver gol" inline keyboard never attached (all goals, 2026-07-03)
+
+### Symptom
+Of all goals scored on 2026-07-03, none had the "Ver gol" inline keyboard button added to the goal message — clips were found and downloaded, but the button was permanently absent.
+
+### Root Cause
+`poll_goal_clips_job` sets `entry["status"] = "ready"` **before** calling `edit_message_reply_markup` (intentional: ensures `_backfill_scorer_in_clip_store` sees the completed entry). If that call then fails (e.g. a Telegram API blip), there was **no retry path**:
+- The function's early-return guard (`if not searching: return`) fires before any retry code when there are no `status="searching"` entries.
+- The main loop only processes `status="searching"` entries — `"ready"` entries are never revisited.
+- For goals with a known scorer, `_backfill_scorer_in_clip_store` skips them too (`scorer is not None → continue`).
+
+So a single Telegram API blip on 2026-07-03 permanently hid the button for every goal.
+
+### Fix
+**`src/worldcup_bot/reddit/clip_store.py`**
+- Added `"keyboard_attached": False` to `add_entry` entry schema.
+
+**`src/worldcup_bot/__main__.py` — `poll_goal_clips_job`**
+- Set `entry["keyboard_attached"] = True` after a successful `edit_message_reply_markup`.
+- Compute `pending_retry` (entries with `status="ready"` and `keyboard_attached` falsy) **before** the early-return guard, so retry runs even when there is no searching work.
+- After the main searching loop, iterate `pending_retry` and re-attempt `edit_message_reply_markup` every tick until success (or until the entry is pruned after 7 days by `prune_old_entries`). Set `changed=True` on success so `save_clips` persists the update.
+
+### Gotcha to Remember
+The early-return `if not searching: return` was **above** the retry loop — the retry was dead code whenever the bot had no clips currently being searched. Always place `pending_retry` computation **before** any early-return guard.
+
+---
+
+## Bug #2 — Australia-Egypt FINAL announced ~9h late (match ended 22:30, announced 08:00)
+
+### Symptom
+Australia vs Egypt ended ~22:30 CEST on 2026-07-03. The bot announced the FINAL result at ~08:00 on 2026-07-04 — roughly 9.5h late.
+
+### Root Cause
+`poll_finished_matches_job` computed:
+```python
+finished_ids = {m.id for m in all_matches if m.status == "FINISHED"}
+```
+The football-data.org **free-tier API** delayed updating Australia-Egypt from `IN_PLAY` to `FINISHED` for ~9.5h (match ended ~20:30 UTC, API reported FINISHED at ~06:00 UTC next day). The bot polled correctly throughout but found nothing to announce because the API status never changed during that window. There was no wall-clock fallback.
+
+The existing `_match_is_over(m, now_utc)` predicate (kickoff >4h ago) was already used by `poll_goals_job` to evict matches from `live_scores`, and by the seed pass to silently handle stale matches on startup — but the **main announcement loop** in `poll_finished_matches_job` never used it.
+
+### Fix
+**`src/worldcup_bot/__main__.py` — `poll_finished_matches_job` main loop**
+
+After the seed-pass returns, compute:
+```python
+now_utc = datetime.now(timezone.utc)
+finished_ids = {m.id for m in all_matches if m.status == "FINISHED"}
+stale_live_ids = {
+    m.id for m in all_matches
+    if _match_is_over(m, now_utc) and m.status in ("IN_PLAY", "PAUSED")
+}
+new_ids = (finished_ids | stale_live_ids) - announced
+```
+
+`_match_is_over` returns True when kickoff was >4h ago (`MATCH_OVER_AGE`). This caps worst-case announcement delay at 4h from kickoff regardless of API lag. For a typical 90-min match (e.g. kickoff 18:00 UTC, FT 20:30 UTC), the wall-clock fallback fires at 22:00 UTC — ~1.5h after FT.
+
+Only `IN_PLAY` and `PAUSED` statuses trigger the fallback — `TIMED`/`SCHEDULED`/`POSTPONED` are excluded to avoid false positives.
+
+### Seed pass consistency
+The first-run seed pass already silently seeds stale `IN_PLAY` matches (kickoff >4h ago) via the same `_match_is_over` predicate, so after a restart those matches are already in `announced` and won't be re-announced.
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/__main__.py` | Bug #1: `pending_retry` guard + retry loop; Bug #2: `stale_live_ids` wall-clock fallback |
+| `src/worldcup_bot/reddit/clip_store.py` | Bug #1: `keyboard_attached: False` added to entry schema |
+| `tests/test_poll_goal_clips_job.py` | 8 regression tests (`TestKeyboardRetry`) |
+| `tests/test_poll_finished_job.py` | 6 regression tests (`TestWallClockFallback`) |
+
+
+---
+
+# Decision: Container Memory-Limit Safeguard
+
+**Date:** 2026-07-04  
+**Author:** Maldini (DevOps)  
+**Status:** Pending owner confirmation of MiB value (not committed/pushed)
+
+## Context
+
+The LXC hosting the bot (2 GB RAM, also running Dockge) hit 100% RAM. After restart the container idles at ~133 MiB. Root-cause (app memory leak) is being audited by Kanté separately. This is a DevOps safety net so the container can never exhaust the whole LXC again, independent of any app fix.
+
+## Decision
+
+Add `mem_limit` and `mem_reservation` to `docker-compose.yml` and `docker-compose.local.yml`.
+
+### Key chosen: `mem_limit` (top-level service key)
+
+`deploy.resources.limits.memory` is the Compose Spec / Swarm-style key. On plain `docker compose up` (non-swarm), that key has been historically ignored — Docker Compose only honours it in swarm mode or with `--compat`. The top-level `mem_limit:` key is always honoured by `docker compose up` on any Compose version, no flags required. This is the reliable, version-agnostic choice.
+
+### Values
+
+| Key | Value | Bytes |
+|-----|-------|-------|
+| `mem_limit` | `512m` | 536,870,912 |
+| `mem_reservation` | `256m` | 268,435,456 |
+
+**Justification:**
+- Idle baseline: ~133 MiB → `512m` is ~3.85× headroom — enough for daily image generation (gpt-image-2 decoding), live-goal bursts, and Python GC pressure simultaneously.
+- Leaves ~1.5 GB for Dockge + LXC OS overhead (well within the 2 GB budget).
+- `mem_reservation: 256m` is a soft floor (scheduler hint), not enforced — it signals to the kernel that 256 MiB should be prioritised for this container, but it won't kill at that boundary.
+- If the owner wants tighter protection: `384m` is the minimum safe option. If burst headroom is a concern: `768m` is the upper end before eating into Dockge's budget.
+
+### How to change the value (one liner on the host)
+
+```bash
+sed -i 's/mem_limit: 512m/mem_limit: 768m/' docker-compose.yml
+```
+Or simply edit the `mem_limit:` and `mem_reservation:` lines directly in both compose files.
+
+## Validation
+
+`docker compose -f docker-compose.yml config --quiet` → exit 0  
+`docker compose -f docker-compose.local.yml config --quiet` → exit 0  
+Resolved bytes confirmed: `mem_limit: "536870912"`, `mem_reservation: "268435456"` ✓
+
+## Files changed (not committed)
+
+- `docker-compose.yml` — added `mem_limit: 512m` + `mem_reservation: 256m`
+- `docker-compose.local.yml` — same, kept consistent
+
+## Related
+
+- `restart: unless-stopped` already present in both files — ensures auto-restart after a kernel OOM-kill (defense in depth while Kanté audits the leak).
+- Kanté owns the app-level fix; this PR is infrastructure-only.
+
+
+---
+
+# Nesta — /elecciones increment 2 revision (fix-forward on `main`)
+
+Owned the revision after Pirlo REJECTED Kanté's `30919a7`. Reviewer-gate lockout:
+Kanté could not revise, so I took it. Fix-forward on `main`.
+
+## What I fixed
+
+### BLOCKER 1 — cache serving stale "unavailable" bracket
+- `_elecciones_results_version` (handlers.py) now hashes the **scheduled tie
+  identity** from `get_all_matches()` (stage pairings) PLUS finished winners — not
+  just finished results. The cache key invalidates as soon as ties are scheduled
+  or change, so a "cuadro no disponible" artifact is never re-served once the
+  bracket appears.
+- Defence-in-depth: transient artifacts (no-ties message, API-error messages, the
+  groups-image API-failure text fallback) are tagged `cacheable: False` and the
+  callback only stores `artifact.get("cacheable", True)`.
+- No extra API calls: `get_stage_results` already resolves via `get_all_matches`
+  (TTL-cached 60 s).
+
+### BLOCKER 2 — messages could exceed Telegram's 4096 limit
+- `porra/elecciones.py` `_split_messages` rewritten: `block_budget = 4096 −
+  PREFIX_RESERVE(16) − (len(header)+2)`. Every block is pre-split to that budget;
+  packing tracks `blocks_in_current` so a header+block or two blocks are never
+  forced past the limit. Result: every emitted part (incl. header + `(i/n)` prefix)
+  is provably ≤4096.
+- `_split_block_at_lines` now hard-splits a single overlong line at a character
+  boundary (previously passed through unsplit).
+
+### FLAG 404 fix
+- `_TWEMOJI_BASE` changed from the npm path (404 for every flag) to the
+  GitHub-hosted `cdn.jsdelivr.net/gh/twitter/twemoji@v14.0.2/assets/72x72`
+  (verified 200). Restores flags for all standard teams in knockout + groups images.
+
+### ENG/SCO/WAL flags
+- `_flag_url` extended: 5-char ISO starting "GB" → tag-sequence filename
+  `1f3f4-<tags>-e007f.png`. GBNIR excluded (no asset) → None → TLA-text fallback.
+  England/Scotland/Wales URLs verified 200.
+
+### NON-BLOCKING 1 — groups image on API failure
+- Standings-API failure now falls back to the TEXT renderer (no blank grid), marked
+  non-cacheable so a real image regenerates when the API recovers.
+
+### NON-BLOCKING 2 — hourglass delete failure
+- `_serve_after_placeholder`: on delete failure, best-effort edit the placeholder to
+  a neutral notice ("📊 Predicciones 👇") so no stale ⏳ remains; result still sent.
+
+## Tests
+14 new/updated tests in `tests/test_elecciones.py`:
+- Cache: `_elecciones_results_version` invalidation when ties scheduled / winner
+  finishes / grupos=none; full-callback regression (no-ties → ties appear → bracket
+  regenerated, unavailable artifact not cached).
+- Split: many-users, one enormous single line, header+near-limit block — every part
+  ≤4096; single overlong line is hard-split.
+- Flags: base is gh path; ESP resolves; ENG/SCO/WAL tag-sequences; NIR → None/text;
+  ENG tile fetch (mock 200) renders; NIR fetch skipped.
+- Fallbacks: groups-image API failure → text (not cached); delete-failure →
+  neutral edit + result still sent.
+
+Full suite: **2346 passed** (2332 baseline + 14), 0 failures.
+
+## Scope
+- Did NOT touch docker-compose (CHOICES_TYPE already wired). No unrelated changes.
+- Files changed: `src/worldcup_bot/porra/elecciones.py`,
+  `src/worldcup_bot/bot/elecciones_image.py`, `src/worldcup_bot/bot/handlers.py`,
+  `tests/test_elecciones.py`.
+
+Back to Pirlo for re-review. Lockout: next reviser (if rejected) can be neither
+Kanté nor Nesta.
+
+
+---
+
+# Decision — FINAL seed-path fix (FINISHED-only dedup invariant)
+
+Author: Nesta (backend, escalation)
+Date: 2026-07-04
+Re: 3rd revision of the FINAL-announcement fix. Fix-forward on `main`.
+Prior rejects: a61757d (Kanté), 615c34e (Cannavaro). Requested by: danielrdon.
+
+## The remaining bug (Pirlo's re-review of 615c34e)
+
+`poll_finished_matches_job` (`src/worldcup_bot/__main__.py`) has TWO code paths
+that could write the real-final dedup set `finished_announced`:
+
+1. the normal per-tick loop (Cannavaro fixed this — provisional path), and
+2. the first-run / startup **SEED** path.
+
+The seed path was still adding EVERY match over-by-wall-clock
+(`kickoff > MATCH_OVER_AGE`, 4 h) into `finished_announced` regardless of status,
+including stale `IN_PLAY` and `PAUSED`. Consequences:
+
+- On a restart while football-data is still stuck `IN_PLAY` for a match that
+  really ended (the production Australia–Egypt failure mode), the seed marks it
+  final-deduped. When the API finally flips to `FINISHED`,
+  `new_ids = finished_ids - announced` excludes it and the official 🏁 Final
+  recap is **permanently suppressed**.
+- `PAUSED` >4h (possibly a resumable suspension) was likewise treated as
+  already-handled, suppressing its future official final.
+
+## The fix — the FINISHED-only dedup invariant
+
+**Invariant:** `finished_announced` (the real-final dedup) is populated ONLY for
+matches whose `status == "FINISHED"`, at EVERY write site.
+
+Audited every write to `finished_announced` in the finished job and guarded them
+all on FINISHED:
+
+- **First-run seed** — CHANGED. Now seeds only genuinely finished matches:
+  `seeded = {m.id for m in all_matches if m.status == "FINISHED"}`.
+  Non-FINISHED over-by-wall-clock matches (stale `IN_PLAY` / `PAUSED`) are NOT
+  seeded — they stay eligible for the later official recap.
+- **Main loop `announced.add(...)`** (the None-match guard and the `finally`
+  block) — already compliant: both are inside `for match_id in new_ids`, and
+  `new_ids ⊆ finished_ids` where `finished_ids = {m.id ... if status ==
+  "FINISHED"}`. Added a comment at the `new_ids` definition documenting this.
+- Not a write site: `poll_kickoff_job` uses a local `announced` bound to the
+  SEPARATE `kickoff_announced` set — untouched.
+
+Non-FINISHED "over" matches are handled by the existing, already-approved normal
+path:
+- stuck `IN_PLAY` >4h → ⏳ provisional notice tracked in the SEPARATE persisted
+  `provisional_announced` set (never consumes `finished_announced`);
+- `PAUSED` → excluded from the provisional path, announced only when it
+  legitimately reaches `FINISHED`.
+
+When the API eventually reports `FINISHED`, the official recap fires with the
+API-confirmed score (self-correcting), clears the provisional marker, and the
+existing VAR-correction watch still handles genuine post-final score changes
+within its window.
+
+## Restart / no-double-announce guarantees
+
+- (over + `IN_PLAY` at startup → later `FINISHED`): NOT seeded; provisional may
+  fire once (deduped via persisted `provisional_announced`); official `FINISHED`
+  fires exactly once.
+- (over + `PAUSED` at startup → later `FINISHED`): NOT seeded; no provisional;
+  official `FINISHED` fires exactly once.
+- (genuinely `FINISHED` at startup): seeded on first run, never re-announced.
+
+## Tests
+
+`tests/test_poll_finished_job.py`:
+- `TestFirstRunSeedWithAge` — rewritten to assert FINISHED-only seeding (stale
+  `IN_PLAY` and `PAUSED` NOT in `finished_announced`; disk persists only the
+  FINISHED id).
+- `TestStaleLaterFlip` — rewritten: an unseeded stale match that flips to
+  `FINISHED` now DOES get the official recap.
+- Replaced `test_stale_inplay_seeded_on_first_run_not_announced` with
+  `test_stale_inplay_not_seeded_on_first_run` plus three restart regressions:
+  IN_PLAY→FINISHED, PAUSED→FINISHED, and genuinely-FINISHED-seeded-not-
+  reannounced — each asserting exactly-once official announcement.
+
+Full suite `.venv\Scripts\python.exe -m pytest -q`: **2231 passed** (~64 s).
+`docker-compose*.yml` untouched.
+
+
+---
+
+# Design Proposal v2: `/elecciones` command
+
+**Date:** 2026-07-04 (rev2 — owner refinements applied)
+**Author:** Pirlo (Tech Lead)
+**Status:** 📋 DRAFT — awaiting owner sign-off
+**Requested by:** danielrdon
+
+---
+
+## Confirmed data model
+
+### Groups (`data/predictions.template.yml` + `porra/predictions.py` + `porra/scoring.py`)
+
+```yaml
+groups:
+  A: ["MEX", "KOR", "CZE"]   # [1st, 2nd, 3rd] — exactly QUALIFY_PER_GROUP=3 entries
+  B: ["CAN", "SUI", "**"]    # "**" = wildcard/no-pick
+  ...                         # groups A–L, mandatory
+```
+
+- Each participant predicts TOP-3 in finishing order per group.
+- Positions 1 and 2 = **direct qualifiers** (always advance, order irrelevant for scoring).
+- Position 3 = **tercero** — advances ONLY if among the 8 best third-placed teams.
+- DIRECT_QUALIFY = 2, QUALIFY_PER_GROUP = 3 (defined in `scoring.py`).
+
+### ⚠️ TERCEROS — CRITICAL FINDING
+
+**There is NO explicit "terceros: [8 TLAs]" field** in the current YAML or loader.
+The 8 qualifying third-placed teams are computed **at scoring time** by `best_qualifying_thirds()`
+in `scoring.py`, from live API standings — NOT predicted by participants.
+
+Each participant therefore has exactly **12 third-place picks** (one per group, the 3rd entry per group).
+Which 8 of those 12 actually qualify is a **tournament outcome**, not a participant pick.
+
+**Consequence for `/elecciones` GRUPOS display:**
+- We CAN show each person's 3rd-place pick per group (it's in the data).
+- We CAN annotate which of those 3rd-place picks are among the 8 qualifying thirds (from live API),
+  once that's known.
+- We CANNOT show a "picked 8 terceros" matrix column — no such data exists.
+- **Open question D.1** below: does the owner want a new `terceros` YAML field, or is the current
+  model (inferred from the 3rd pick per group) sufficient?
+
+### Knockout (`predictions.template.yml`)
+
+```yaml
+knockout:
+  round_of_32:   [16 TLAs]   # 16 teams predicted to ADVANCE from round of 32
+  round_of_16:   [8 TLAs]
+  quarter_finals:[4 TLAs]
+  semi_finals:   [2 TLAs]
+  final:         [1 TLA]
+```
+
+Flat lists. Tie pairings come from the football-data.org API bracket.
+`camps.py:_side_for()` already resolves "which team did this person pick for this tie" — reusable.
+
+---
+
+## A. Phase Keyboard
+
+### Spanish labels
+
+| YAML key | Button label |
+|---|---|
+| `grupos` | Fase de grupos |
+| `round_of_32` | Dieciseisavos |
+| `round_of_16` | Octavos de Final |
+| `quarter_finals` | Cuartos de Final |
+| `semi_finals` | Semifinales |
+| `final` | La Final |
+
+Layout (2 per row, only phases with ≥1 non-`**` pick shown):
+```
+[ Fase de grupos ]  [ Dieciseisavos  ]
+[ Octavos de Final] [Cuartos de Final]
+[  Semifinales    ] [    La Final    ]
+```
+
+Callback scheme: `elecciones|<yaml_key>` → pattern `^elecciones\|`
+
+"Phase has picks" check:
+- grupos: `any(t != "**" for p in participants.values() for v in p["groups"].values() for t in v)`
+- knockout: `any(any(t != "**" for t in p["knockout"].get(key, [])) for p in participants.values())`
+
+---
+
+## B. Display Options
+
+### ── FRAMING ──────────────────────────────────────────────────────────────────
+
+The owner's constraint: **per-user vertical readability, mobile-first**.
+
+| Mode | How per-user vertical is satisfied |
+|---|---|
+| `CHOICES_TYPE=image` | Each **column** = one user. Read a column top-to-bottom to see all their picks. Wide image → pinch-zoom on mobile. |
+| `CHOICES_TYPE=text` | Each **block** = one user. Stacked vertically. Each pick on its own line. Native mobile scroll. |
+
+---
+
+## B1. KNOCKOUT phases — TEXT (primary layout: per-user vertical blocks)
+
+The API bracket gives tie pairings. For each user, one line per tie:
+
+```
+🏆 DIECISEISAVOS — ¿Quién pasa?
+
+👤 DavidR
+  🇨🇦·🇿🇦  →  🇨🇦
+  🇧🇷·🇯🇵  →  🇧🇷
+  🇩🇪·🇵🇾  →  🇩🇪
+  🇳🇱·🇲🇦  →  🇳🇱
+  🇨🇮·🇳🇴  →  ❓
+  🇫🇷·🇸🇪  →  🇫🇷
+  🇲🇽·🇪🇨  →  🇲🇽
+  🇬🇧·🇨🇩  →  🇬🇧
+  🇦🇷·🇨🇭  →  🇦🇷
+  🇺🇸·🇰🇷  →  🇺🇸
+  🇧🇪·🇵🇹  →  🇧🇪
+  🇪🇸·🇨🇵🇻 →  🇪🇸
+  🇮🇷·🇳🇿  →  ❓
+  🇨🇴·🇺🇿🇧 →  🇨🇴
+  🇦🇱🇬·🇯🇴 →  🇦🇱🇬
+  🏴󠁧󠁢󠁳󠁣󠁴󠁿·🇭🇦 →  🏴󠁧󠁢󠁳󠁣󠁴󠁿
+
+👤 Victor
+  🇨🇦·🇿🇦  →  🇨🇦
+  🇧🇷·🇯🇵  →  🇧🇷
+  [... 16 lines ...]
+
+👤 Cris
+  [... 16 lines ...]
+```
+
+**Char-count estimate (flags-only compact format):**
+- Header: ~40 chars
+- Per-user: "👤 Name\n" (~15 chars) + 16 × "  🇽🇽·🇽🇽  →  🇽🇽\n" (~18 chars) = ~303 chars
+- 11 users × 303 = ~3333 chars + header = **~3373 chars → fits in 4096 ✅**
+
+If team names added ("  🇨🇦 CAN · 🇿🇦 RSA → 🇨🇦"): ~30 chars/line → ~3850 chars total. Still fits.
+If full names ("🇨🇦 Canadá · 🇿🇦 Sudáfrica → 🇨🇦"): ~45 chars/line → ~5450 chars → **exceeds 4096**.
+
+**Strategy:** use flags + TLA abbreviations (not full names). Fits in one message for ≤11 participants.
+For 15+ participants (>4096 chars): split into 2 messages (first ~7 users, then remainder).
+
+**Alternative secondary layout — "by tie"** (for reference):
+```
+🇨🇦 CAN vs 🇿🇦 RSA
+  🇨🇦 (9): DavidR, Victor, Cris, Ana, Rafa, Manu, Pau, Javi, Laia
+  🇿🇦 (2): María, Toni
+```
+This answers "who agrees per tie" but loses per-user readability. Secondary option only.
+
+---
+
+## B2. KNOCKOUT phases — IMAGE (matrix, exact reference replication)
+
+```
+╔══════════════════╦══════╦══════╦══════╦══════╦══════╦══════╦══════╦══════╦══════╦══════╦══════╦════════╗
+║  DIECISEISAVOS   ║  👤   ║  👤   ║  👤   ║  👤   ║  👤   ║  👤   ║  👤   ║  👤   ║  👤   ║  👤   ║  👤   ║ RESULT ║
+║                  ║ Dani ║ Vic  ║ Cris ║ Ana  ║ Rafa ║ Manu ║ Pau  ║ Javi ║ Laia ║ Mar  ║ Toni ║        ║
+╠══════════════════╬══════╬══════╬══════╬══════╬══════╬══════╬══════╬══════╬══════╬══════╬══════╬════════╣
+║ 🇨🇦 CAN vs 🇿🇦 RSA ║  🇨🇦   ║  🇨🇦   ║  🇨🇦   ║  🇨🇦   ║  🇨🇦   ║  🇨🇦   ║  🇨🇦   ║  🇨🇦   ║  🇨🇦   ║  🇿🇦   ║  🇿🇦   ║   🇨🇦   ║
+║ 🇧🇷 BRA vs 🇯🇵 JPN ║  🇧🇷   ║  🇧🇷   ║  🇧🇷   ║  🇧🇷   ║  🇧🇷   ║  🇧🇷   ║  🇧🇷   ║  🇧🇷   ║  🇧🇷   ║  🇧🇷   ║  🇯🇵   ║   🇧🇷   ║
+║ 🇩🇪 GER vs 🇵🇾 PAR ║  🇩🇪   ║  🇩🇪   ║  🇩🇪   ║  🇩🇪   ║  🇩🇪   ║  🇩🇪   ║  🇩🇪   ║  🇩🇪   ║  ❓   ║  🇵🇾   ║  🇩🇪   ║   🇩🇪   ║
+║  ...             ║      ║      ║      ║      ║      ║      ║      ║      ║      ║      ║      ║        ║
+╚══════════════════╩══════╩══════╩══════╩══════╩══════╩══════╩══════╩══════╩══════╩══════╩══════╩════════╝
+```
+
+Header row: circular profile photos (from `{photo_base_url}/{username}.png`) or initials placeholder.
+Alternating white/light-grey row bands. Dark navy header. Flag circles in cells.
+Result column initially blank, fills as matches are played.
+
+Canvas for 16 ties × 11 people ≈ 1250×1050px. 12 participant columns → scale to ~1400px.
+
+**Read vertically on mobile:** pinch-zoom → scroll down the user's column = all their choices.
+
+---
+
+## B3. GRUPOS phase — TEXT (per-user vertical blocks)
+
+Since there is NO explicit terceros selection in the current data model, "3rd pick" = the 3rd
+entry in each group (the team predicted to finish 3rd). It may qualify among the 8 best thirds.
+
+**Compact format (flags + single-letter group key):**
+
+```
+📋 FASE DE GRUPOS — Predicciones
+
+👤 DavidR
+  A: 🇲🇽 🇰🇷 | 3º🇨🇿
+  B: 🇨🇭 🇨🇦 | 3º🇶🇦
+  C: 🏴󠁧󠁢󠁳󠁣󠁴󠁿 🇲🇦 | 3º🇧🇷
+  D: 🇺🇸 🇦🇺 | 3º🇹🇷
+  E: 🇩🇪 🇨🇮 | 3º🇪🇨
+  F: 🇸🇪 🇯🇵 | 3º🇳🇱
+  G: 🇪🇬 🇧🇪 | 3º🇮🇷
+  H: 🇨🇻 🇸🇦 | 3º🇪🇸
+  I: 🇫🇷 🇮🇶 | 3º🇳🇴
+  J: 🇩🇿 🇦🇷 | 3º🇯🇴
+  K: 🇨🇩 🇨🇴 | 3º🇵🇹
+  L: 🇬🇧 🇬🇭 | 3º🇭🇷
+
+👤 Victor
+  A: 🇲🇽 🇰🇷 | 3º🇨🇿
+  B: 🇨🇦 🇨🇭 | 3º🇧🇮
+  [... 12 lines ...]
+
+[... remaining 9 users ...]
+```
+
+Semantics: `A: 🇲🇽 🇰🇷` = predicted 1st and 2nd (direct qualifiers); `3º🇨🇿` = predicted 3rd
+(potential tercero — advances only if among 8 best thirds).
+
+**Char-count estimate (compact flags format):**
+- Header: ~45 chars
+- Per-user: ~15 chars header + 12 × ~20 chars = ~255 chars
+- 11 users × 255 = ~2805 chars + header = **~2850 chars → fits in 4096 ✅**
+
+If terceros qualifier status annotated live (e.g. `3º🇨🇿✅` / `3º🇨🇿❌`), add ~3 chars per group line: still fits.
+
+**⚠️ NOTE:** This layout shows each person's TOP-2 QUALIFIERS and their 3RD-PLACE PICK per group.
+It does NOT show the 4th team (the one they implicitly eliminated). It does NOT show a
+"here are my 8 chosen terceros" row because no such data exists.
+If the owner wants an explicit `terceros: [8 TLAs]` field, that is a data model extension — see D.1.
+
+---
+
+## B4. GRUPOS phase — IMAGE (matrix with highlight/fade)
+
+Based on owner's reference: each cell shows all 4 group teams in 2×2 arrangement, with picks
+highlighted and non-picks faded. Requires API for actual group compositions (4 teams per group).
+
+```
+╔══════════════╦════════════════╦════════════════╦════════════════╦══════╗
+║  GRUPOS      ║     DavidR     ║     Victor     ║      Cris      ║ ...  ║
+║              ║   (👤 photo)   ║   (👤 photo)   ║   (👤 photo)   ║      ║
+╠══════════════╬════════════════╬════════════════╬════════════════╬══════╣
+║ Grupo A      ║ 🇲🇽 🇰🇷 (bright) ║ 🇲🇽 🇰🇷 (bright) ║ 🇰🇷 🇲🇽 (bright) ║  …   ║
+║ 🇲🇽🇰🇷🇨🇿🇿🇦      ║ 🇨🇿 (dim)       ║ 🇨🇿 (dim)       ║ 🇿🇦 (bright/3º) ║      ║
+║  2×2 flags   ║ 🇿🇦 (faded)     ║ 🇿🇦 (faded)     ║ 🇨🇿 (faded)     ║      ║
+╠══════════════╬════════════════╬════════════════╬════════════════╬══════╣
+║ Grupo B      ║  [2×2 flags]   ║  [2×2 flags]   ║  [2×2 flags]   ║  …   ║
+║ 🇨🇭🇨🇦🇶🇦🇧🇮      ║                ║                ║                ║      ║
+╠══════════════╬════════════════╬════════════════╬════════════════╬══════╣
+║  ... (×12)   ║                ║                ║                ║      ║
+╚══════════════╩════════════════╩════════════════╩════════════════╩══════╝
+```
+
+Cell rendering per group:
+- Draw the 4 group teams as a 2×2 flag grid (fixed group order from API).
+- Picks 1 and 2 = full brightness (direct qualifiers).
+- Pick 3 = intermediate brightness (tercero, may qualify).
+- Non-picked team = greyed/faded (participant predicted elimination).
+
+**Feasibility:**
+- API call needed: group compositions (4 teams per group) from standings.
+- PIL: existing `_circular_crop` + `_fetch_tile` from `podium_image.py` reusable.
+- Flag rendering: `flag` library already in use; fading = draw flag image at reduced alpha.
+- Canvas: 12 rows × ~4 cells tall + 11 participant columns. With cell ≈ 80×80px: ~1300×1080px.
+- TERCEROS row (optional): if no separate YAML field exists, could show a strip below the grid
+  where each person's 12 third-place picks are shown, with live-qualifier annotation (green/grey
+  circles added as the tournament progresses). This is purely derived from the 3rd picks already
+  stored — no new YAML field needed.
+
+**Pros:** Visually rich; highlight/fade effect is instantly readable; no width limits.
+**Cons:** Requires API for group compositions; cell layout (2×2 + alpha) is more complex
+to implement than the knockout matrix (single flag per cell); PIL render ~300–600ms.
+
+---
+
+## C. Recommendation
+
+| Mode | Knockout layout | Groups layout |
+|---|---|---|
+| `CHOICES_TYPE=text` | Per-user vertical blocks, flags+TLA, one line per tie | Per-user vertical blocks, compact 12-line format (flag pair + 3rd) |
+| `CHOICES_TYPE=image` | PIL matrix — exact reference replication | PIL 2×2 cell matrix with highlight/fade |
+
+**CHOICES_TYPE env var:**
+- Values: `text` | `image`
+- Default: `text`
+- `Settings.choices_type: str = "text"`, `os.getenv("CHOICES_TYPE", "text")`
+
+**Message-splitting strategy for text mode:**
+- ≤11 participants: both knockout and groups fit in ONE message (compact format).
+- 12–20 participants: send 2 messages (split at midpoint by user count).
+- 20+ participants: strongly recommend image mode; text becomes unwieldy.
+- Logic: after rendering, if `len(text) > 3800` (buffer below 4096), split at the last `\n\n👤` boundary.
+
+**Why not TABLE/monospace?** Emoji width in monospace is platform-dependent; not recommended.
+
+**Groups vs knockout text length:** groups compact is shorter (~2850 chars) than knockout
+compact (~3373 chars) because groups has fewer items per user (12 groups vs 16 ties).
+
+---
+
+## D. Open Questions for Owner
+
+1. **TERCEROS FIELD (data model extension):** The current YAML has no explicit "select 8 of 12 thirds" field — participants only predict 3rd-place per group (implicitly 12 potential terceros). Is the existing model sufficient, or do you want to add a `terceros: [8 TLAs]` field to predictions.yml? This would require updating the loader, adding a new YAML key, and potentially new scoring. **This is the biggest design decision — it affects both display AND data model.**
+
+2. **API availability for `/elecciones`:** "By-tie" text and the knockout image both require a live API call to get the bracket (which teams play which). Is this acceptable? Should there be a fast-path fallback showing flat per-person pick lists when the API is unavailable?
+
+3. **RESULTS column in image:** Should it always be present (blank cells until matches finish), or only appear after at least one result is available? What if a tie is still scheduled — show ⏳ or blank?
+
+4. **Sort order of participant columns** in image (and name order in text): YAML insertion order, alphabetical by display_name, or by current ranking?
+
+5. **"❓ / no pick" in knockout:** Can a participant have NEITHER team of a tie in their advance list? (E.g., if a wildcard was used or their list has fewer than 16 teams.) Should it show ❓ or be omitted?
+
+6. **Groups image — terceros row:** Even without a new YAML field, a "terceros" strip could be shown below the groups matrix: all 12 third-place picks per person, annotated green (qualifying third per live API) or grey (not qualifying). Worth implementing?
+
+7. **Profile photos:** Are photos at `{photo_base_url}/{username}.png` confirmed for ALL current participants? Initials placeholder is the automatic fallback — acceptable?
+
+8. **Groups image — ordering of 4 teams in the 2×2:** Fixed as per API standings order (1st→4th), or a fixed canonical order (alphabetical, or by TLA)? This affects whether the "faded" team is always the same position in the grid.
+
+9. **Groups ONLY in image, knockout in text?** Given that the groups image (highlight/fade) is significantly more complex than the knockout image, would it be acceptable to implement knockout image first, and leave groups image to a later sprint?
+
+---
+
+## E. Implementation Plan
+
+### New files
+
+1. **`src/worldcup_bot/porra/elecciones.py`** — Pure data helpers (no I/O):
+   - `active_phases(predictions: dict) → list[str]`
+   - `knockout_picks_by_person(predictions, yaml_key) → dict[str, list[str]]`
+   - `groups_picks_by_person(predictions) → dict[str, dict[str, list[str]]]`
+   - `build_knockout_text(ties, participants, picks_by_person, settings) → str`
+   - `build_groups_text(participants, picks_by_person) → str`
+
+2. **`src/worldcup_bot/bot/_image_utils.py`** — Shared PIL primitives:
+   - Extract `_circular_crop`, `_fetch_tile`, `_placeholder_tile`, `_font` from `podium_image.py`
+   - Both `podium_image.py` and the new matrix renderer import from here
+
+3. **`src/worldcup_bot/bot/elecciones_image.py`** — PIL matrix renderers:
+   - `render_knockout_matrix(ties, participants, picks, results, settings) → io.BytesIO | None`
+   - `render_groups_matrix(participants, group_picks, group_compositions, settings) → io.BytesIO | None`
+
+### Modified files
+
+4. **`src/worldcup_bot/config.py`**:
+   - Add `choices_type: str = "text"` to `Settings`
+   - Add `choices_type=os.getenv("CHOICES_TYPE", "text")` to `load_settings()`
+
+5. **`src/worldcup_bot/bot/handlers.py`**:
+   - Add `cmd_elecciones(update, context)` — loads predictions, calls `active_phases()`, builds InlineKeyboardMarkup with phase buttons, sends with keyboard
+   - Add `cmd_elecciones_callback(update, context)` — edits message to remove keyboard, dispatches to text or image path per `settings.choices_type`
+
+6. **`src/worldcup_bot/__main__.py`**:
+   - `CommandHandler("elecciones", cmd_elecciones)`
+   - `CallbackQueryHandler(cmd_elecciones_callback, pattern=r"^elecciones\|")`
+   - Add `/elecciones` to `cmd_start` help text
+
+7. **`docker-compose.yml`** *(at implementation time only)*:
+   - `CHOICES_TYPE: "${CHOICES_TYPE:-text}"`
+
+### Tests (`tests/porra/test_elecciones.py`)
+
+- `test_active_phases_template` — only grupos shows when all knockout = []
+- `test_active_phases_full` — all 6 phases show with populated predictions
+- `test_active_phases_wildcard_only` — knockout with only `**` entries does NOT show
+- `test_build_knockout_text_fits_4096` — char limit check for 11 users × 16 ties
+- `test_build_groups_text_fits_4096` — char limit check for 11 users × 12 groups
+
+### Suggested implementation order
+
+```
+1. elecciones.py — active_phases + text builders (pure, testable, zero risk)
+2. tests/porra/test_elecciones.py
+3. config.py — add choices_type field
+4. handlers.py — cmd_elecciones + cmd_elecciones_callback (text branch only)
+5. __main__.py — register handlers + start help text
+   ── MVP text mode shipped ──
+6. _image_utils.py — extract PIL primitives from podium_image.py
+7. elecciones_image.py — render_knockout_matrix first (simpler)
+8. handlers.py — image branch for knockout
+9. elecciones_image.py — render_groups_matrix (more complex, groups highlight/fade)
+10. docker-compose.yml update
+```
+
+---
+
+*Pirlo — Tech Lead — 2026-07-04 (v2)*
+
+
+---
+
+# Pirlo Third Review — commit 1b4045b
+
+Reviewer: Pirlo (Lead / Tech Lead)  
+Scope: correctness only  
+Commit: 1b4045b  
+Result: APPROVE
+
+## Summary
+
+Nesta fixed the remaining seed-path defect. `poll_finished_matches_job` now preserves the invariant that `finished_announced` is only consumed for `status == "FINISHED"` matches.
+
+Focused tests run:
+
+```text
+python -m pytest tests\test_poll_finished_job.py::TestFirstRunSeedWithAge tests\test_poll_finished_job.py::TestStaleLaterFlip tests\test_poll_finished_job.py::TestProvisionalLateFinal -q
+15 passed
+```
+
+## Verification
+
+1. **Startup seed fixed:** first-run seed is now:
+
+   ```python
+   seeded = {m.id for m in all_matches if m.status == "FINISHED"}
+   ```
+
+   Stale `IN_PLAY` and `PAUSED` matches older than 4h are no longer written to `finished_announced`, so they remain eligible for the later official recap.
+
+2. **All writes to `finished_announced` audited:**
+   - Seed path: FINISHED-only.
+   - Main loop: `new_ids = finished_ids - announced`, and `finished_ids` is FINISHED-only.
+   - `match is None` guard and `finally` writes are inside `for match_id in new_ids`, so they inherit the FINISHED-only guard.
+   - Provisional path writes only `provisional_announced`, never `finished_announced`.
+
+3. **PAUSED handled:** `PAUSED` is not seeded and is not included in `stale_inplay_ids`; it only gets an official recap after it legitimately becomes `FINISHED`.
+
+4. **Restart / exactly-once tests:** tests now cover stale IN_PLAY→FINISHED, stale PAUSED→FINISHED, and genuinely FINISHED at startup. They assert no startup final-dedup consumption for non-FINISHED matches, official recap exactly once after FINISHED, and no reannounce for truly finished-at-startup matches.
+
+## Blocking issues
+
+None.
+
+## Non-blocking follow-ups
+
+1. If either rejected revision ever ran in production, inspect `finished_announced.json` for stale non-FINISHED match ids and remove any polluted entries manually. Not a code blocker.
+
+## Verdict
+
+APPROVE. Ship this revision.
+
+
+---
+
+# Pirlo Re-Review — commit 615c34e
+
+Reviewer: Pirlo (Lead / Tech Lead)  
+Scope: correctness only  
+Commit: 615c34e  
+Result: REJECT
+
+## Summary
+
+Cannavaro fixed the normal running path: stale `IN_PLAY` now sends a clearly labelled `⏳ Resultado provisional`, uses separate `provisional_announced`, does not consume `finished_announced`, and `PAUSED` is excluded from that provisional path. Keyboard retry bounds and text-edit `keyboard_attached` handling are also addressed.
+
+However, the restart / first-run seed path still has the original correctness bug: any match older than `MATCH_OVER_AGE` and not `FINISHED` is added to `finished_announced` without a send. That includes stale `IN_PLAY` and `PAUSED`. Once seeded there, the later official `FINISHED` recap is suppressed.
+
+Focused tests run:
+
+```text
+python -m pytest tests\test_poll_finished_job.py::TestProvisionalLateFinal tests\test_poll_finished_job.py::TestFirstRunSeedWithAge tests\test_poll_goal_clips_job.py::TestKeyboardRetryGiveUp -q
+13 passed, 1 warning
+```
+
+The tests pass because they still encode the rejected startup behavior (`test_stale_inplay_seeded_on_first_run_not_announced`, plus older first-run seed tests).
+
+## Blocking issues
+
+1. `src/worldcup_bot/__main__.py` — `poll_finished_matches_job` first-run seed still suppresses the later official final for stale `IN_PLAY`.
+
+   Lines 1689-1710 seed every non-FINISHED match whose kickoff is older than 4h into `finished_announced`. On a container restart while football-data is still stuck `IN_PLAY` (the exact production failure mode), the match is marked final-deduped without a provisional or official recap. When the API later flips to `FINISHED`, `new_ids = finished_ids - announced` excludes it, so the official `🏁 Final` never fires. This violates the core requirement that provisional/late handling must not consume real-final dedup state.
+
+   Fix: first-run seed must not put stale `IN_PLAY` into `finished_announced`. Route it through the provisional mechanism (or leave it unannounced until the normal provisional pass) and persist only `provisional_announced`; keep `finished_announced` for actual `FINISHED` official recaps / true historical seeding only.
+
+2. `src/worldcup_bot/__main__.py` — first-run seed still treats `PAUSED` >4h as already-final/handled.
+
+   The revised normal path correctly excludes `PAUSED`, but the first-run seed still adds any old non-FINISHED status to `finished_announced`, including `PAUSED` and even other delayed statuses. A resumable suspension that crosses a restart can later finish and be suppressed.
+
+   Fix: do not seed `PAUSED` (or arbitrary non-FINISHED statuses) into `finished_announced` based only on kickoff age. Only official `FINISHED` should consume final dedup; ambiguous live/delayed states need separate provisional/ignored tracking that preserves the later official recap.
+
+## Non-blocking follow-ups
+
+1. Addressed: keyboard retries are bounded by `_MAX_KEYBOARD_ATTEMPTS = 5`, with persistence after failed retries.
+2. Addressed: `_backfill_scorer_in_clip_store` and `_mark_goal_annulled` set `keyboard_attached=True` after successful text edits that pass `reply_markup` for ready clips.
+3. Test follow-up: update/remove tests that still assert stale `IN_PLAY` / `PAUSED` first-run seeding into `finished_announced`; add a restart regression where `provisional_announced` is loaded, `finished_announced` is empty, API is still `IN_PLAY` >4h on first tick, then later `FINISHED` must send the official recap.
+
+## Verdict
+
+REJECT. The normal-path provisional design is right, but restart safety is still broken. The next revision must go to a different agent than Kanté or Cannavaro.
+
+
+---
+
+# Pirlo re-review — /elecciones increment 2 revision (`5df06de`)
+
+Reviewed commit `5df06de`, Nesta's rationale, current `handlers.py`, `porra/elecciones.py`, `elecciones_image.py`, and `tests/test_elecciones.py`. Ran focused suite: `tests/test_elecciones.py` → **115 passed**.
+
+## Verdict
+
+**APPROVE-WITH-FOLLOWUPS**
+
+## Blocking issues
+
+None.
+
+## Verification
+
+1. **Cache staleness blocker fixed.** `_elecciones_results_version()` now hashes stage pairings from `get_all_matches()` plus finished winners, so no-ties → ties-scheduled changes the cache key before any match finishes. The no-ties artifact and API-error artifacts are marked `cacheable: False`, and the callback only stores cacheable artifacts. The full callback regression covers no-ties first tap followed by scheduled ties.
+
+2. **4096 split blocker fixed.** `_split_messages()` reserves header/separator/prefix budget before pre-splitting blocks, and `_split_block_at_lines()` hard-splits a single overlong line. The old near-limit overflow case now emits all parts ≤4096. New tests cover many users, an enormous single line, and header+near-limit blocks.
+
+3. **Flags fixed.** `_TWEMOJI_BASE` uses the working GitHub-hosted jsDelivr path. Standard 2-letter ISO flags resolve normally; ENG/SCO/WAL use the GB tag-sequence PNGs; NIR/GBNIR returns `None` and falls back to TLA text. Tests cover the URL mapping and mocked tile fetch/fallback.
+
+4. **Graceful fallbacks fixed.** Groups image mode now falls back to text, not a blank image, when standings fetch fails, and that API-failure fallback is non-cacheable. Placeholder delete failure now neutralises the old hourglass and still sends the result.
+
+## Non-blocking follow-ups
+
+1. If `render_groups_matrix()` or `render_knockout_matrix()` returns `None`, the image-mode text fallback is still cacheable by default. That is acceptable for this revision because the concrete standings-API fallback is fixed and flag fetch failures no longer fail the whole render, but consider marking render-failure fallbacks non-cacheable too.
+2. The cache version intentionally hashes pair identity/winner, not `utc_date` display order. If football-data ever reorders a stage without changing teams/winners, cached ordering could persist until another version input changes.
+
+
+---
+
+# Pirlo Review — commit a61757d
+
+Reviewer: Pirlo (Lead / Tech Lead)  
+Scope: correctness only  
+Commit: a61757d  
+Result: REJECT
+
+## Summary
+
+Bug #1 is directionally correct: happy path now sets `keyboard_attached=True` only after `edit_message_reply_markup` succeeds, and ready/unattached entries bypass the old early return and retry. Relevant tests pass.
+
+Bug #2 is not safe enough to ship as-is. The wall-clock fallback sends a real `Final` card from the same football-data `Match` object that is still `IN_PLAY`/`PAUSED`. If that object's score is stale or null, the bot announces and persists a wrong final scoreline.
+
+Relevant tests run:
+
+```text
+python -m pytest tests\test_poll_goal_clips_job.py tests\test_poll_finished_job.py -q
+84 passed, 3 warnings
+```
+
+## Findings
+
+### Blocking 1 — stale wall-clock fallback can announce the wrong final score
+
+Area: `src/worldcup_bot/__main__.py`, `poll_finished_matches_job` (`stale_live_ids` + `format_final_result(match)`).
+
+The fallback includes `IN_PLAY`/`PAUSED` matches older than 4h in `new_ids`, then formats the final using `match.home_score`, `match.away_score`, and `match.winner` from that same still-live football-data object.
+
+There is no independent score confirmation, no check that the score has settled, and no different message type for "API status stuck but score provisional". `finished_announced` is then persisted, so when football-data later flips to `FINISHED` the real final recap is suppressed. `finished_scores` is not sufficient mitigation: its correction window is 30 minutes, it labels any later difference as VAR, and it does not fix the original Final card.
+
+Required fix: do not send/persist a real `Final` recap from an unfinalized `IN_PLAY`/`PAUSED` football-data score unless the score is confirmed by a reliable independent/settled source. Either defer the final recap until `FINISHED`, or add a separate provisional/stuck-status path that does not consume `finished_announced`, or fetch/validate a settled score from another source before announcing.
+
+### Blocking 2 — `PAUSED` after 4h is treated as final without distinguishing delays/suspensions
+
+Area: `src/worldcup_bot/__main__.py`, `stale_live_ids` includes `m.status in ("IN_PLAY", "PAUSED")`.
+
+A 4h cutoff is acceptable as a goal-spam circuit breaker, but a Final announcement is higher consequence. A weather/security/medical delay or suspended-and-resumed match can remain `PAUSED` beyond 4h and later continue. This code would announce it as final and permanently dedup it.
+
+Required fix: exclude ambiguous delayed/suspended states from true Final recap, or route them through the same confirmed-score/provisional mechanism above.
+
+## Non-blocking follow-ups
+
+1. `poll_goal_clips_job`: keyboard retry is unbounded every tick until 7-day pruning. Permanent Telegram errors (deleted message/chat) will log and call the API thousands of times per entry. Add retry count/backoff/give-up or classify permanent failures.
+2. `keyboard_attached` is not updated when `_backfill_scorer_in_clip_store` / `_mark_goal_annulled` successfully attach/preserve the keyboard via `edit_message_text(reply_markup=...)`. That can cause redundant retry edits. Set it true on those confirmed successes.
+3. Add tests for the rejected path: stale `IN_PLAY` with a behind/null score, later `FINISHED` with a different score, and restart persistence behavior.
+
+## Verdict
+
+REJECT. Bug #1 can stay, but Bug #2 needs revision by a different backend agent than Kanté before this passes the reviewer gate.
+
+
+---
+
+# Pirlo Review — /elecciones commit 38e00b2
+
+Reviewer: Pirlo (Lead / Tech Lead)  
+Scope: correctness only  
+Commit: 38e00b2  
+Result: APPROVE-WITH-FOLLOWUPS
+
+## Summary
+
+The implementation matches the core `/elecciones` design: phase filtering is correct, callback flow is safe, text renderers are per-user vertical, image mode uses the shared football client path through handlers, in-memory artifact cache is bounded, `CHOICES_TYPE` is wired, and API failures degrade to user-facing text instead of crashing.
+
+Focused tests run:
+
+```text
+python -m pytest tests\test_elecciones.py -q
+79 passed
+```
+
+Current `data/predictions.yml` active phases evaluated to:
+
+```text
+['grupos', 'round_of_32', 'round_of_16']
+```
+
+So `quarter_finals`, `semi_finals`, and `final` are absent as required; `grupos` and `round_of_32` are present.
+
+## Verification
+
+1. **Phase keyboard filtering:** `active_phases()` only includes phases with at least one non-`**` pick. Tests cover wildcard-only and empty knockout lists.
+2. **Callback:** `elecciones|<key>` parsing does not crash for malformed/unknown keys; known taps remove the inline keyboard before serving. Unknown keys degrade to “cuadro no disponible” rather than an exception.
+3. **Text renderers:** knockout and groups render vertical per-user blocks. Knockout no-pick/`**` becomes `❓`; groups show top two plus `3º...`, including `3º**` for wildcard third picks. Splitting is at user boundaries and normal generated messages stay under Telegram limits.
+4. **Image:** knockout image renders participant photo headers with podium helpers / initials fallback, uses shared client in the handler path, and falls back to text on image-send/render failure.
+5. **Cache:** `bot_data['elecciones_cache']` key is `(yaml_key, mtime, results_hash)`, same-phase stale entries are evicted, and hard cap is 6. Results hash changes when `StageResult` winner/tie data changes. No long-lived background regeneration task exists.
+6. **CHOICES_TYPE:** default `text`; present in `docker-compose.yml`, `docker-compose.local.yml`, and `.env.example`. Groups in image mode intentionally fall back to text.
+7. **Robustness:** API failures during knockout generation return user-facing error text; no unhandled exception path found in the callback.
+
+## Blocking issues
+
+None.
+
+## Non-blocking follow-ups
+
+1. `elecciones_image.py` writes flag tiles under `{state_dir}/elecciones_tiles` without an explicit eviction bound. The practical footprint is small/finite for tournament flags, but add a simple max-file or age prune to match the stated bounded-cache requirement exactly.
+2. Image rendering uses `await asyncio.to_thread(...)`. This is awaited and not a persistent background job, but it is not literally “no background thread”; document this or render inline if the owner wants strict no-thread behavior.
+3. `_split_messages()` cannot split a single oversized user block; add a defensive line-level split if participant names/data can ever push one block over 4096.
+
+## Verdict
+
+APPROVE-WITH-FOLLOWUPS. Ship is acceptable; follow-ups are bounded-risk hardening, not blockers.
+
+
+---
+
+# Pirlo review — /elecciones increment 2 (`30919a7`)
+
+Reviewed diff `38e00b2..30919a7`, current `elecciones_image.py`, `porra/elecciones.py`, handler flow, and Kanté notes. Focused `tests/test_elecciones.py` is green (`101 passed`). Existing revive quiet-hour failures are unrelated.
+
+## Verdict
+
+**REJECT** — the image/hourglass work is mostly sound, but two correctness defects remain.
+
+## Blocking issues
+
+1. **Knockout artifact cache can serve stale bracket output.**
+   - Area: `src/worldcup_bot/bot/handlers.py` `_elecciones_results_version()` / cache key.
+   - The cache key hashes only `client.get_stage_results(api_key)`, which returns FINISHED matches only. If a user opens a knockout phase before its bracket/ties exist, the handler caches “cuadro no disponible” under the empty-results hash. Later, when scheduled ties become available but no match has finished yet, the hash is unchanged, so the bot keeps serving the stale unavailable artifact. Same problem for tie/team changes before the first finished result.
+   - Required fix: include the relevant stage tie list / bracket identity from `get_all_matches()` in the cache version, or avoid caching the “not available yet” artifact. Add a regression test: first callback no ties caches unavailable, second callback with scheduled ties but no finished results must regenerate and serve the bracket.
+
+2. **Defensive text split does not guarantee Telegram-safe message length.**
+   - Area: `src/worldcup_bot/porra/elecciones.py` `_split_block_at_lines()` / `_split_messages()`.
+   - The pre-split uses `_HARD_LIMIT` for block chunks, but `_split_messages()` then adds the header/part prefix/separators. A valid block chunk near 4096 chars produces a final message >4096 (local probe produced length 4098). A single line >4096 is also emitted unsplit. This violates the stated requirement that no message exceeds Telegram’s 4096 limit.
+   - Required fix: split against available payload after header/part prefix overhead, or final-validate and further split at line/character boundaries. Add tests asserting every emitted message is `<= 4096`.
+
+## Non-blocking follow-ups
+
+1. **Groups image API failure is misleading.** If `get_standings()` fails, current image mode renders and sends an empty groups grid instead of falling back to text. Prefer text fallback or an explicit error so users do not receive a blank-looking prediction image.
+2. **Placeholder delete failure leaves stale hourglass.** `_serve_after_placeholder()` logs delete failure and still sends the result. Acceptable as a send-first fallback, but consider editing the placeholder to a neutral/error state when delete fails.
+
+Required revision: assign to a different agent than Kanté.
