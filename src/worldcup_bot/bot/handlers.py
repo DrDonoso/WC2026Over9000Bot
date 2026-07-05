@@ -1420,10 +1420,17 @@ _MAX_ELECCIONES_CACHE = 6
 
 
 def _elecciones_results_version(context: ContextTypes.DEFAULT_TYPE, yaml_key: str) -> str:
-    """Return a short hash of current API results for a knockout phase (cache key).
+    """Return a short hash identifying the current bracket state for a phase.
 
-    Returns ``"none"`` for grupos (no API dependency) or on any error so the
-    cache still works — it simply won't be invalidated by results changes in
+    The hash covers the *scheduled tie pairings* for the phase (from
+    ``get_all_matches()``) **and** their finished winners.  Including the
+    scheduled pairings — not just finished results — means the cache invalidates
+    as soon as a phase's ties are first scheduled or change, so a "cuadro no
+    disponible" artifact rendered before any ties existed is never re-served once
+    the bracket appears.
+
+    Returns ``"none"`` for grupos (no knockout bracket) or on any error so the
+    cache still works — it simply won't be invalidated by bracket changes in
     that error case, only by predictions mtime.
     """
     if yaml_key == "grupos":
@@ -1433,11 +1440,18 @@ def _elecciones_results_version(context: ContextTypes.DEFAULT_TYPE, yaml_key: st
         return "none"
     try:
         client = _football_client(context)
-        results = client.get_stage_results(api_key)
-        serialized = "|".join(
-            f"{r.home_tla}:{r.away_tla}:{r.winner_tla or ''}"
-            for r in sorted(results, key=lambda r: (r.home_tla, r.away_tla))
-        )
+        entries: list[str] = []
+        for m in client.get_all_matches():
+            if m.stage != api_key or not m.home_tla or not m.away_tla:
+                continue
+            winner = ""
+            if m.status == "FINISHED":
+                if m.winner == "HOME_TEAM":
+                    winner = m.home_tla
+                elif m.winner == "AWAY_TEAM":
+                    winner = m.away_tla
+            entries.append(f"{m.home_tla}:{m.away_tla}:{winner}")
+        serialized = "|".join(sorted(entries))
         return hashlib.md5(serialized.encode()).hexdigest()[:12]
     except Exception:
         return "none"
@@ -1488,7 +1502,11 @@ async def _generate_elecciones_artifact(
                     "_generate_elecciones_artifact: could not fetch group compositions: %s",
                     exc,
                 )
-                group_compositions = {}
+                # API failure — do NOT render a blank/empty groups image. Fall
+                # back to the text renderer, and mark it non-cacheable so a real
+                # image is regenerated once the API recovers.
+                messages = build_groups_text(participants, team_flag)
+                return {"messages": messages, "cacheable": False}
 
             # PIL render is CPU-bound — offloaded via asyncio.to_thread (short-lived,
             # single invocation, no background loop or persistent thread) so the
@@ -1511,10 +1529,10 @@ async def _generate_elecciones_artifact(
         client = _football_client(context)
         all_matches = client.get_all_matches()
     except FootballAPIError as exc:
-        return {"messages": [_api_error_msg(exc)]}
+        return {"messages": [_api_error_msg(exc)], "cacheable": False}
     except Exception as exc:
         log.exception("_generate_elecciones_artifact: unexpected API error: %s", exc)
-        return {"messages": ["❌ Error de API. Intenta más tarde."]}
+        return {"messages": ["❌ Error de API. Intenta más tarde."], "cacheable": False}
 
     ties = [
         (m.home_tla, m.away_tla)
@@ -1523,10 +1541,13 @@ async def _generate_elecciones_artifact(
     ]
 
     if not ties:
+        # No bracket yet — transient state, must NOT be cached, otherwise it
+        # would keep being served after the ties get scheduled.
         return {
             "messages": [
                 f"⏳ El cuadro de {phase_label(yaml_key)} no está disponible todavía."
-            ]
+            ],
+            "cacheable": False,
         }
 
     if choices_type == "image":
@@ -1584,6 +1605,18 @@ async def _serve_after_placeholder(
         await context.bot.delete_message(chat_id=chat_id, message_id=placeholder_id)
     except Exception as exc:
         log.warning("_serve_after_placeholder: delete placeholder failed: %s", exc)
+        # The placeholder could not be deleted (too old / already gone). Best-effort
+        # neutralise it so a stale "⏳ Generando…" hourglass isn't left dangling.
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=placeholder_id,
+                text="📊 Predicciones 👇",
+            )
+        except Exception as exc2:
+            log.warning(
+                "_serve_after_placeholder: placeholder neutralise edit failed: %s", exc2
+            )
 
     if "data" in artifact:
         try:
@@ -1694,7 +1727,7 @@ async def cmd_elecciones_callback(
         except Exception as exc:
             log.exception("cmd_elecciones_callback: generation error: %s", exc)
             artifact = None
-        if artifact is not None:
+        if artifact is not None and artifact.get("cacheable", True):
             _elecciones_cache_put(cache, cache_key, artifact)
 
     # Step 2: Delete hourglass → send result (or edit hourglass to error).

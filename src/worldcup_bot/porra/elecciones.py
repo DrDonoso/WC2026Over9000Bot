@@ -34,7 +34,11 @@ _KNOCKOUT_HEADERS: dict[str, str] = {
     "final":          "🏆 LA FINAL — ¿Quién gana?",
 }
 
-# Split threshold — buffer below Telegram's 4096-char hard limit.
+# Telegram's absolute per-message hard limit.
+_TELEGRAM_LIMIT = 4096
+# Reserve for the "(i/n)\n" part prefix added when a payload spans >1 message.
+_PREFIX_RESERVE = 16
+# Split threshold — buffer below the hard limit for nicer, earlier splits.
 _SPLIT_THRESHOLD = 3800
 # Hard limit for a single message — used by the defensive line-level split.
 _HARD_LIMIT = 4090
@@ -114,28 +118,44 @@ def build_group_compositions(standings: list) -> dict[str, list[str]]:
 
 
 def _split_block_at_lines(block: str, max_len: int) -> list[str]:
-    """Split a single user block into ≤max_len pieces at line boundaries.
+    """Split a single user block into ≤max_len pieces.
 
-    Used as a defensive guard when a single user's block exceeds the hard
-    Telegram message limit — e.g. when a participant has many picks and each
-    picks string is long.  Normal usage (compact flags) will never hit this.
+    Prefers line boundaries.  A single line that alone exceeds ``max_len`` is
+    split at a hard character boundary so **no** returned piece ever exceeds
+    ``max_len`` — this is the defensive guard that keeps assembled messages
+    within Telegram's 4096-char limit even for pathological inputs (a
+    participant with a huge single pick line, etc.).
     """
     if len(block) <= max_len:
         return [block]
     parts: list[str] = []
     current_lines: list[str] = []
     current_len = 0
+
+    def _flush() -> None:
+        nonlocal current_lines, current_len
+        if current_lines:
+            parts.append("\n".join(current_lines))
+            current_lines = []
+            current_len = 0
+
     for line in block.split("\n"):
+        # A single line longer than max_len cannot fit — hard-split it at a
+        # character boundary so every emitted piece is guaranteed ≤ max_len.
+        if len(line) > max_len:
+            _flush()
+            for i in range(0, len(line), max_len):
+                parts.append(line[i : i + max_len])
+            continue
         add_len = len(line) + (1 if current_lines else 0)  # +1 for joining \n
         if current_lines and current_len + add_len > max_len:
-            parts.append("\n".join(current_lines))
+            _flush()
             current_lines = [line]
             current_len = len(line)
         else:
             current_lines.append(line)
             current_len += add_len
-    if current_lines:
-        parts.append("\n".join(current_lines))
+    _flush()
     return parts
 
 
@@ -226,22 +246,31 @@ def build_groups_text(
 
 
 def _split_messages(header: str, user_blocks: list[str]) -> list[str]:
-    """Assemble user blocks into 1+ messages, splitting at user boundaries when needed.
+    """Assemble user blocks into 1+ messages, each guaranteed ≤ 4096 chars.
 
-    Defensive pre-pass: any block that alone exceeds _HARD_LIMIT (edge case —
-    happens only if a single user has many very long pick strings) is split at
-    line boundaries so no emitted message exceeds Telegram's 4096-char limit.
+    Guarantees (Telegram-safe):
+    - Every emitted part — *including* its ``(i/n)\\n`` prefix and the header on
+      the first part — is ≤ ``_TELEGRAM_LIMIT`` (4096).
+    - A single user block larger than the per-message payload is pre-split at
+      line boundaries, and an overlong single line is hard-split at a character
+      boundary (see ``_split_block_at_lines``).
 
-    Main pass: greedy fill up to _SPLIT_THRESHOLD, flushing to a new message
-    at user-block boundaries.  Part numbers are prepended when >1 message.
+    Layout: greedy fill up to ``_SPLIT_THRESHOLD``, flushing at user-block
+    boundaries.  Part numbers are prepended only when there is >1 message.
     """
     if not user_blocks:
         return [header]
 
-    # Defensive line-level split for oversized individual blocks.
+    sep_len = len("\n\n")
+    # Every block must fit alongside the header and the part prefix within the
+    # hard limit.  Reserving header + separator + prefix room here means the
+    # final assembled parts can never exceed _TELEGRAM_LIMIT.
+    block_budget = _TELEGRAM_LIMIT - _PREFIX_RESERVE - (len(header) + sep_len)
+
+    # Defensive pre-pass: split any block that would not fit on its own.
     processed: list[str] = []
     for block in user_blocks:
-        processed.extend(_split_block_at_lines(block, _HARD_LIMIT))
+        processed.extend(_split_block_at_lines(block, block_budget))
     user_blocks = processed
 
     full = header + "\n\n" + "\n\n".join(user_blocks)
@@ -251,19 +280,25 @@ def _split_messages(header: str, user_blocks: list[str]) -> list[str]:
     parts: list[list[str]] = []
     current: list[str] = [header]
     current_len = len(header)
-    sep_len = len("\n\n")
+    blocks_in_current = 0
 
     for block in user_blocks:
-        if current_len + sep_len + len(block) > _SPLIT_THRESHOLD and len(current) > 1:
+        add = sep_len + len(block)
+        # Flush before overflowing the threshold, but never emit a message with
+        # no user block (blocks_in_current guard also lets the first block ride
+        # with the header even if that pair alone exceeds the soft threshold —
+        # it still fits the hard limit thanks to block_budget).
+        if blocks_in_current >= 1 and current_len + add > _SPLIT_THRESHOLD:
             parts.append(current)
             current = [block]
             current_len = len(block)
+            blocks_in_current = 1
         else:
             current.append(block)
-            current_len += sep_len + len(block)
+            current_len += add
+            blocks_in_current += 1
 
-    if current:
-        parts.append(current)
+    parts.append(current)
 
     messages = ["\n\n".join(p) for p in parts]
     if len(messages) > 1:

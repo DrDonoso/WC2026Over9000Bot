@@ -48,8 +48,11 @@ _TLA_FONT_SIZE  = 7   # small TLA caption below flag tiles in tie/group labels
 # Circular flag in the tie-label column:
 _TIE_FLAG_D = 18      # diameter (px) — fits inside _ROW_H=42 with room for TLA below
 
-# Twemoji CDN for standard country flag PNGs (ISO 3166-1 alpha-2 only).
-_TWEMOJI_BASE = "https://cdn.jsdelivr.net/npm/twemoji@14.0.2/assets/72x72"
+# Twemoji flag PNGs.  The npm package does NOT ship assets under this path
+# (every flag 404s), so we use the GitHub-hosted asset tree, which serves both
+# the regional-indicator (2-char ISO) flags and the GB subdivision tag-sequence
+# flags (England / Scotland / Wales).
+_TWEMOJI_BASE = "https://cdn.jsdelivr.net/gh/twitter/twemoji@v14.0.2/assets/72x72"
 
 # ── Tile disk-cache cap ───────────────────────────────────────────────────────
 
@@ -109,17 +112,32 @@ def _apply_alpha(img: Image.Image, alpha: int) -> Image.Image:
 
 
 def _flag_url(tla: str) -> str | None:
-    """Return twemoji CDN URL for the flag of a TLA, or None for unsupported codes."""
+    """Return the twemoji CDN URL for the flag of a TLA, or None if unsupported.
+
+    Handles two flag families:
+    - Standard nations: 2-char ISO 3166-1 alpha-2 → regional-indicator pair
+      (e.g. ESP → ES → ``1f1ea-1f1f8.png``).
+    - GB subdivisions: 5-char ISO starting with "GB" → tag-sequence emoji
+      (ENG → GBENG → ``1f3f4-e0067-e0062-e0065-e006e-e0067-e007f.png``).
+      NIR (GBNIR) has no twemoji asset, so it returns None and falls back to
+      TLA text via the caller.
+    """
     iso = tla_to_iso(tla)
-    if not iso or len(iso) != 2:
-        # Non-standard codes (e.g. "GBENG" for England) use tag-sequence emoji
-        # not supported by the simple regional-indicator twemoji URL.
+    if not iso:
         return None
-    codepoints = "-".join(
-        format(0x1F1E6 + ord(c) - ord("A"), "x")
-        for c in iso.upper()
-    )
-    return f"{_TWEMOJI_BASE}/{codepoints}.png"
+    if len(iso) == 2:
+        codepoints = "-".join(
+            format(0x1F1E6 + ord(c) - ord("A"), "x")
+            for c in iso.upper()
+        )
+        return f"{_TWEMOJI_BASE}/{codepoints}.png"
+    # GB subdivision flags (England/Scotland/Wales) use a black-flag base
+    # (1f3f4) + one tag character per ISO letter + a cancel tag (e007f).
+    if len(iso) == 5 and iso.upper().startswith("GB") and iso.upper() != "GBNIR":
+        tags = "-".join(format(0xE0000 + ord(c), "x") for c in iso.lower())
+        return f"{_TWEMOJI_BASE}/1f3f4-{tags}-e007f.png"
+    # Anything else (e.g. GBNIR — no asset) → None → caller falls back to text.
+    return None
 
 
 def _fetch_flag_tile(tla: str, size: int, tile_cache_dir: str | None) -> Image.Image | None:

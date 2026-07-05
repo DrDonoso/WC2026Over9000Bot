@@ -741,8 +741,134 @@ class TestCmdEleccionesCallback:
         text_sent = call_args.kwargs.get("text") or (call_args.args[0] if call_args.args else "")
         assert "new text from regeneration" in text_sent
 
+    @patch("worldcup_bot.bot.handlers.pred_loader.load")
+    @patch("worldcup_bot.bot.handlers.os.path.getmtime", return_value=1000.0)
+    @patch("worldcup_bot.bot.handlers._football_client")
+    async def test_no_ties_artifact_not_served_after_ties_appear(
+        self, mock_fc, mock_mtime, mock_load
+    ):
+        """BLOCKER 1 regression: a 'cuadro no disponible' state must NOT be served
+        once ties get scheduled (even though no result has finished yet).
 
-# ── cache helpers ─────────────────────────────────────────────────────────────
+        First tap: no knockout matches → unavailable message.
+        Second tap: ties scheduled (TIMED, no winner) → bracket must regenerate.
+        """
+        mock_load.return_value = _make_predictions()
+        client = MagicMock()
+        mock_fc.return_value = client
+
+        # First tap — no round_of_32 matches scheduled yet.
+        client.get_all_matches.return_value = []
+
+        context = _make_context()
+        context.bot_data["elecciones_cache"] = {}
+
+        from worldcup_bot.bot.handlers import cmd_elecciones_callback
+
+        query1 = self._make_query("elecciones|round_of_32")
+        update1 = MagicMock()
+        update1.callback_query = query1
+        await cmd_elecciones_callback(update1, context)
+
+        first_text = context.bot.send_message.call_args.kwargs.get("text", "") or ""
+        assert "no está disponible" in first_text
+        # Transient unavailable artifact must NOT be cached.
+        assert context.bot_data["elecciones_cache"] == {}
+
+        # Second tap — ties are now scheduled (no finished result yet).
+        def _match(home, away):
+            m = MagicMock()
+            m.stage = "LAST_32"
+            m.home_tla = home
+            m.away_tla = away
+            m.status = "TIMED"
+            m.winner = None
+            m.utc_date = "2026-07-01T18:00:00Z"
+            return m
+
+        client.get_all_matches.return_value = [_match("ESP", "FRA"), _match("BRA", "GER")]
+        context.bot.send_message.reset_mock()
+
+        query2 = self._make_query("elecciones|round_of_32")
+        update2 = MagicMock()
+        update2.callback_query = query2
+        await cmd_elecciones_callback(update2, context)
+
+        sent = " ".join(
+            (c.kwargs.get("text") or "") for c in context.bot.send_message.call_args_list
+        )
+        assert "no está disponible" not in sent
+        assert "DIECISEISAVOS" in sent.upper()
+
+    @patch("worldcup_bot.bot.handlers.pred_loader.load")
+    @patch("worldcup_bot.bot.handlers._elecciones_results_version", return_value="none")
+    @patch("worldcup_bot.bot.handlers.os.path.getmtime", return_value=1000.0)
+    @patch("worldcup_bot.bot.handlers._football_client")
+    @patch("worldcup_bot.bot.elecciones_image.render_groups_matrix")
+    async def test_grupos_image_api_failure_falls_back_to_text(
+        self, mock_render, mock_fc, mock_mtime, mock_rv, mock_load
+    ):
+        """NON-BLOCKING 1: standings API failure → text fallback (no blank image), not cached."""
+        mock_load.return_value = _make_predictions()
+        client = MagicMock()
+        client.get_standings.side_effect = RuntimeError("api down")
+        mock_fc.return_value = client
+
+        from worldcup_bot.config import Settings
+        settings = Settings(
+            telegram_bot_token="t",
+            football_data_api_key="k",
+            predictions_path="fake.yml",
+            choices_type="image",
+        )
+        context = _make_context(settings)
+        context.bot_data["elecciones_cache"] = {}
+
+        query = self._make_query("elecciones|grupos")
+        update = MagicMock()
+        update.callback_query = query
+
+        from worldcup_bot.bot.handlers import cmd_elecciones_callback
+        await cmd_elecciones_callback(update, context)
+
+        # No image render attempted on API failure; text sent instead.
+        mock_render.assert_not_called()
+        context.bot.send_photo.assert_not_called()
+        context.bot.send_message.assert_called()
+        # Transient fallback must NOT be cached (so a real image is made once API recovers).
+        assert context.bot_data["elecciones_cache"] == {}
+
+    @patch("worldcup_bot.bot.handlers.pred_loader.load")
+    @patch("worldcup_bot.bot.handlers._elecciones_results_version", return_value="none")
+    @patch("worldcup_bot.bot.handlers.os.path.getmtime", return_value=1000.0)
+    async def test_delete_placeholder_failure_neutralises_hourglass(
+        self, mock_mtime, mock_rv, mock_load
+    ):
+        """NON-BLOCKING 2: if the placeholder delete fails, edit it to a neutral notice
+        (no stale hourglass) and still deliver the result."""
+        mock_load.return_value = _make_predictions()
+        context = _make_context()
+        context.bot_data["elecciones_cache"] = {}
+        context.bot.delete_message.side_effect = Exception("message too old to delete")
+
+        query = self._make_query("elecciones|grupos")
+        update = MagicMock()
+        update.callback_query = query
+
+        with patch(
+            "worldcup_bot.porra.elecciones.build_groups_text",
+            return_value=["📋 FASE DE GRUPOS — Predicciones"],
+        ):
+            from worldcup_bot.bot.handlers import cmd_elecciones_callback
+            await cmd_elecciones_callback(update, context)
+
+        # Delete attempted and failed → placeholder edited to a neutral (non-hourglass) notice.
+        context.bot.delete_message.assert_called_once()
+        context.bot.edit_message_text.assert_called_once()
+        edit_text = context.bot.edit_message_text.call_args.kwargs.get("text", "") or ""
+        assert "⏳" not in edit_text
+        # Result still delivered.
+        context.bot.send_message.assert_called()
 
 
 class TestEleccionesCache:
@@ -780,6 +906,55 @@ class TestEleccionesCache:
         assert ("round_of_32", 1.0, "old_hash") not in cache
         assert ("round_of_32", 1.0, "new_hash") in cache
 
+    def test_results_version_invalidates_when_ties_scheduled(self):
+        """BLOCKER 1: version reflects scheduled tie identity, not just finished results."""
+        from worldcup_bot.bot.handlers import _elecciones_results_version
+        ctx = _make_context()
+        client = MagicMock()
+        with patch("worldcup_bot.bot.handlers._football_client", return_value=client):
+            client.get_all_matches.return_value = []
+            v_empty = _elecciones_results_version(ctx, "round_of_32")
+
+            m = MagicMock()
+            m.stage = "LAST_32"
+            m.home_tla = "ESP"
+            m.away_tla = "FRA"
+            m.status = "TIMED"
+            m.winner = None
+            client.get_all_matches.return_value = [m]
+            v_ties = _elecciones_results_version(ctx, "round_of_32")
+
+        assert v_empty != v_ties
+        assert v_empty != "none"
+
+    def test_results_version_changes_when_winner_finishes(self):
+        """A finished winner also changes the version (results progression)."""
+        from worldcup_bot.bot.handlers import _elecciones_results_version
+        ctx = _make_context()
+        client = MagicMock()
+
+        def _m(status, winner):
+            m = MagicMock()
+            m.stage = "LAST_32"
+            m.home_tla = "ESP"
+            m.away_tla = "FRA"
+            m.status = status
+            m.winner = winner
+            return m
+
+        with patch("worldcup_bot.bot.handlers._football_client", return_value=client):
+            client.get_all_matches.return_value = [_m("TIMED", None)]
+            v_scheduled = _elecciones_results_version(ctx, "round_of_32")
+            client.get_all_matches.return_value = [_m("FINISHED", "HOME_TEAM")]
+            v_finished = _elecciones_results_version(ctx, "round_of_32")
+
+        assert v_scheduled != v_finished
+
+    def test_results_version_grupos_is_none(self):
+        from worldcup_bot.bot.handlers import _elecciones_results_version
+        ctx = _make_context()
+        assert _elecciones_results_version(ctx, "grupos") == "none"
+
 
 # ── elecciones_image (import + basic) ────────────────────────────────────────
 
@@ -793,11 +968,38 @@ class TestEleccionesImageImport:
         from worldcup_bot.bot.elecciones_image import _fetch_flag_tile
         assert callable(_fetch_flag_tile)
 
-    def test_flag_url_returns_none_for_gbeng(self):
-        """England (GBENG) is a 5-char ISO code → no twemoji URL."""
+    def test_flag_url_returns_none_for_gbnir(self):
+        """Northern Ireland (GBNIR) has no twemoji asset → None (falls back to text)."""
         from worldcup_bot.bot.elecciones_image import _flag_url
-        # ENG maps to GBENG — should be None
-        assert _flag_url("ENG") is None
+        assert _flag_url("NIR") is None
+
+    def test_flag_url_base_is_github_gh_path(self):
+        """The twemoji base must be the GitHub-hosted gh path (npm path 404s)."""
+        from worldcup_bot.bot.elecciones_image import _TWEMOJI_BASE
+        assert _TWEMOJI_BASE == (
+            "https://cdn.jsdelivr.net/gh/twitter/twemoji@v14.0.2/assets/72x72"
+        )
+
+    def test_flag_url_standard_flag_resolves(self):
+        """ESP → ES resolves to the regional-indicator PNG filename."""
+        from worldcup_bot.bot.elecciones_image import _flag_url
+        url = _flag_url("ESP")
+        assert url is not None
+        assert url.endswith("/1f1ea-1f1f8.png")
+        assert "cdn.jsdelivr.net/gh/twitter/twemoji" in url
+
+    def test_flag_url_eng_sco_wal_tag_sequences(self):
+        """England/Scotland/Wales produce the correct tag-sequence PNG filenames."""
+        from worldcup_bot.bot.elecciones_image import _flag_url
+        assert _flag_url("ENG").endswith(
+            "/1f3f4-e0067-e0062-e0065-e006e-e0067-e007f.png"
+        )
+        assert _flag_url("SCO").endswith(
+            "/1f3f4-e0067-e0062-e0073-e0063-e0074-e007f.png"
+        )
+        assert _flag_url("WAL").endswith(
+            "/1f3f4-e0067-e0062-e0077-e006c-e0073-e007f.png"
+        )
 
     def test_flag_url_returns_string_for_standard_code(self):
         """Spain (ESP → ES) has a 2-char ISO code → valid twemoji URL."""
@@ -805,6 +1007,34 @@ class TestEleccionesImageImport:
         url = _flag_url("ESP")
         assert url is not None
         assert "twemoji" in url or "cdn.jsdelivr" in url
+
+    @patch("worldcup_bot.bot.elecciones_image._requests.get")
+    def test_fetch_flag_tile_renders_eng_tag_sequence(self, mock_get):
+        """ENG tag-sequence flag fetch (mocked 200) yields a circular tile."""
+        import io as _io
+        from PIL import Image as _Image
+
+        flag_img = _Image.new("RGBA", (72, 72), (10, 40, 120, 255))
+        buf = _io.BytesIO()
+        flag_img.save(buf, format="PNG")
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.content = buf.getvalue()
+
+        from worldcup_bot.bot.elecciones_image import _fetch_flag_tile
+        result = _fetch_flag_tile("ENG", 26, None)
+        assert result is not None
+        assert result.mode == "RGBA"
+        # The fetched URL must be the ENG tag-sequence path.
+        called_url = mock_get.call_args[0][0]
+        assert called_url.endswith("/1f3f4-e0067-e0062-e0065-e006e-e0067-e007f.png")
+
+    @patch("worldcup_bot.bot.elecciones_image._requests.get")
+    def test_fetch_flag_tile_nir_falls_back_to_none(self, mock_get):
+        """NIR has no flag URL → fetch is skipped and returns None (text fallback)."""
+        from worldcup_bot.bot.elecciones_image import _fetch_flag_tile
+        result = _fetch_flag_tile("NIR", 26, None)
+        assert result is None
+        mock_get.assert_not_called()
 
     @patch("worldcup_bot.bot.elecciones_image._requests.get")
     def test_fetch_flag_tile_returns_circular_image(self, mock_get):
@@ -1006,12 +1236,15 @@ class TestDefensiveLineSplit:
         for piece in result:
             assert len(piece) <= 3500
 
-    def test_single_oversized_line_not_split(self):
-        """A single line > max_len cannot be split further — returned as-is."""
+    def test_single_oversized_line_is_hard_split(self):
+        """A single line > max_len is hard-split at a character boundary."""
         from worldcup_bot.porra.elecciones import _split_block_at_lines
         long_line = "A" * 5000
         result = _split_block_at_lines(long_line, 4090)
-        assert result == [long_line]
+        assert len(result) > 1
+        for piece in result:
+            assert len(piece) <= 4090
+        assert "".join(result) == long_line
 
     def test_split_messages_no_message_exceeds_hard_limit(self):
         """_split_messages never emits a message > _HARD_LIMIT even with fat blocks."""
@@ -1022,6 +1255,33 @@ class TestDefensiveLineSplit:
         result = _split_messages("Header", [big_block])
         for msg in result:
             assert len(msg) <= _HARD_LIMIT + 10  # allow tiny part-number prefix overhead
+
+    def test_split_messages_many_users_all_parts_within_4096(self):
+        """Pathological many-user payload: every emitted part is ≤ 4096, incl. prefix."""
+        from worldcup_bot.porra.elecciones import _split_messages
+        blocks = [f"👤 User{i}\n" + ("  A: pick line here\n" * 20) for i in range(200)]
+        result = _split_messages("📋 FASE DE GRUPOS — Predicciones", blocks)
+        assert len(result) > 1
+        for msg in result:
+            assert len(msg) <= 4096, f"part length {len(msg)} exceeds 4096"
+
+    def test_split_messages_single_enormous_line_within_4096(self):
+        """A single block that is one enormous unbroken line is hard-split ≤ 4096."""
+        from worldcup_bot.porra.elecciones import _split_messages
+        enormous = "Z" * 50_000  # no newlines at all
+        result = _split_messages("Header", [enormous])
+        assert len(result) > 1
+        for msg in result:
+            assert len(msg) <= 4096, f"part length {len(msg)} exceeds 4096"
+
+    def test_split_messages_header_plus_near_limit_block_within_4096(self):
+        """A block near the limit + header + prefix must still be ≤ 4096."""
+        from worldcup_bot.porra.elecciones import _split_messages
+        # Two blocks each just under the payload budget → forces multiple parts.
+        block = "L" * 4050
+        result = _split_messages("🏆 UN HEADER BASTANTE LARGO — ¿Quién pasa?", [block, block])
+        for msg in result:
+            assert len(msg) <= 4096, f"part length {len(msg)} exceeds 4096"
 
     def test_split_messages_single_block_within_threshold_unchanged(self):
         """A block < _SPLIT_THRESHOLD is not touched by the defensive pre-pass."""
