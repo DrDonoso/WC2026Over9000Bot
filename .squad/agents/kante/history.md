@@ -39,6 +39,20 @@
 
 ## Key Gotchas (from this sprint)
 
+## 2026-07-06 — Clip Fallback Fix (SHIPPED)
+
+Fixed regression where `find_goal_clip` skipped HTML fallback when Reddit's JSON search returned HTTP 200 with empty `children` list (soft-block on datacenter IPs).
+
+**Problem:** `posts is None` gate only caught hard 403, not empty `[]` from soft-block. Mexico vs England match (5 goals) had no clip buttons.
+
+**Root:** Datacenter IPs get HTTP 200-empty from Reddit; residential IPs get 403. Code gated fallback on `posts is None` → soft-block path never consulted HTML.
+
+**Fix:** Normalize with `or []`, then unconditional fallback when no JSON match found. Two log lines distinguish "no posts" from "posts but no match" for diagnostics.
+
+**Tests:** 5 new regression tests in `TestFindGoalClipFallbackBehavior` (empty JSON, None JSON, non-matching JSON, happy path no-fallback, no-match-anywhere). All 2351 tests green.
+
+**Commit:** 4766a02
+
 ## Current Sessions (2026-07-01 → 2026-07-03)
 Phase-selector inline keyboard + per-user text renderers (knockout + groups) + PIL knockout matrix image + `CHOICES_TYPE` env var + lazy bounded cache. Full design by Pirlo (`pirlo-elecciones-design.md`); zero-regressions on 2310 tests.
 
@@ -73,5 +87,19 @@ Text + image renderers (knockout + groups), phase keyboard, `CHOICES_TYPE` env v
 - `_split_messages` cannot split within user block; threshold is soft for Telegram 4096 limit.
 - Lazy imports in callback: patch target = `worldcup_bot.porra.elecciones.*`.
 - Twemoji URL is jsDelivr (GitHub-hosted); non-2-char ISO codes → None → TLA fallback.
+
+## 2026-07-06 Summary — Empty-JSON Fallback Fix
+
+**Bug:** All 5 Mexico-England goals notified, none got "Ver gol" button on server.
+
+**Root cause:** `find_goal_clip` in `clip_finder.py` only ran the HTML search + `/new/` fallback when `_fetch_search_posts` returned `None` (hard 403). Reddit soft-blocks datacenter IPs with HTTP 200 + empty `children` list → `posts == []` → `if posts is None` skipped → empty loop → all clips missed.
+
+**Fix:** `or []` to normalise `None`/`[]`; try JSON posts first (return early if matched → efficiency preserved); always fall through to HTML fallback when no JSON match. Two INFO logs distinguish "no posts" vs "non-matching posts" for diagnosability.
+
+**Tests:** 5 new in `TestFindGoalClipFallbackBehavior` — key regression (empty JSON → fallback), None path, non-matching JSON, happy-path efficiency (HTML not called), no-match-anywhere. **2346 → 2351, all green.**
+
+**Live results (MEX-ENG 5 goals):** All 5 → `streamin.link` URLs. No regression.
+
+**Key gotcha:** Reddit soft-blocks return 200-empty, not 403. The `is None` guard is insufficient — must also treat `[]` as a fallback trigger. The `or []` idiom handles both cases uniformly.
 
 ## Previous Sessions (2026-06-30 and earlier)

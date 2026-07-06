@@ -48,6 +48,23 @@ Owned the fix-forward after Pirlo rejected Kanté's elecciones image/hourglass w
   asserted a single overlong line is NOT split — both encoded the OLD (buggy)
   behavior. Owning the revision meant updating those tests to the new contract.
 
+### 2026-07-06 — FINAL seed-path fix (3rd revision, SHIPPED)
+
+Escalation revision after Kanté (a61757d) and Cannavaro (615c34e) both rejected by Pirlo.
+
+**Problem:** Startup seed path added ALL matches >4h old to `finished_announced` (dedup set), regardless of status — including stale `IN_PLAY` and `PAUSED`. On restart during stuck API state, the official final recap was permanently suppressed once the API eventually flipped to `FINISHED`.
+
+**Root:** Only two write sites to `finished_announced`: seed + loop. Seed wasn't guarded on FINISHED status; loop was already correct.
+
+**Fix — FINISHED-only invariant:** `finished_announced` now populated ONLY for `status == "FINISHED"` at every write:
+- Seed: `seeded = {m.id for m in all_matches if m.status == "FINISHED"}` (stale IN_PLAY/PAUSED excluded)
+- Loop: already compliant (inside `new_ids` subquery, added comment)
+- Non-FINISHED >4h: handled via separate `provisional_announced` set (never consumes finished)
+
+**Tests:** Rewrote `TestFirstRunSeedWithAge` to assert FINISHED-only seeding. Added three restart regressions: IN_PLAY→FINISHED, PAUSED→FINISHED, genuinely-FINISHED-seeded. Each asserts exactly-once announcement. 2231 tests pass.
+
+**Commit:** a8b9c5f (initial investigation; final fix bundled in later commit)
+
 Full suite: **2346 passed** (2332 baseline + 14 new tests), 0 failures.
 
 ---

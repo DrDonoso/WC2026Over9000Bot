@@ -2637,6 +2637,220 @@ Teams come from `group_compositions[letter]` in standings position order (1st in
 | 165 | Participant's predicted 3rd (tercero, advances only if best-thirds) |
 | 65  | Not picked by this participant (implicitly eliminated) |
 
+---
+
+# Decision: find_goal_clip Empty-JSON Fallback Fix (2026-07-06)
+
+**Date:** 2026-07-06  
+**Author:** Kanté (Backend Dev)  
+**Status:** ✅ SHIPPED (commit 4766a02)
+
+---
+
+## Summary
+
+`find_goal_clip` never reached the HTML search + `/new/` fallback when Reddit's JSON search endpoint returned HTTP 200 with an empty `children` list (soft-block / datacenter IP pattern). All 5 goals in yesterday's Mexico-England match were notified but received no "Ver gol" button.
+
+---
+
+## Root Cause
+
+In `src/worldcup_bot/reddit/clip_finder.py`, the HTML fallback was gated on `posts is None`:
+
+```python
+posts = _fetch_search_posts(scanner, search_url)
+if posts is None:               # ← only reached on hard 403 / exception
+    ... HTML fallback ...
+for post in posts:              # if posts == [], iterates nothing → returns None
+    _match_post(...)
+```
+
+`_fetch_search_posts` returns:
+- `None` on a hard 403 or exception → fallback triggered ✓
+- `[]` (empty list) on HTTP 200 with `{"data":{"children":[]}}` → fallback **skipped** ✗
+
+Reddit soft-blocks datacenter IPs by returning HTTP 200 with an empty result set rather than a hard 403. Residential IPs get a hard 403, which correctly triggers the HTML fallback. This explains why clips worked from David's machine but failed for every goal on the server.
+
+---
+
+## The Fix
+
+`src/worldcup_bot/reddit/clip_finder.py` — `find_goal_clip` body replaced:
+
+**Old logic:**
+```python
+posts = _fetch_search_posts(scanner, search_url)
+if posts is None:
+    ... HTML fallback → posts = merged ...
+for post in posts:
+    ...
+```
+
+**New logic:**
+```python
+# 1) Try JSON search results first (None on 403, [] on soft-block, or a list).
+json_posts = _fetch_search_posts(scanner, search_url) or []
+for post in json_posts:
+    media_url = _match_post(...)
+    if media_url is not None:
+        return media_url          # happy path: returns without HTML fallback
+
+# 2) JSON produced no match (None/empty/non-matching) → always consult HTML search + /new/.
+if not json_posts:
+    log.info("find_goal_clip: JSON search returned no posts, using HTML search + /new/ listing")
+else:
+    log.info("find_goal_clip: JSON search had %d post(s) but no match; consulting HTML search + /new/ listing", len(json_posts))
+# ... merge + search HTML posts ...
+```
+
+Key properties:
+- `or []` normalises both `None` and `[]` so they follow the same path.
+- JSON match in the happy path returns immediately — HTML fetchers are **not called** (efficiency preserved).
+- HTML fallback now runs whenever JSON yields no match, regardless of the reason.
+- Two distinct INFO log lines distinguish "no posts at all" (None/empty) from "posts present but none matched" — future server failures are diagnosable from logs without a code change.
+- All existing helper functions (`_fetch_search_posts`, `_fetch_html_search_posts`, `_fetch_html_posts`, `_match_post`, `_search_term`) are **unchanged**.
+
+---
+
+## Request-Volume Impact
+
+Today from a residential IP, the JSON endpoint returns a hard 403 → `_fetch_search_posts` returns `None` → `json_posts = []` → HTML fallback already runs on every tick. **This change adds zero extra requests on the current residential-IP path.**
+
+On the server (datacenter IP where JSON returns 200-empty), the HTML fallback was previously never reached. Now it runs — which is exactly the intended behaviour. No extra retries or loops are introduced beyond that.
+
+---
+
+## Tests Added (`tests/test_clip_finder.py`)
+
+New class `TestFindGoalClipFallbackBehavior` — 5 tests:
+
+| Test | Scenario | Assert |
+|------|----------|--------|
+| `test_empty_json_triggers_html_fallback_and_finds_clip` | **KEY REGRESSION**: `_fetch_search_posts` → `[]` (HTTP 200 soft-block) | HTML fallback consulted; clip URL returned |
+| `test_none_json_triggers_html_fallback_and_finds_clip` | `_fetch_search_posts` → `None` (hard 403) | HTML fallback consulted; clip URL returned (existing behaviour preserved) |
+| `test_nonempty_nonmatching_json_triggers_html_fallback` | `_fetch_search_posts` → `[decoy]` (no match) | HTML fallback consulted; correct clip URL returned |
+| `test_matching_json_post_returned_without_html_fallback` | `_fetch_search_posts` → `[matching_post]` | Clip returned directly; `_fetch_html_search_posts` and `_fetch_html_posts` **not called** |
+| `test_no_match_anywhere_returns_none` | All fetchers → `[]` | Returns `None` |
+
+---
+
+## Live Verification — Mexico vs England (5 goals, 2026-07-05)
+
+Ran `find_goal_clip` via real `RedditMatchScanner` (residential IP → JSON 403 → HTML fallback path):
+
+| Score | Scorer | Min | Result |
+|-------|--------|-----|--------|
+| 0-1 | J. Bellingham | 36' | `https://streamin.link/v/ebeace44` ✓ |
+| 0-2 | J. Bellingham | 38' | `https://streamin.link/v/239e855d` ✓ |
+| 1-2 | J. Quiñones | 42' | `https://streamin.link/v/7500acaa` ✓ |
+| 1-3 | Harry Kane | 60' | `https://streamin.link/v/2a61a014` ✓ |
+| 2-3 | R. Jiménez | 69' | `https://streamin.link/v/2945e1a6` ✓ |
+
+All 5 clips found. No regression.
+
+---
+
+## Test Count
+
+- Baseline: **2346**
+- After fix: **2351** (+5 new)
+- All green ✅
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/reddit/clip_finder.py` | `find_goal_clip`: `posts is None` gate replaced with `or []` + unconditional HTML fallback |
+| `tests/test_clip_finder.py` | `TestFindGoalClipFallbackBehavior` — 5 new regression tests |
+| `.squad/agents/kante/history.md` | Session entry added |
+
+---
+
+# Decision — FINAL seed-path fix (FINISHED-only dedup invariant)
+
+Author: Nesta (backend, escalation)
+Date: 2026-07-04 / 2026-07-06
+Re: 3rd revision of the FINAL-announcement fix. Fix-forward on `main`.
+Prior rejects: a61757d (Kanté), 615c34e (Cannavaro). Shipped: commit a8b9c5f.
+Status: ✅ SHIPPED
+
+## The remaining bug (Pirlo's re-review of 615c34e)
+
+`poll_finished_matches_job` (`src/worldcup_bot/__main__.py`) has TWO code paths
+that could write the real-final dedup set `finished_announced`:
+
+1. the normal per-tick loop (Cannavaro fixed this — provisional path), and
+2. the first-run / startup **SEED** path.
+
+The seed path was still adding EVERY match over-by-wall-clock
+(`kickoff > MATCH_OVER_AGE`, 4 h) into `finished_announced` regardless of status,
+including stale `IN_PLAY` and `PAUSED`. Consequences:
+
+- On a restart while football-data is still stuck `IN_PLAY` for a match that
+  really ended (the production Australia–Egypt failure mode), the seed marks it
+  final-deduped. When the API finally flips to `FINISHED`,
+  `new_ids = finished_ids - announced` excludes it and the official 🏁 Final
+  recap is **permanently suppressed**.
+- `PAUSED` >4h (possibly a resumable suspension) was likewise treated as
+  already-handled, suppressing its future official final.
+
+## The fix — the FINISHED-only dedup invariant
+
+**Invariant:** `finished_announced` (the real-final dedup) is populated ONLY for
+matches whose `status == "FINISHED"`, at EVERY write site.
+
+Audited every write to `finished_announced` in the finished job and guarded them
+all on FINISHED:
+
+- **First-run seed** — CHANGED. Now seeds only genuinely finished matches:
+  `seeded = {m.id for m in all_matches if m.status == "FINISHED"}`.
+  Non-FINISHED over-by-wall-clock matches (stale `IN_PLAY` / `PAUSED`) are NOT
+  seeded — they stay eligible for the later official recap.
+- **Main loop `announced.add(...)`** (the None-match guard and the `finally`
+  block) — already compliant: both are inside `for match_id in new_ids`, and
+  `new_ids ⊆ finished_ids` where `finished_ids = {m.id ... if status ==
+  "FINISHED"}`. Added a comment at the `new_ids` definition documenting this.
+- Not a write site: `poll_kickoff_job` uses a local `announced` bound to the
+  SEPARATE `kickoff_announced` set — untouched.
+
+Non-FINISHED "over" matches are handled by the existing, already-approved normal
+path:
+- stuck `IN_PLAY` >4h → ⏳ provisional notice tracked in the SEPARATE persisted
+  `provisional_announced` set (never consumes `finished_announced`);
+- `PAUSED` → excluded from the provisional path, announced only when it
+  legitimately reaches `FINISHED`.
+
+When the API eventually reports `FINISHED`, the official recap fires with the
+API-confirmed score (self-correcting), clears the provisional marker, and the
+existing VAR-correction watch still handles genuine post-final score changes
+within its window.
+
+## Restart / no-double-announce guarantees
+
+- (over + `IN_PLAY` at startup → later `FINISHED`): NOT seeded; provisional may
+  fire once (deduped via persisted `provisional_announced`); official `FINISHED`
+  fires exactly once.
+- (over + `PAUSED` at startup → later `FINISHED`): NOT seeded; no provisional;
+  official `FINISHED` fires exactly once.
+- (genuinely `FINISHED` at startup): seeded on first run, never re-announced.
+
+## Tests
+
+`tests/test_poll_finished_job.py`:
+- `TestFirstRunSeedWithAge` — rewritten to assert FINISHED-only seeding (stale
+  `IN_PLAY` and `PAUSED` NOT in `finished_announced`; disk persists only the
+  FINISHED id).
+- `TestStaleLaterFlip` — rewritten: an unseeded stale match that flips to
+  `FINISHED` now DOES get the official recap.
+- Replaced `test_stale_inplay_seeded_on_first_run_not_announced` with
+  `test_stale_inplay_not_seeded_on_first_run` plus three restart regressions:
+  IN_PLAY→FINISHED, PAUSED→FINISHED, and genuinely-FINISHED-seeded-not-
+  reannounced — each asserting exactly-once official announcement.
+
+Full suite `.venv\Scripts\python.exe -m pytest -q`: **2231 passed** (~64 s).
+
 `_apply_alpha(img, alpha)` scales the existing RGBA alpha channel (`point(lambda x: x*alpha//255)`), preserving antialiasing.  TLA text fallback when flag tile is unavailable (non-standard ISO codes like GBENG).
 
 ### Terceros Strip — Not Added
