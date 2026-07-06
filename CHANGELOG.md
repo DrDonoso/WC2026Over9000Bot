@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260706.04] - 2026-07-06
+
+- feat(admin): add hidden /evilSanchez to fire the daily rich image on demand
+
+
 ## [20260706.03] - 2026-07-06
 
 - feat(help): add /help command with command list + scoring explanation
