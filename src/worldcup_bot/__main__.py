@@ -44,6 +44,7 @@ from worldcup_bot.bot.handlers import (
     cmd_estadisticas,
     cmd_evolucion,
     cmd_general,
+    cmd_help,
     cmd_hoy,
     cmd_lista_aciertos,
     cmd_lista_aciertos_actual,
@@ -2245,6 +2246,7 @@ def build_app(settings: Settings) -> Application:
 
     handlers = [
         CommandHandler("start", cmd_start),
+        CommandHandler("help", cmd_help),
         CommandHandler("clasificacion", cmd_clasificacion),
         CommandHandler("actual", cmd_actual),
         CommandHandler("porra", cmd_actual),

@@ -26,6 +26,7 @@ from worldcup_bot.bot.handlers import (
     cmd_en_directo,
     cmd_estadisticas,
     cmd_general,
+    cmd_help,
     cmd_hoy,
     cmd_lista_aciertos,
     cmd_lista_aciertos_actual,
@@ -192,6 +193,71 @@ class TestCmdStart:
         text = update.message.reply_text.call_args[0][0]
         assert "/tongo" in text
         assert "/hoy" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_help
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCmdHelp:
+    async def test_includes_full_command_list(self, fake_settings):
+        """/help lists the same commands as /start (incl. /elecciones)."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        await cmd_help(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        for cmd in ("/actual", "/general", "/evolucion", "/elecciones", "/tongo", "/estadisticas"):
+            assert cmd in text
+
+    async def test_explains_points_system(self, fake_settings):
+        """/help appends a scoring-system explanation below the command list."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        await cmd_help(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Cómo funcionan los puntos" in text
+        assert "Fase de grupos" in text
+        assert "Fase eliminatoria" in text
+
+    async def test_shows_escalating_knockout_points(self, fake_settings):
+        """Knockout point values are rendered from KNOCKOUT_STAGES (SF=5, Final=8)."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        await cmd_help(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Octavos de Final: <b>2</b> puntos" in text
+        assert "Cuartos de Final: <b>3</b> puntos" in text
+        assert "Semifinales: <b>5</b> puntos" in text
+        assert "Final: <b>8</b> puntos" in text
+        # Group boundary (0.5) is shown too.
+        assert "<b>0.5</b> puntos" in text
+
+    async def test_uses_html_parse_mode(self, fake_settings):
+        """/help renders bold section headers, so it must send parse_mode=HTML."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        await cmd_help(update, context)
+
+        assert update.message.reply_text.call_args.kwargs.get("parse_mode") == "HTML"
+
+    async def test_does_not_expose_hidden_commands(self, fake_settings):
+        """/help must NOT reveal hidden admin/test commands."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        await cmd_help(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        for hidden in ("simulagol", "updatediario", "recalcular", "tongocheck"):
+            assert hidden not in text
 
 
 # ══════════════════════════════════════════════════════════════════════════════

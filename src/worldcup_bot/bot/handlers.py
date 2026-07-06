@@ -44,7 +44,7 @@ from worldcup_bot.ai.client import AIClient
 from worldcup_bot.ai.daily_update import generate_daily_update
 from worldcup_bot.ai.match_events import extract_match_events
 from worldcup_bot.config import Settings, ai_enabled
-from worldcup_bot.data.stages import GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
+from worldcup_bot.data.stages import GROUP_SCORING, GROUPS, KNOCKOUT_STAGES, STAGE_YAML_KEYS
 from worldcup_bot.data.tongo import (
     SANCHEZ_ENS_ROBA,
     TongoConfigError,
@@ -185,26 +185,63 @@ def _resolve_target(
 # ── handlers ──────────────────────────────────────────────────────────────────
 
 
+_HELP_COMMANDS = (
+    "¡Hola! Soy el bot de la porra del Mundial 2026 ⚽️🌍\n\n"
+    "Comandos disponibles:\n"
+    "/actual — clasificación provisional (a día de hoy)\n"
+    "/general — clasificación general (oficial, solo grupos cerrados)\n"
+    "/evolucion — gráfico de evolución de la porra 📈\n"
+    "/porra — alias de /actual\n"
+    "/listaaciertos — tus aciertos (oficial, solo cerrados)\n"
+    "/listaaciertosactual — tus aciertos provisionales (a día de hoy)\n"
+    "/clasificacion [grupo] — clasificación de grupos (ej: /clasificacion L)\n"
+    "/hoy — partidos de la jornada (09:00–09:00)\n"
+    "/ayer — resultados de la jornada anterior\n"
+    "/siguiente — próximo partido\n"
+    "/endirecto — partidos en directo\n"
+    "/mispredicciones — ver tus predicciones\n"
+    "/participantes — lista de participantes\n"
+    "/elecciones — ver las predicciones de todos por fase 🗳️\n"
+    "/estadisticas — quién ve más goles 🏆\n"
+    "/tongo — revelar la verdad 👀"
+)
+
+
+def _points_help_text() -> str:
+    """Build the scoring-system explanation from the live scoring constants."""
+
+    def _num(value: float) -> str:
+        return str(int(value)) if float(value).is_integer() else str(value)
+
+    def _unit(value: float) -> str:
+        return "punto" if value == 1 else "puntos"
+
+    exact = GROUP_SCORING["exact_position"]
+    boundary = GROUP_SCORING["qualified_wrong_position"]
+
+    lines = [
+        "📊 <b>Cómo funcionan los puntos</b>",
+        "",
+        "<b>Fase de grupos</b> (eliges los 3 primeros de cada grupo):",
+        f"• Posición exacta (o los 2 primeros, sin importar el orden): <b>{_num(exact)}</b> {_unit(exact)}",
+        f"• El equipo clasifica pero no en la posición que dijiste: <b>{_num(boundary)}</b> {_unit(boundary)}",
+        "• Fallo: <b>0</b> puntos",
+        "",
+        "<b>Fase eliminatoria</b> (por cada equipo que aciertas que llega a la ronda):",
+    ]
+    for _api_stage, display_es, stage_pts in KNOCKOUT_STAGES:
+        lines.append(f"• {display_es}: <b>{stage_pts}</b> {_unit(stage_pts)}")
+    return "\n".join(lines)
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(_HELP_COMMANDS)
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "¡Hola! Soy el bot de la porra del Mundial 2026 ⚽️🌍\n\n"
-        "Comandos disponibles:\n"
-        "/actual — clasificación provisional (a día de hoy)\n"
-        "/general — clasificación general (oficial, solo grupos cerrados)\n"
-        "/evolucion — gráfico de evolución de la porra 📈\n"
-        "/porra — alias de /actual\n"
-        "/listaaciertos — tus aciertos (oficial, solo cerrados)\n"
-        "/listaaciertosactual — tus aciertos provisionales (a día de hoy)\n"
-        "/clasificacion [grupo] — clasificación de grupos (ej: /clasificacion L)\n"
-        "/hoy — partidos de la jornada (09:00–09:00)\n"
-        "/ayer — resultados de la jornada anterior\n"
-        "/siguiente — próximo partido\n"
-        "/endirecto — partidos en directo\n"
-        "/mispredicciones — ver tus predicciones\n"
-        "/participantes — lista de participantes\n"
-        "/elecciones — ver las predicciones de todos por fase 🗳️\n"
-        "/estadisticas — quién ve más goles 🏆\n"
-        "/tongo — revelar la verdad 👀"
+        _HELP_COMMANDS + "\n\n" + _points_help_text(),
+        parse_mode="HTML",
     )
 
 
