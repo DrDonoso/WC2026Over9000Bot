@@ -740,6 +740,122 @@ class TestSearchTerm:
         assert _TEAM_SEARCH_SHORT["united states"] == "usa"
 
 
+class TestFindGoalClipFallbackBehavior:
+    """Regression tests for the empty-JSON / soft-block fallback bug.
+
+    Before the fix, find_goal_clip only ran the HTML fallback when _fetch_search_posts
+    returned None (hard 403).  When Reddit soft-blocks a datacenter IP it returns HTTP 200
+    with an empty children list — json_posts == [] — which caused the fallback to be
+    skipped and every goal notification to arrive without a "Ver gol" button.
+
+    The fix: try JSON first; if NO match is found (None / empty / non-matching), always
+    consult HTML search + /new/ listing before giving up.
+    """
+
+    _CLIP_URL = "https://streamin.link/v/mex_eng_clip"
+    _MATCHING_POST = {
+        "id": "sw3tun1",
+        "title": "Sweden [3] - 1 Tunisia - Gyökeres 60'",
+        "url": "https://streamin.link/v/mex_eng_clip",
+        "permalink": "/r/soccer/comments/sw3tun1/",
+    }
+    _DECOY_POST = {
+        "id": "decoy1",
+        "title": "Argentina [2] - 0 Brazil - Messi 30'",
+        "url": "https://streamff.link/v/decoy",
+        "permalink": "/r/soccer/comments/decoy1/",
+    }
+
+    def _call(self, scanner=None):
+        from unittest.mock import MagicMock
+        return find_goal_clip(
+            scanner or MagicMock(), "Sweden", "Tunisia", 3, 1, "Gyökeres", 60
+        )
+
+    def test_empty_json_triggers_html_fallback_and_finds_clip(self):
+        """KEY REGRESSION: _fetch_search_posts returns [] (HTTP 200 empty / soft-block)
+        → HTML fallback is consulted and finds the clip URL."""
+        from unittest.mock import patch
+
+        with (
+            patch("worldcup_bot.reddit.clip_finder._fetch_search_posts", return_value=[]),
+            patch(
+                "worldcup_bot.reddit.clip_finder._fetch_html_search_posts",
+                return_value=[self._MATCHING_POST],
+            ),
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_posts", return_value=[]),
+        ):
+            result = self._call()
+
+        assert result == self._CLIP_URL
+
+    def test_none_json_triggers_html_fallback_and_finds_clip(self):
+        """Hard 403 (None from JSON) → HTML fallback still finds clip (existing behavior preserved)."""
+        from unittest.mock import patch
+
+        with (
+            patch("worldcup_bot.reddit.clip_finder._fetch_search_posts", return_value=None),
+            patch(
+                "worldcup_bot.reddit.clip_finder._fetch_html_search_posts",
+                return_value=[self._MATCHING_POST],
+            ),
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_posts", return_value=[]),
+        ):
+            result = self._call()
+
+        assert result == self._CLIP_URL
+
+    def test_nonempty_nonmatching_json_triggers_html_fallback(self):
+        """JSON returns posts but none match the goal → HTML fallback consulted and finds clip."""
+        from unittest.mock import patch
+
+        with (
+            patch(
+                "worldcup_bot.reddit.clip_finder._fetch_search_posts",
+                return_value=[self._DECOY_POST],
+            ),
+            patch(
+                "worldcup_bot.reddit.clip_finder._fetch_html_search_posts",
+                return_value=[self._MATCHING_POST],
+            ),
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_posts", return_value=[]),
+        ):
+            result = self._call()
+
+        assert result == self._CLIP_URL
+
+    def test_matching_json_post_returned_without_html_fallback(self):
+        """JSON contains the matching post → returned directly; HTML fetchers NOT called (efficiency)."""
+        from unittest.mock import patch
+
+        with (
+            patch(
+                "worldcup_bot.reddit.clip_finder._fetch_search_posts",
+                return_value=[self._MATCHING_POST],
+            ),
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_search_posts") as mock_html_search,
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_posts") as mock_html_new,
+        ):
+            result = self._call()
+
+        assert result == self._CLIP_URL
+        mock_html_search.assert_not_called()
+        mock_html_new.assert_not_called()
+
+    def test_no_match_anywhere_returns_none(self):
+        """No match in JSON, HTML search, or /new/ listing → returns None."""
+        from unittest.mock import patch
+
+        with (
+            patch("worldcup_bot.reddit.clip_finder._fetch_search_posts", return_value=[]),
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_search_posts", return_value=[]),
+            patch("worldcup_bot.reddit.clip_finder._fetch_html_posts", return_value=[]),
+        ):
+            result = self._call()
+
+        assert result is None
+
+
 class TestFindGoalClipSearchQueryNormalisation:
     """HTML search URL uses _search_term aliases when JSON endpoint is 403."""
 

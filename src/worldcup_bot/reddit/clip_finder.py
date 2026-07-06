@@ -389,23 +389,35 @@ def find_goal_clip(
     query = quote_plus(f"{_search_term(home_team)} {_search_term(away_team)}")
     search_url = _REDDIT_SEARCH_JSON.format(query=query)
 
-    posts = _fetch_search_posts(scanner, search_url)
-    if posts is None:
-        log.info("find_goal_clip: JSON search 403/failed, using HTML search + /new/ listing")
-        merged: list[dict] = []
-        seen: set[str] = set()
-        for p in (
-            _fetch_html_search_posts(scanner, home_team, away_team)
-            + _fetch_html_posts(scanner)
-        ):
-            pid = p.get("id") or p.get("permalink") or p.get("url")
-            if pid in seen:
-                continue
-            seen.add(pid)
-            merged.append(p)
-        posts = merged
+    # 1) Try JSON search results first (None on 403/exception, [] on soft-block, or a list).
+    json_posts = _fetch_search_posts(scanner, search_url) or []
+    for post in json_posts:
+        media_url = _match_post(
+            post, home_team, away_team, home_score, away_score, scorer, minute
+        )
+        if media_url is not None:
+            return media_url
 
-    for post in posts:
+    # 2) JSON produced no match (None/empty/non-matching) → always consult HTML search + /new/.
+    if not json_posts:
+        log.info("find_goal_clip: JSON search returned no posts, using HTML search + /new/ listing")
+    else:
+        log.info(
+            "find_goal_clip: JSON search had %d post(s) but no match; consulting HTML search + /new/ listing",
+            len(json_posts),
+        )
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for p in (
+        _fetch_html_search_posts(scanner, home_team, away_team)
+        + _fetch_html_posts(scanner)
+    ):
+        pid = p.get("id") or p.get("permalink") or p.get("url")
+        if pid in seen:
+            continue
+        seen.add(pid)
+        merged.append(p)
+    for post in merged:
         media_url = _match_post(
             post, home_team, away_team, home_score, away_score, scorer, minute
         )
