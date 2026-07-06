@@ -14,6 +14,7 @@ from datetime import datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 import pytz
+from telegram import Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from worldcup_bot.ai.client import AIClient
@@ -208,9 +209,16 @@ async def rich_image_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not image_ai_enabled(settings):
         log.info("rich_image_job: image AI not configured, skipping")
         return
+    try:
+        await _evolve_and_send_rich_image(context)
+    except Exception:
+        log.exception("rich_image_job: error (non-fatal)")
 
-    # Fetch yesterday's winners — best-effort, never fatal
-    winners: list[str] = []
+
+def _fetch_yesterday_winners(
+    context: ContextTypes.DEFAULT_TYPE, settings: Settings
+) -> list[str]:
+    """Winning-country names from yesterday's finished matches (best-effort, never raises)."""
     try:
         client = _football_client(context)
         matches = client.get_football_day_matches(
@@ -227,22 +235,67 @@ async def rich_image_job(context: ContextTypes.DEFAULT_TYPE) -> None:
             ]
             if name
         ]
-        log.info("rich_image_job: yesterday's winners=%s", winners)
+        log.info("rich image: yesterday's winners=%s", winners)
+        return winners
     except Exception:
-        log.exception("rich_image_job: could not fetch yesterday's winners (non-fatal)")
+        log.exception("rich image: could not fetch yesterday's winners (non-fatal)")
+        return []
 
+
+async def _evolve_and_send_rich_image(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Evolve the 'rich' image one wealth level and send it to the configured group.
+
+    Fetches yesterday's winners for theming, evolves the image via
+    run_rich_iteration and, when TELEGRAM_GROUP_ID is set, sends the photo with
+    its caption to that group.  Returns the caption on success.  Unlike
+    rich_image_job (which swallows errors), this raises so manual callers such
+    as /evilSanchez can report failure to the invoker.
+    """
+    settings: Settings = context.bot_data["settings"]
+    winners = _fetch_yesterday_winners(context, settings)
+    out_path, level, caption = await run_rich_iteration(settings, winners=winners)
+    log.info("rich image iteration %d -> %s", level, out_path)
+    if settings.telegram_group_id:
+        with open(out_path, "rb") as photo_fh:
+            await context.bot.send_photo(
+                chat_id=settings.telegram_group_id,
+                photo=photo_fh,
+                caption=caption,
+            )
+    return caption
+
+
+async def cmd_evil_sanchez(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hidden manual trigger for the daily 10:00 'rich Sánchez' image. /evilSanchez
+
+    Runs the same pipeline as rich_image_job (yesterday's winners → evolve the
+    image one wealth level → send it with its caption to the group in
+    TELEGRAM_GROUP_ID) so the admin can fire it by hand when the scheduled job
+    didn't run.  Not listed in /start or /help.
+    """
+    settings: Settings = context.bot_data["settings"]
+
+    if not image_ai_enabled(settings):
+        await update.message.reply_text(
+            "⚠️ La generación de imágenes no está configurada (faltan OPENAI_*)."
+        )
+        return
+    if not settings.telegram_group_id:
+        await update.message.reply_text(
+            "⚠️ No hay TELEGRAM_GROUP_ID configurado; no sé a qué grupo enviar la foto."
+        )
+        return
+
+    await update.message.reply_text("😈 Invocando al Sánchez malvado… puede tardar un poco.")
     try:
-        out_path, level, caption = await run_rich_iteration(settings, winners=winners)
-        log.info("rich image iteration %d -> %s", level, out_path)
-        if settings.telegram_group_id:
-            with open(out_path, "rb") as photo_fh:
-                await context.bot.send_photo(
-                    chat_id=settings.telegram_group_id,
-                    photo=photo_fh,
-                    caption=caption,
-                )
+        await _evolve_and_send_rich_image(context)
     except Exception:
-        log.exception("rich_image_job: error (non-fatal)")
+        log.exception("cmd_evil_sanchez: error generating/sending rich image")
+        await update.message.reply_text(
+            "💥 Algo ha fallado generando o enviando la imagen. Revisa los logs."
+        )
+        return
+    await update.message.reply_text("✅ Sánchez enviado al grupo.")
 
 
 async def _enrich_scorer(
@@ -2274,6 +2327,7 @@ def build_app(settings: Settings) -> Application:
         CommandHandler("updatediario", cmd_update_diario),
         CommandHandler("recalcular", cmd_recalcular),
         CommandHandler("tongocheck", cmd_tongocheck),
+        CommandHandler("evilsanchez", cmd_evil_sanchez),
     ]
 
     for handler in handlers:

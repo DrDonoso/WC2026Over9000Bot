@@ -1468,6 +1468,97 @@ class TestRichImageJob:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# /evilSanchez — hidden manual trigger for the daily rich image
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_evil_update() -> MagicMock:
+    update = MagicMock()
+    update.message.reply_text = AsyncMock()
+    return update
+
+
+class TestCmdEvilSanchez:
+    async def test_sends_image_to_group(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-1009999")
+        ctx = _make_context(settings)
+        update = _make_evil_update()
+
+        out_file = tmp_path / "state" / "rich_modified.png"
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_bytes(b"PNG")
+
+        with patch(
+            "worldcup_bot.__main__.run_rich_iteration",
+            new=AsyncMock(return_value=(str(out_file), 3, "🤑 caption")),
+        ):
+            await main_mod.cmd_evil_sanchez(update, ctx)
+
+        ctx.bot.send_photo.assert_awaited_once()
+        assert ctx.bot.send_photo.call_args.kwargs["chat_id"] == "-1009999"
+        assert ctx.bot.send_photo.call_args.kwargs["caption"] == "🤑 caption"
+
+    async def test_warns_when_image_ai_disabled(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = Settings(
+            telegram_bot_token="tok",
+            football_data_api_key="key",
+            state_dir=str(tmp_path),
+            telegram_group_id="-100",
+        )
+        ctx = _make_context(settings)
+        update = _make_evil_update()
+
+        with patch("worldcup_bot.__main__.run_rich_iteration") as mock_run:
+            await main_mod.cmd_evil_sanchez(update, ctx)
+
+        mock_run.assert_not_called()
+        ctx.bot.send_photo.assert_not_awaited()
+        assert "no está configurada" in update.message.reply_text.call_args[0][0]
+
+    async def test_warns_when_no_group_id(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="")
+        ctx = _make_context(settings)
+        update = _make_evil_update()
+
+        with patch("worldcup_bot.__main__.run_rich_iteration") as mock_run:
+            await main_mod.cmd_evil_sanchez(update, ctx)
+
+        mock_run.assert_not_called()
+        ctx.bot.send_photo.assert_not_awaited()
+        assert "TELEGRAM_GROUP_ID" in update.message.reply_text.call_args[0][0]
+
+    async def test_reports_failure_on_error(self, tmp_path):
+        import worldcup_bot.__main__ as main_mod
+
+        settings = _make_settings(tmp_path, telegram_group_id="-100")
+        ctx = _make_context(settings)
+        update = _make_evil_update()
+
+        with patch(
+            "worldcup_bot.__main__.run_rich_iteration",
+            new=AsyncMock(side_effect=Exception("LiteLLM down")),
+        ):
+            await main_mod.cmd_evil_sanchez(update, ctx)  # must not raise
+
+        texts = [call.args[0] for call in update.message.reply_text.await_args_list]
+        assert any("fallado" in t for t in texts)
+
+    def test_evilsanchez_registered_but_not_in_help(self):
+        import worldcup_bot.__main__ as main_mod
+        from worldcup_bot.bot.handlers import _HELP_COMMANDS
+
+        src = inspect.getsource(main_mod)
+        assert 'CommandHandler("evilsanchez", cmd_evil_sanchez)' in src
+        assert "evilsanchez" not in _HELP_COMMANDS.lower()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Scheduling — main() wires up rich_image job
 # ══════════════════════════════════════════════════════════════════════════════
 
