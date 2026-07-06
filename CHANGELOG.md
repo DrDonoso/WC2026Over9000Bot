@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260706.03] - 2026-07-06
+
+- feat(help): add /help command with command list + scoring explanation
+
+
 ## [20260706.02] - 2026-07-06
 
 - feat(scoring): escalate knockout points (R16=2, QF=3, SF=5, Final=8)
