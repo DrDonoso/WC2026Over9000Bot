@@ -5,6 +5,12 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260706.02] - 2026-07-06
+
+- feat(scoring): escalate knockout points (R16=2, QF=3, SF=5, Final=8)
+- Scribe: merge clip-fallback + final-seed decisions, update histories
+
+
 ## [20260706] - 2026-07-06
 
 - fix(clip): always use HTML fallback when JSON search yields no matching clip
