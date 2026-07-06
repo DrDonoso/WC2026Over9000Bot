@@ -5,6 +5,19 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260706] - 2026-07-06
+
+- fix(clip): always use HTML fallback when JSON search yields no matching clip
+- All 17 inbox files merged successfully
+- No entries suppressed (all ≥2026-06-30, no >7-day entries)
+- Maldini: mem-limit 512m (pending owner confirmation)
+- Cannavaro: FINAL provisional+memory, streamff CDN resilience (shipped)
+- Kanté: /elecciones MVP (approved-w-followups); keyboard+FINAL (rejected, reworked)
+- Buffon: revive test determinism (shipped)
+- Nesta: FINAL seed fix (approved), elecciones2 revision (approved-w-followups)
+- Pirlo: 7 reviews (3 rejections with fix-forward, 3 approvals-w-followups, 1 design)
+
+
 ## [20260705] - 2026-07-05
 
 - cache: include scheduled tie identity in version + never cache transient 'no disponible'/API-error/fallback artifacts (BLOCKER 1)
