@@ -11,10 +11,10 @@ QUALIFY_PER_GROUP: int = 3  # top 3 per group predicted
 # (api_stage_name, display_name_es, points_per_correct_qualifier)
 KNOCKOUT_STAGES: list[tuple[str, str, int]] = [
     ("LAST_32", "Dieciseisavos de Final", 1),
-    ("LAST_16", "Octavos de Final", 1),
-    ("QUARTER_FINALS", "Cuartos de Final", 2),
-    ("SEMI_FINALS", "Semifinales", 3),
-    ("FINAL", "Final", 5),
+    ("LAST_16", "Octavos de Final", 2),
+    ("QUARTER_FINALS", "Cuartos de Final", 3),
+    ("SEMI_FINALS", "Semifinales", 5),
+    ("FINAL", "Final", 8),
 ]
 
 # Map api_stage_name → yaml key (snake_case)

@@ -88,7 +88,7 @@ class TestComputeGeneralRankingFrom:
         assert rows[0].group_score == 0.0
 
     def test_knockout_points_added(self):
-        """Correct FINAL pick adds 5 pts."""
+        """Correct FINAL pick adds 8 pts."""
         from worldcup_bot.data.stages import STAGE_YAML_KEYS
         ko_actual = _ko_empty()
         ko_actual["FINAL"] = ["ESP"]
@@ -103,7 +103,7 @@ class TestComputeGeneralRankingFrom:
             }
         }
         rows = compute_general_ranking_from(preds, {}, ko_actual)
-        assert rows[0].total_score == 5.0
+        assert rows[0].total_score == 8.0
 
     def test_base_score_included(self):
         preds = {

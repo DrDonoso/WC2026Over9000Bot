@@ -441,7 +441,7 @@ class TestComputeUserDetailOfficial:
             ko_results=ko_results,
         )
         result = compute_user_detail("bob", predictions, client, official=True)
-        assert result["knockout_score"] == 1.0  # LAST_16 awards 1 pt per correct pick
+        assert result["knockout_score"] == 2.0  # LAST_16 awards 2 pts per correct pick
 
     def test_finished_ko_match_counts_even_if_stage_unfinished(self):
         """official=True: a FINISHED KO match scores immediately, even if the rest
@@ -469,7 +469,7 @@ class TestComputeUserDetailOfficial:
             ko_results=ko_results,
         )
         result = compute_user_detail("carol", predictions, client, official=True)
-        assert result["knockout_score"] == 2.0  # QF awards 2 pts per correct pick
+        assert result["knockout_score"] == 3.0  # QF awards 3 pts per correct pick
         assert [d["note"] for d in result["knockout_detail"]] == ["acierto"]
 
 

@@ -332,79 +332,79 @@ class TestScoreKnockoutRoundOf32:
 
 
 class TestScoreKnockoutLast16:
-    """LAST_16 awards 1 point per correct qualifier."""
+    """LAST_16 awards 2 points per correct qualifier."""
 
-    def test_point_value_is_1(self):
+    def test_point_value_is_2(self):
         user = {"round_of_16": ["ESP"]}
         actual = {"LAST_16": ["ESP"]}
-        pts, _ = score_knockout(user, actual, [("LAST_16", "Octavos", 1)])
-        assert pts == 1.0
+        pts, _ = score_knockout(user, actual, [("LAST_16", "Octavos", 2)])
+        assert pts == 2.0
 
     def test_yaml_key_is_round_of_16(self):
         assert STAGE_YAML_KEYS["LAST_16"] == "round_of_16"
 
-    def test_all_eight_correct_scores_8(self):
+    def test_all_eight_correct_scores_16(self):
         teams = ["ESP", "FRA", "ARG", "BRA", "GER", "ENG", "POR", "NED"]
         user = {"round_of_16": teams}
         actual = {"LAST_16": teams}
-        pts, _ = score_knockout(user, actual, [("LAST_16", "Octavos", 1)])
-        assert pts == 8.0
+        pts, _ = score_knockout(user, actual, [("LAST_16", "Octavos", 2)])
+        assert pts == 16.0
 
 
 class TestScoreKnockoutQuarterFinals:
-    """QUARTER_FINALS awards 2 points per correct qualifier."""
+    """QUARTER_FINALS awards 3 points per correct qualifier."""
 
-    def test_point_value_is_2(self):
+    def test_point_value_is_3(self):
         user = {"quarter_finals": ["ESP"]}
         actual = {"QUARTER_FINALS": ["ESP"]}
-        pts, detail = score_knockout(user, actual, [("QUARTER_FINALS", "Cuartos", 2)])
-        assert pts == 2.0
-        assert detail[0]["points"] == 2
+        pts, detail = score_knockout(user, actual, [("QUARTER_FINALS", "Cuartos", 3)])
+        assert pts == 3.0
+        assert detail[0]["points"] == 3
 
-    def test_two_correct_scores_4(self):
+    def test_two_correct_scores_6(self):
         user = {"quarter_finals": ["ESP", "BRA"]}
         actual = {"QUARTER_FINALS": ["ESP", "BRA", "FRA", "GER"]}
-        pts, _ = score_knockout(user, actual, [("QUARTER_FINALS", "Cuartos", 2)])
-        assert pts == 4.0
+        pts, _ = score_knockout(user, actual, [("QUARTER_FINALS", "Cuartos", 3)])
+        assert pts == 6.0
 
     def test_yaml_key_mapping(self):
         assert STAGE_YAML_KEYS["QUARTER_FINALS"] == "quarter_finals"
 
 
 class TestScoreKnockoutSemiFinals:
-    """SEMI_FINALS awards 3 points per correct qualifier."""
+    """SEMI_FINALS awards 5 points per correct qualifier."""
 
-    def test_point_value_is_3(self):
+    def test_point_value_is_5(self):
         user = {"semi_finals": ["ESP"]}
         actual = {"SEMI_FINALS": ["ESP"]}
-        pts, detail = score_knockout(user, actual, [("SEMI_FINALS", "Semis", 3)])
-        assert pts == 3.0
-        assert detail[0]["points"] == 3
+        pts, detail = score_knockout(user, actual, [("SEMI_FINALS", "Semis", 5)])
+        assert pts == 5.0
+        assert detail[0]["points"] == 5
 
     def test_both_semifinalists_correct(self):
         user = {"semi_finals": ["ESP", "BRA"]}
         actual = {"SEMI_FINALS": ["ESP", "BRA"]}
-        pts, _ = score_knockout(user, actual, [("SEMI_FINALS", "Semis", 3)])
-        assert pts == 6.0
+        pts, _ = score_knockout(user, actual, [("SEMI_FINALS", "Semis", 5)])
+        assert pts == 10.0
 
     def test_yaml_key_mapping(self):
         assert STAGE_YAML_KEYS["SEMI_FINALS"] == "semi_finals"
 
 
 class TestScoreKnockoutFinal:
-    """FINAL awards 5 points for correct champion."""
+    """FINAL awards 8 points for correct champion."""
 
-    def test_point_value_is_5(self):
+    def test_point_value_is_8(self):
         user = {"final": ["ESP"]}
         actual = {"FINAL": ["ESP"]}
-        pts, detail = score_knockout(user, actual, [("FINAL", "Final", 5)])
-        assert pts == 5.0
-        assert detail[0]["points"] == 5
+        pts, detail = score_knockout(user, actual, [("FINAL", "Final", 8)])
+        assert pts == 8.0
+        assert detail[0]["points"] == 8
 
     def test_wrong_champion_scores_0(self):
         user = {"final": ["GER"]}
         actual = {"FINAL": ["ESP"]}
-        pts, detail = score_knockout(user, actual, [("FINAL", "Final", 5)])
+        pts, detail = score_knockout(user, actual, [("FINAL", "Final", 8)])
         assert pts == 0.0
         assert detail[0]["note"] == "fallo"
 
@@ -528,17 +528,17 @@ class TestScoreKnockoutAllStagesIntegration:
             "FINAL": ["ESP"],
         }
         pts, _ = score_knockout(user, actual)
-        # 1 + 1 + 2 + 3 + 5 = 12
-        assert pts == 12.0
+        # 1 + 2 + 3 + 5 + 8 = 19
+        assert pts == 19.0
 
     def test_knockout_stages_config_point_values(self):
         """Canonical check: each stage has the documented point value."""
         expected = {
             "LAST_32": 1,
-            "LAST_16": 1,
-            "QUARTER_FINALS": 2,
-            "SEMI_FINALS": 3,
-            "FINAL": 5,
+            "LAST_16": 2,
+            "QUARTER_FINALS": 3,
+            "SEMI_FINALS": 5,
+            "FINAL": 8,
         }
         for api_name, _display, pts in KNOCKOUT_STAGES:
             assert pts == expected[api_name], (
@@ -571,7 +571,7 @@ class TestScoreKnockoutAllStagesIntegration:
         # Only final stage has a team entry
         stages_in_detail = {d["stage"] for d in detail}
         assert stages_in_detail == {"FINAL"}
-        assert pts == 5.0
+        assert pts == 8.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════

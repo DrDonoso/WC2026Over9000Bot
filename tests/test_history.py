@@ -359,7 +359,7 @@ class TestComputeRankingAtJornada:
         rows = compute_ranking_at_jornada(
             preds, matches, "2026-07-19", "Europe/Madrid", 9
         )
-        assert rows[0].total_score == 5.0  # FINAL = 5 pts
+        assert rows[0].total_score == 8.0  # FINAL = 8 pts
 
     def test_no_api_calls_needed(self):
         """compute_ranking_at_jornada must not call any client — it takes plain matches."""
