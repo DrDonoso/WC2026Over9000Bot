@@ -1,16 +1,18 @@
-# Decision: USA-Belgium Goal/Anulado Flood — Root Cause & Fix (2026-07-07 PENDING REVIEW)
+# Decision: USA-Belgium Goal/Anulado Flood — Root Cause & Cross-Source Fix (2026-07-07 SHIPPED)
 
 **Date:** 2026-07-07  
-**Author:** Kanté (Backend Developer)  
-**Status:** ⏳ PENDING REVIEW (awaiting Pirlo review + implementation go-ahead)  
+**Authors:** Kanté (Backend Implementation), Buffon (QA Tests), Pirlo (Lead Review)  
+**Status:** ✅ SHIPPED (commit 22f4ce9)  
 **Urgency:** 🔴 HIGH  
 
 ---
 
-## MERGED DECISIONS (1 file → 1 entry)
+## MERGED DECISIONS (3 files → 1 entry)
 
-This entry consolidates Kanté's root-cause investigation of the USA-Belgium incident:
-- kante-usa-belgium-goal-flood.md — Complete root-cause analysis and proposed fix
+This entry consolidates the complete USA-Belgium VAR flood fix:
+1. kante-usa-belgium-goal-flood.md — Root-cause analysis and implementation
+2. buffon-var-two-source-regression.md — Regression test coverage with empirical proof
+3. pirlo-goal-flood-review.md — Lead review (APPROVED)
 
 ---
 
@@ -85,6 +87,58 @@ if any(d.kind == "disallowed" for d in deltas):
 - src/worldcup_bot/reddit/score_state.py (reconcile ~137, _ahead ~220–241)
 - src/worldcup_bot/__main__.py (poll_thread_goals_job ~1204, poll_goals_job ~996)
 - tests/test_poll_thread_goals_job.py:518 (missing coverage for seen_api={0,0})
+
+---
+
+## Test Coverage — Buffon (QA)
+
+### Decision: VAR Two-Source Regression Test Coverage
+
+The USA-Belgium incident exposed a gap: the existing regression test `test_real_var_thread_goal_then_disallowed` seeded `seen_api={3,2}` (already synced), but the actual precondition was `seen_api={0,0}` (lagging), which triggered the oscillation loop.
+
+**Coverage Rule (Going Forward):**
+Any regression test for goal/disallowed cross-source reconciliation MUST include a variant where the second source has `seen < pre-goal score`. This is the minimum precondition enabling the oscillation.
+
+### Tests Added
+
+- `tests/test_poll_thread_goals_job.py::TestVARCrossSourceRaceRegression::test_thread_fast_api_lag_var_no_false_goal` — Thread announces goal+disallowed while API lags at 0-0; API later catches up without announcing false goal.
+- `tests/test_poll_thread_goals_job.py::TestVARCrossSourceRaceRegression::test_api_fast_thread_lag_var_no_false_goal` — Inverse: API announces disallowed while thread lags.
+- `test_thread_fast_real_goal_after_var_not_suppressed` — After disallowed clears, a real subsequent goal IS announced (no over-suppression).
+- `test_api_fast_real_goal_after_var_not_suppressed` — Inverse case.
+
+**Empirically PROVED:** Tests fail red without the fix (phantom alternating goal/disallowed), pass green with fix. Full test suite: **2365 passed**.
+
+---
+
+## Lead Review — Pirlo (APPROVED)
+
+### Verdict: ✅ APPROVE
+
+The uncommitted fix safely addresses the USA-Belgium VAR flood bug without introducing over-suppression.
+
+### Over-Suppression Analysis
+
+**Primary Risk:** Would advancing a lagging source's `seen` to the high phantom score permanently swallow a subsequent legitimate goal at that same score?
+
+**Finding:** No. The seen baseline drops back naturally:
+1. After the disallowed fires, `seen_api` is advanced to the pre-VAR score (e.g. 0-0).
+2. When the lagging source eventually catches up to the actual post-VAR score (0-0), `reconcile()` returns `new_seen = new`.
+3. This causes the source's `seen` baseline to naturally drop back down to the correct 0-0 state.
+4. When a subsequent legitimate 1-0 goal happens, `seen` is correctly situated at 0-0, and the goal is properly announced. ✓
+
+### Other Checks
+
+- **ann_homeaway semantics:** Holds the pre-disallowment score (cloned before `reconcile` returns post-VAR score). ✓
+- **max() in multi-goal games:** Operates safely per-component. ✓
+- **Concurrency:** Executed entirely inside `goal_lock` synchronously. ✓
+- **Symmetry:** Properly symmetric across `poll_goals_job` and `poll_thread_goals_job`. ✓
+
+### Implementation Location
+
+The fix is in `src/worldcup_bot/__main__.py`:
+- `poll_goals_job` (API-sourced disallowed): on a "disallowed" delta, advance thread's `seen` baseline via `max()` to the pre-VAR announced score (ann_homeaway).
+- `poll_thread_goals_job` (thread-sourced disallowed): on a "disallowed" delta, advance API's `seen` baseline via `max()` to ann_homeaway.
+- Both executed inside `goal_lock`.
 
 ---
 

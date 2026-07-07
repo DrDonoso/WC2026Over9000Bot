@@ -177,3 +177,19 @@
 **Status:** ✅ APPROVED (shipped commit 277ae2e)
 
 **Pirlo lead review:** 6-item checklist all pass — never-raises, tie-aware blocks, robust n=1/n=2/placeholders, no dead code, constants tunable, 2018 tests green + David visual QA confirmed. **Verdict: APPROVE** — ship it.
+
+### 2026-07-07 — USA-Belgium VAR Flood Cross-Source Fix Review — APPROVED
+
+**Role:** Lead reviewer. Verified uncommitted hotfix in src/worldcup_bot/__main__.py and tests.
+
+**Review Findings:**
+1. **Over-suppression test passed:** The fix correctly uses max() against the *pre-VAR* nn_homeaway to advance the lagging source's seen baseline. Because econcile always sets 
+ew_seen = new on a difference or equal update, the lagging source's baseline naturally drops back down to the lower post-VAR score once it finally catches up. This means a subsequent *legitimate* goal to the same scoreline WILL be correctly announced. Over-suppression does not occur.
+2. **ann_homeaway semantics:** Confirmed nn_homeaway holds the correct higher PRE-clamp score, as it is captured from stored prior to econcile() returning the lower score.
+3. **Multi-goal games:** max() works correctly per-component. Phantom score drops are isolated per team.
+4. **Concurrency:** Both fix blocks execute safely inside goal_lock with no wait yields, modifying isolated seen_scores safely.
+5. **Symmetry:** Both API and Thread blocks mirror the fix securely (using correct match_key vs key).
+
+**Verdict:** ✅ **APPROVE** — The fix is correct and safe to commit.
+**Follow-up required:** Buffon MUST add the "legit re-goal after disallowed" regression test (step 4: API catches up to 0-0, then a real 1-0 goal happens and should be announced).
+

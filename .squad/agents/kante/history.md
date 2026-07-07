@@ -88,6 +88,32 @@ Text + image renderers (knockout + groups), phase keyboard, `CHOICES_TYPE` env v
 - Lazy imports in callback: patch target = `worldcup_bot.porra.elecciones.*`.
 - Twemoji URL is jsDelivr (GitHub-hosted); non-2-char ISO codes → None → TLA fallback.
 
+## 2026-07-07 — USA-Belgium Goal Flood Incident (Post-Mortem)
+
+### Root cause: cross-source seen-baseline mismatch after a thread-sourced disallowed
+
+**Symptom:** 100+ alternating "⚽ GOOOOL! 1-0" / "❌ Gol anulado (VAR) — 0-0" messages sent during the USA-Belgium match.
+
+**Bug:** When Source A (Reddit thread, ~25s) announces BOTH a goal AND its disallowed before Source B (football-data API, ~60s) has polled even once, `seen_api` stays at the pre-goal score. After the thread disallowed resets `announced` back down, `seen_api == announced` (both at the old low). When the API eventually catches up to the brief high score, `reconcile()` sees `_ahead(new, ann)` = True (score_state.py line 220) and fires a **false goal**. Then when the API catches up to the VAR score, it fires a **false disallowed**. If the API is unstable during the review, this cycle repeats indefinitely — every ~60s.
+
+**Key files and lines:**
+- `src/worldcup_bot/reddit/score_state.py:220–241` — `_ahead(new, ann)` branch that fires the false goal
+- `src/worldcup_bot/__main__.py:931–998` — `poll_goals_job` lock section (missing: reset thread's `seen` after disallowed)
+- `src/worldcup_bot/__main__.py:1169–1207` — `poll_thread_goals_job` lock section (missing: reset API's `seen` after disallowed)
+
+**Why this match:** Thread was fast enough to see goal+VAR in <60s. API was still behind on both events. The brief score that was disallowed looked like a "new goal" from the API's perspective.
+
+**Why existing tests missed it:** `test_real_var_thread_goal_then_disallowed` sets `seen_api` to the pre-goal score (synchronized). The bug requires `seen_api` to be BELOW the pre-goal score when the disallowed fires — a distinct and untested case.
+
+**Fix direction:** After any disallowed (in either job, inside the lock), advance the OTHER source's `seen` to the pre-VAR announced score (`ann_homeaway` = the score that was disallowed). Use `max(current, ann_homeaway)` — never decrease. This marks the brief high score as "already seen" by the lagging source.
+
+**Blast radius:** Any future match with a VAR reversal where the thread is faster than the API. Routine scenario — HIGH urgency.
+
+**Incident report:** `.squad/decisions/inbox/kante-usa-belgium-goal-flood.md`  
+**Skill:** `.squad/skills/two-source-score-reconciliation/SKILL.md`
+
+---
+
 ## 2026-07-06 Summary — Empty-JSON Fallback Fix
 
 **Bug:** All 5 Mexico-England goals notified, none got "Ver gol" button on server.

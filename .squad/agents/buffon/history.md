@@ -3,16 +3,33 @@
 **Project:** WorldCup2026Over9000TelegramBot  
 **Current test count:** 2013 (as of 2026-07-01)
 
-## Incoming: 2026-07-07 — USA-Belgium VAR Reconcile Regression Test (⏳ PENDING)
+## Session: 2026-07-07 — USA-Belgium VAR Reconcile Regression Test (✅ DONE)
 
-**Kanté investigation:** Root-cause analysis of USA-Belgium 100-message flood complete. Cross-source score reconciliation bug identified (reconcile() in score_state.py:220–241). Proposed fix: advance seen baseline on disallowed, using max() (never decrease).
+**Kanté investigation:** Root-cause analysis of USA-Belgium 100-message flood complete. Cross-source score reconciliation bug identified (reconcile() in score_state.py:220–241). Fix: advance OTHER source's seen baseline to pre-VAR announced score using max() on disallowed claim inside goal_lock.
 
-**Regression test needed:**
-- **Name:** `test_thread_disallowed_then_lagging_api_catchup_no_false_goal`
-- **File:** `tests/test_poll_thread_goals_job.py` or `tests/test_score_state.py`
-- **Scenario:** Both sources seeded at 0-0. Thread announces 1-0 (goal) → 0-0 (VAR disallowed). API stays at {0,0} throughout. Then API reports 1-0. Expected: zero goal messages.
-- **Coverage gap:** Existing `test_real_var_thread_goal_then_disallowed` (line 518) has `seen_api={3,2}` (synchronized to pre-goal). This test requires `seen_api` to be **below** the pre-goal score when disallowed fires.
-- **Status:** ⏳ Awaiting implementation go-ahead from DrDonoso + Pirlo review.
+**Tests added:** `tests/test_poll_thread_goals_job.py` → new class `TestVARCrossSourceRaceRegression` (+4 tests).
+
+- **`test_thread_fast_api_lag_var_no_false_goal`** — primary USA-Belgium regression. Drives thread tick 1 (goal 1-0), tick 2 (VAR 0-0), then API tick (lagging catch-up to 1-0). Asserts zero sends on the API tick.
+- **`test_api_fast_thread_lag_var_no_false_goal`** — symmetric. API does goal+disallowed; lagging thread reports 1-0. Asserts zero sends on thread tick.
+- **`test_thread_fast_real_goal_after_var_not_suppressed`** — Pirlo's over-suppression guard (required). Drives thread goal+VAR, API catch-up to real post-VAR 0-0 (seen_api drops to {0,0}), then real thread goal. Asserts exactly 1 ⚽ send on the real goal — not zero (over-suppressed) and not >1 (duplicated).
+- **`test_api_fast_real_goal_after_var_not_suppressed`** — symmetric over-suppression guard. API goal+VAR, then real API goal. Asserts exactly 1 ⚽ send.
+
+**Coverage gap closed:** Existing `test_real_var_thread_goal_then_disallowed` (line 518) seeds `seen_api={3,2}` (already synced to pre-goal score). That does NOT reproduce the bug. The new tests seed `seen_api={0,0}` (BELOW the pre-goal score), which is the exact precondition for the oscillation loop.
+
+**Outcome:** All 4 tests PASS. Red/green stash-cycle confirmed. Full suite: 2365 passed. +4 tests total.
+
+## Learnings
+
+### Coverage gap: two-source disagreement on VAR disallowed
+The critical gap: two-source regression tests must vary `seen_api` to be BELOW the pre-goal score (not just synced to it). The oscillation only triggers when `seen_api < pre-VAR score` at the time the disallowed fires. Any existing test that seeds `seen_api` at the pre-VAR score misses the bug entirely. Future cross-source VAR tests should always include a variant with the second source lagging behind the pre-goal score.
+
+### Harness pattern for driving both jobs in sequence
+Use `_make_context` from `test_poll_thread_goals_job.py` which provides `live_scores` in `bot_data`. Both `poll_thread_goals_job` and `poll_goals_job` share the same `ctx` and thus the same `live_scores`, `seen_scores`, and `goal_lock`. Drive them sequentially; reset `send_message` mock between ticks with `ctx.bot.send_message.reset_mock()`. Set `ctx.bot.edit_message_text = AsyncMock()` to prevent `_backfill_scorer_in_clip_store` from failing when scorer-less clip entries are present.
+
+### Key file paths
+- `src/worldcup_bot/__main__.py` — both polling jobs, cross-source fix at lines 1221-1231 (thread→api) and 1000-1010 (api→thread)
+- `src/worldcup_bot/reddit/score_state.py` — `reconcile()` function, stateless, lines 140-269
+- `tests/test_poll_thread_goals_job.py` — full cross-source integration test harness; new class `TestVARCrossSourceRaceRegression` at end of file
 
 ---
 
