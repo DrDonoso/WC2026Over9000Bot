@@ -7,6 +7,26 @@
 
 ## Recent Sessions (2026-06-26 onwards)
 
+### 2026-07-07 — USA-Belgium VAR Reconcile Fix Review — PENDING
+
+**Role:** Lead reviewer. Urgent concurrency fix awaiting go-ahead.
+
+**Incident:** USA-Belgium match (2026-07-06) triggered 100+ alternating goal/disallowed messages — cross-source score reconciliation bug in reconcile() (score_state.py:220–241).
+
+**Root cause:** When source A (Reddit thread, ~25s) announces VAR-disallowed goal before source B (API, ~60s) has ever seen the goal, B's delayed catch-up to the brief high score is mistaken for a brand-new goal → false goal announcement → catches up to disallowed → false disallowed announcement → loop repeats every ~60s.
+
+**Proposed fix:** On processing disallowed delta, advance the OTHER source's seen baseline to pre-VAR announced score using max() (never decrease):
+- poll_thread_goals_job: advance api_seen after thread disallowed
+- poll_goals_job: advance thread_seen after API disallowed
+
+**Files to review:** score_state.py (reconcile ~137, _ahead ~220–241), __main__.py (poll_thread_goals_job ~1204, poll_goals_job ~996)
+
+**Blast radius:** Any future match with VAR reversal where thread is ahead of API.
+
+**Status:** ⏳ PENDING — awaiting DrDonoso go-ahead + Kanté implementation. Test coverage gap flagged: existing test (line 518) doesn't cover seen_api below pre-goal score.
+
+**Cross-team:** Buffon incoming regression test (`test_thread_disallowed_then_lagging_api_catchup_no_false_goal`). May require concurrency safeguards (potential future Buffon coordination).
+
 ### 2026-07-03 — Post-Final VAR Score Correction Watch — APPROVED
 
 **Role:** Lead reviewer. Approved VAR correction watch architecture (6 concurrency checks: no double-correction, no false-correction, window/prune safety, edit safety, no regression). 2165 tests pass. Decision merged to decisions.md. Ship it.

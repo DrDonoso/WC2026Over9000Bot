@@ -3,6 +3,19 @@
 **Project:** WorldCup2026Over9000TelegramBot  
 **Current test count:** 2013 (as of 2026-07-01)
 
+## Incoming: 2026-07-07 — USA-Belgium VAR Reconcile Regression Test (⏳ PENDING)
+
+**Kanté investigation:** Root-cause analysis of USA-Belgium 100-message flood complete. Cross-source score reconciliation bug identified (reconcile() in score_state.py:220–241). Proposed fix: advance seen baseline on disallowed, using max() (never decrease).
+
+**Regression test needed:**
+- **Name:** `test_thread_disallowed_then_lagging_api_catchup_no_false_goal`
+- **File:** `tests/test_poll_thread_goals_job.py` or `tests/test_score_state.py`
+- **Scenario:** Both sources seeded at 0-0. Thread announces 1-0 (goal) → 0-0 (VAR disallowed). API stays at {0,0} throughout. Then API reports 1-0. Expected: zero goal messages.
+- **Coverage gap:** Existing `test_real_var_thread_goal_then_disallowed` (line 518) has `seen_api={3,2}` (synchronized to pre-goal). This test requires `seen_api` to be **below** the pre-goal score when disallowed fires.
+- **Status:** ⏳ Awaiting implementation go-ahead from DrDonoso + Pirlo review.
+
+---
+
 ## Latest Session: 2026-07-01 — Podium Image Feature — QA Gate (PASS)
 
 **Kanté's change:** New `src/worldcup_bot/bot/podium_image.py` module — `render_podium` (sync, never raises),
