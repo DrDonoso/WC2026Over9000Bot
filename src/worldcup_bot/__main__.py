@@ -997,6 +997,18 @@ async def poll_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                     changed = True
                     deltas_to_process = list(deltas)
 
+                    # Cross-source fix: after a disallowed, advance the thread's seen
+                    # to the pre-VAR announced score (ann_homeaway) so a lagging thread
+                    # that never saw the goal doesn't re-announce it as a new goal.
+                    # max() ensures we never decrease a seen baseline that was already higher.
+                    if any(d.kind == "disallowed" for d in deltas):
+                        t_seen = seen_scores["thread"]
+                        cur = t_seen.get(match_key, {"home": 0, "away": 0})
+                        t_seen[match_key] = {
+                            "home": max(cur["home"], ann_homeaway["home"]),
+                            "away": max(cur["away"], ann_homeaway["away"]),
+                        }
+
                 else:
                     # No goals/disallowed to announce.
                     if was_already_finished:
@@ -1205,6 +1217,18 @@ async def poll_thread_goals_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                         scores[key]["away"] = new_ann["away"]
                         save_scores(state_path, scores)
                         changed = True
+
+                        # Cross-source fix: after a disallowed, advance the API's seen
+                        # to the pre-VAR announced score (ann_homeaway) so a lagging API
+                        # that never saw the goal doesn't re-announce it as a new goal.
+                        # max() ensures we never decrease a seen baseline already higher.
+                        if any(d.kind == "disallowed" for d in deltas):
+                            a_seen = seen_scores["api"]
+                            cur = a_seen.get(key, {"home": 0, "away": 0})
+                            a_seen[key] = {
+                                "home": max(cur["home"], ann_homeaway["home"]),
+                                "away": max(cur["away"], ann_homeaway["away"]),
+                            }
 
                 # ── Outside the lock: build notifications ─────────────────────
 

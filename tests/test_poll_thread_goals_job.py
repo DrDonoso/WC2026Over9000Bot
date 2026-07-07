@@ -1703,3 +1703,503 @@ class TestPollThreadGoalsJobScheduleLive:
 
         # Not seeded → skipped → no announcement
         ctx.bot.send_message.assert_not_called()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bug 5 regression — USA-Belgium VAR flood: cross-source seen not advanced
+# on disallowed, causing the lagging source to re-announce an already-reversed goal
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVARCrossSourceRaceRegression:
+    """Regression tests for Bug 5: USA-Belgium 100-message flood (2026-07-06).
+
+    ROOT CAUSE: when the Reddit thread reports a goal AND its VAR reversal inside
+    one API poll window, ``seen_api`` is never updated to reflect the brief high
+    score.  When the football-data API later reports that high score it looks like
+    a brand-new goal to ``reconcile()`` → false goal, false disallowed, repeat.
+
+    FIX (in poll_thread_goals_job and poll_goals_job): after claiming a disallowed
+    inside ``goal_lock``, advance the OTHER source's ``seen`` to the pre-VAR
+    announced score using ``max()`` — never decrease a baseline.
+
+    KEY gap versus ``test_real_var_thread_goal_then_disallowed`` (~line 518):
+    that test seeds ``seen_api`` already synced to the pre-goal score {3,2}.
+    These tests seed ``seen_api={0,0}`` (BELOW the pre-goal score) — the actual
+    precondition that triggers the USA-Belgium oscillation.
+    """
+
+    @pytest.mark.asyncio
+    async def test_thread_fast_api_lag_var_no_false_goal(self, tmp_path):
+        """USA-Belgium (2026-07-06) primary regression: thread sees goal+VAR inside
+        one API poll window.  seen_api is BEHIND — it has NOT seen the 1-0 goal.
+
+        Steps:
+          1. Thread tick 1 → USA goal (1-0), announced 1-0.           [legit: 1 send]
+          2. Thread tick 2 → VAR, back to 0-0.                        [legit: 1 send]
+             FIX: seen_api["1"] advanced to {1,0} inside goal_lock.
+          3. API tick: football-data reports 1-0 (lagging catch-up).
+             ASSERT: 0 additional sends.
+
+        Without the fix: reconcile(seen_api={0,0}, ann={0,0}, new=1-0) emits a
+        false goal here — this test is RED on pre-fix code.
+        """
+        from worldcup_bot.__main__ import poll_goals_job
+
+        settings = _make_settings(tmp_path)
+
+        # ── Initial state: 0-0, all sources at baseline ───────────────────────
+        live_scores = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(
+            settings,
+            live_scores=live_scores,
+            seen_thread={"1": {"home": 0, "away": 0}},
+        )
+        # KEY PRECONDITION: seen_api is also at {0,0}.  The API is lagging and has
+        # NOT seen the brief 1-0 goal.  The existing test seeds seen_api already
+        # synced to the pre-goal score — that does NOT reproduce this bug.
+        ctx.bot_data["seen_scores"]["api"]["1"] = {"home": 0, "away": 0}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        ctx.bot.edit_message_text = AsyncMock()
+
+        match_10 = _make_match(
+            1, "IN_PLAY",
+            home_name="USA", away_name="Belgium",
+            home_tla="USA", away_tla="BEL",
+            home_score=1, away_score=0,
+        )
+        match_00 = _make_match(
+            1, "IN_PLAY",
+            home_name="USA", away_name="Belgium",
+            home_tla="USA", away_tla="BEL",
+            home_score=0, away_score=0,
+        )
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        # ── Thread tick 1: USA goal (Pulisic 35') ─────────────────────────────
+        goal_event = _make_goal_event(
+            scorer="Pulisic",
+            scoring_team="USA",
+            home_score=1, away_score=0,
+            minute_text="35", minute_sort=35.0,
+            home_team="USA", away_team="Belgium",
+            post_id="usabel_001",
+        )
+        mock_scanner.scan_live_matches = MagicMock(
+            return_value=[_make_thread_result("USA", "BEL", [goal_event])]
+        )
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match_10]
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1, (
+            "Thread tick 1: expected exactly 1 goal notification"
+        )
+        assert "⚽" in ctx.bot.send_message.call_args.kwargs["text"]
+        assert live_scores["1"]["home"] == 1
+        ctx.bot.send_message.reset_mock()
+
+        # ── Thread tick 2: VAR disallowed — thread score reverts to 0-0 ───────
+        # Thread events show only 0-0 level activity; max home_score = 0 <
+        # announced 1 → reconcile fires a disallowed for this source's own drop.
+        # scorer="" so backfill skips this event entirely.
+        var_event = _make_goal_event(
+            scorer="",
+            scoring_team="Belgium",
+            home_score=0, away_score=0,
+            minute_text="38", minute_sort=38.0,
+            home_team="USA", away_team="Belgium",
+            post_id="usabel_002",
+        )
+        mock_scanner.scan_live_matches = MagicMock(
+            return_value=[_make_thread_result("USA", "BEL", [var_event])]
+        )
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match_00]
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1, (
+            "Thread tick 2: expected exactly 1 disallowed notification"
+        )
+        dis_text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "VAR" in dis_text or "❌" in dis_text
+        assert live_scores["1"]["home"] == 0, "Announced must be corrected to 0-0"
+        ctx.bot.send_message.reset_mock()
+
+        # ── API tick: football-data FINALLY reports 1-0 ───────────────────────
+        # This is the delayed catch-up that triggered the USA-Belgium flood.
+        # With the fix: seen_api["1"] was advanced to {1,0} when the disallowed
+        # was claimed, so reconcile(seen={1,0}, ann={0,0}, new=1-0) hits step 2
+        # (new == seen) → no delta → zero sends.
+        # Without the fix: seen_api["1"] is still {0,0}, reconcile(seen={0,0},
+        # ann={0,0}, new=1-0) hits _ahead branch → false goal emitted.
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match_10]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 0, (
+            "BUG #USA-Belgium regression: lagging API catch-up to 1-0 after thread "
+            "already announced goal+disallowed must produce ZERO sends — not a false "
+            f"goal.\nSends recorded: {ctx.bot.send_message.call_args_list}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_api_fast_thread_lag_var_no_false_goal(self, tmp_path):
+        """Symmetric case: API sees goal+VAR inside one thread-poll window.
+        seen_thread is BEHIND — it has NOT seen the 1-0 goal.
+
+        Steps:
+          1. API tick 1 → USA goal (1-0), announced 1-0.               [legit: 1 send]
+          2. API tick 2 → VAR, back to 0-0.                            [legit: 1 send]
+             FIX: seen_thread["1"] advanced to {1,0} inside goal_lock.
+          3. Thread tick: Reddit thread reports 1-0 (lagging catch-up).
+             ASSERT: 0 additional sends.
+        """
+        from worldcup_bot.__main__ import poll_goals_job
+
+        settings = _make_settings(tmp_path)
+
+        live_scores = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(
+            settings,
+            live_scores=live_scores,
+            seen_thread={"1": {"home": 0, "away": 0}},
+        )
+        ctx.bot_data["seen_scores"]["api"]["1"] = {"home": 0, "away": 0}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        ctx.bot.edit_message_text = AsyncMock()
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        match_10 = _make_match(
+            1, "IN_PLAY",
+            home_name="USA", away_name="Belgium",
+            home_tla="USA", away_tla="BEL",
+            home_score=1, away_score=0,
+        )
+        match_00 = _make_match(
+            1, "IN_PLAY",
+            home_name="USA", away_name="Belgium",
+            home_tla="USA", away_tla="BEL",
+            home_score=0, away_score=0,
+        )
+
+        # ── API tick 1: goal ──────────────────────────────────────────────────
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match_10]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1, (
+            "API tick 1: expected exactly 1 goal notification"
+        )
+        assert "⚽" in ctx.bot.send_message.call_args.kwargs["text"]
+        assert live_scores["1"]["home"] == 1
+        ctx.bot.send_message.reset_mock()
+
+        # ── API tick 2: VAR disallowed ────────────────────────────────────────
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match_00]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1, (
+            "API tick 2: expected exactly 1 disallowed notification"
+        )
+        dis_text = ctx.bot.send_message.call_args.kwargs["text"]
+        assert "VAR" in dis_text or "❌" in dis_text
+        assert live_scores["1"]["home"] == 0
+        ctx.bot.send_message.reset_mock()
+
+        # ── Thread tick: Reddit thread FINALLY reports 1-0 ───────────────────
+        # With the fix: seen_thread["1"] was advanced to {1,0} during the API's
+        # disallowed claim, so reconcile(seen={1,0}, ann={0,0}, new=1-0) hits
+        # step 2 (new == seen) → no delta → zero sends.
+        goal_event = _make_goal_event(
+            scorer="Pulisic",
+            scoring_team="USA",
+            home_score=1, away_score=0,
+            minute_text="35", minute_sort=35.0,
+            home_team="USA", away_team="Belgium",
+            post_id="usabel_sym_001",
+        )
+        mock_scanner.scan_live_matches = MagicMock(
+            return_value=[_make_thread_result("USA", "BEL", [goal_event])]
+        )
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match_00]
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 0, (
+            "Symmetric case: lagging thread catch-up to 1-0 after API already "
+            "announced goal+disallowed must produce ZERO sends.\n"
+            f"Sends recorded: {ctx.bot.send_message.call_args_list}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_thread_fast_real_goal_after_var_not_suppressed(self, tmp_path):
+        """Pirlo's over-suppression guard (thread-fast ordering, REQUIRED).
+
+        A legitimate goal reaching the SAME scoreline AFTER a VAR disallowed must
+        fire EXACTLY ONE announcement — the fix must not swallow it.
+
+        Steps:
+          1. Thread tick 1 → USA goal (1-0).                          [legit: 1 send]
+          2. Thread tick 2 → VAR, back to 0-0.                       [legit: 1 send]
+             Fix advances seen_api["1"] to {1,0}.
+          3. API tick: football-data reports 0-0 (real post-VAR score). [0 sends]
+             reconcile(seen_api={1,0}, ann={0,0}, new=0-0) → new_seen=new={0,0};
+             seen_api naturally drops back to {0,0} (Pirlo's mechanism).
+          4. Thread tick: USA GENUINELY scores 1-0 for real.
+             ASSERT: exactly 1 goal announcement — not swallowed, not duplicated.
+        """
+        from worldcup_bot.__main__ import poll_goals_job
+
+        settings = _make_settings(tmp_path)
+
+        live_scores = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(
+            settings,
+            live_scores=live_scores,
+            seen_thread={"1": {"home": 0, "away": 0}},
+        )
+        ctx.bot_data["seen_scores"]["api"]["1"] = {"home": 0, "away": 0}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        ctx.bot.edit_message_text = AsyncMock()
+
+        match_10 = _make_match(
+            1, "IN_PLAY",
+            home_name="USA", away_name="Belgium",
+            home_tla="USA", away_tla="BEL",
+            home_score=1, away_score=0,
+        )
+        match_00 = _make_match(
+            1, "IN_PLAY",
+            home_name="USA", away_name="Belgium",
+            home_tla="USA", away_tla="BEL",
+            home_score=0, away_score=0,
+        )
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        # ── Thread tick 1: USA goal (Pulisic 35') ─────────────────────────────
+        mock_scanner.scan_live_matches = MagicMock(
+            return_value=[_make_thread_result("USA", "BEL", [_make_goal_event(
+                scorer="Pulisic", scoring_team="USA",
+                home_score=1, away_score=0,
+                minute_text="35", minute_sort=35.0,
+                home_team="USA", away_team="Belgium",
+                post_id="usabel_rg001",
+            )])]
+        )
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match_10]
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1
+        assert live_scores["1"]["home"] == 1
+        ctx.bot.send_message.reset_mock()
+
+        # ── Thread tick 2: VAR disallowed ─────────────────────────────────────
+        mock_scanner.scan_live_matches = MagicMock(
+            return_value=[_make_thread_result("USA", "BEL", [_make_goal_event(
+                scorer="", scoring_team="Belgium",
+                home_score=0, away_score=0,
+                minute_text="38", minute_sort=38.0,
+                home_team="USA", away_team="Belgium",
+                post_id="usabel_rg002",
+            )])]
+        )
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match_00]
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1
+        assert live_scores["1"]["home"] == 0
+        # Fix must have advanced seen_api to the pre-VAR score {1,0}
+        assert ctx.bot_data["seen_scores"]["api"]["1"] == {"home": 1, "away": 0}, (
+            "Fix must advance seen_api to pre-VAR announced {1,0} after disallowed"
+        )
+        ctx.bot.send_message.reset_mock()
+
+        # ── API tick: reports 0-0 (real post-VAR score) ───────────────────────
+        # reconcile(seen_api={1,0}, ann={0,0}, new=0-0) → new_seen=new={0,0}:
+        # seen_api naturally drops back to {0,0} when the API catches up to the
+        # actual post-VAR score. This is Pirlo's mechanism — the drop enables
+        # real-goal detection in the next step.
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match_00]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 0, (
+            "API reporting real post-VAR 0-0 must produce no send"
+        )
+        assert ctx.bot_data["seen_scores"]["api"]["1"] == {"home": 0, "away": 0}, (
+            "seen_api must drop back to {0,0} naturally — Pirlo's reset mechanism"
+        )
+        ctx.bot.send_message.reset_mock()
+
+        # ── Thread tick: USA GENUINELY scores 1-0 for real ───────────────────
+        # seen_thread={0,0} (naturally from VAR step), ann={0,0}.
+        # reconcile({0,0}, {0,0}, 1, 0) → _ahead({1,0},{0,0}) = True → REAL GOAL.
+        # The fix must NOT suppress this — it only advanced seen_API, not seen_thread.
+        mock_scanner.scan_live_matches = MagicMock(
+            return_value=[_make_thread_result("USA", "BEL", [_make_goal_event(
+                scorer="Reyna", scoring_team="USA",
+                home_score=1, away_score=0,
+                minute_text="72", minute_sort=72.0,
+                home_team="USA", away_team="Belgium",
+                post_id="usabel_rg003",
+            )])]
+        )
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_live_matches.return_value = [match_10]
+            await poll_thread_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1, (
+            "Over-suppression guard: real goal at 1-0 after VAR+fix must fire "
+            "EXACTLY ONE announcement — fix must not swallow it.\n"
+            f"Sends recorded: {ctx.bot.send_message.call_args_list}"
+        )
+        assert "⚽" in ctx.bot.send_message.call_args.kwargs["text"]
+        assert live_scores["1"]["home"] == 1
+
+    @pytest.mark.asyncio
+    async def test_api_fast_real_goal_after_var_not_suppressed(self, tmp_path):
+        """Symmetric over-suppression guard (api-fast ordering).
+
+        After the API processes goal+disallowed, seen_api is naturally {0,0}
+        (the disallowing source always resets its own seen). A real subsequent
+        goal at 1-0 via the API must fire exactly ONE announcement.
+
+        Steps:
+          1. API tick 1 → goal (1-0).                                  [legit: 1 send]
+          2. API tick 2 → VAR, back to 0-0.                           [legit: 1 send]
+             Fix advances seen_thread["1"] to {1,0}.
+          3. API tick: reports 1-0 (REAL new goal).
+             ASSERT: exactly 1 goal announcement — seen_api={0,0} naturally detects it.
+        """
+        from worldcup_bot.__main__ import poll_goals_job
+
+        settings = _make_settings(tmp_path)
+
+        live_scores = {"1": {"home": 0, "away": 0, "status": "IN_PLAY"}}
+        ctx = _make_context(
+            settings,
+            live_scores=live_scores,
+            seen_thread={"1": {"home": 0, "away": 0}},
+        )
+        ctx.bot_data["seen_scores"]["api"]["1"] = {"home": 0, "away": 0}
+        ctx.bot.send_message = AsyncMock(return_value=MagicMock(message_id=99))
+        ctx.bot.edit_message_text = AsyncMock()
+
+        mock_scanner = MagicMock()
+        mock_scanner.find_match_thread = MagicMock(return_value=None)
+        ctx.bot_data["reddit_scanner"] = mock_scanner
+
+        match_10 = _make_match(
+            1, "IN_PLAY",
+            home_name="USA", away_name="Belgium",
+            home_tla="USA", away_tla="BEL",
+            home_score=1, away_score=0,
+        )
+        match_00 = _make_match(
+            1, "IN_PLAY",
+            home_name="USA", away_name="Belgium",
+            home_tla="USA", away_tla="BEL",
+            home_score=0, away_score=0,
+        )
+
+        # ── API tick 1: goal ──────────────────────────────────────────────────
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match_10]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1
+        assert live_scores["1"]["home"] == 1
+        ctx.bot.send_message.reset_mock()
+
+        # ── API tick 2: VAR disallowed ────────────────────────────────────────
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match_00]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1
+        assert live_scores["1"]["home"] == 0
+        # The disallowing source (API) resets its own seen naturally to {0,0};
+        # the fix advanced seen_thread to {1,0} to protect against thread lag.
+        assert ctx.bot_data["seen_scores"]["api"]["1"] == {"home": 0, "away": 0}
+        assert ctx.bot_data["seen_scores"]["thread"]["1"] == {"home": 1, "away": 0}, (
+            "Fix must advance seen_thread to pre-VAR announced {1,0}"
+        )
+        ctx.bot.send_message.reset_mock()
+
+        # ── API tick: REAL goal (1-0 for real) ───────────────────────────────
+        # seen_api={0,0} naturally (own disallowed reset it) → reconcile detects
+        # the genuine 1-0 goal without any interference from seen_thread.
+        with (
+            patch("worldcup_bot.__main__.make_client") as mock_client,
+            patch("worldcup_bot.__main__.save_scores"),
+            patch("worldcup_bot.__main__.save_clips"),
+        ):
+            mock_client.return_value.get_all_matches.return_value = [match_10]
+            await poll_goals_job(ctx)
+
+        assert ctx.bot.send_message.call_count == 1, (
+            "Symmetric over-suppression guard: real goal at 1-0 after API VAR "
+            "must fire EXACTLY ONE announcement.\n"
+            f"Sends recorded: {ctx.bot.send_message.call_args_list}"
+        )
+        assert "⚽" in ctx.bot.send_message.call_args.kwargs["text"]
+        assert live_scores["1"]["home"] == 1
