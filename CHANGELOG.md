@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260707] - 2026-07-07
+
+- fix(goals): prevent VAR-disallowed goal flood from cross-source seen desync
+
+
 ## [20260706.04] - 2026-07-06
 
 - feat(admin): add hidden /evilSanchez to fire the daily rich image on demand
