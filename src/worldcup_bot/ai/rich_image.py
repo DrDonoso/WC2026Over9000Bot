@@ -122,8 +122,30 @@ RICH_HISTORY_MAX_LINES = 30
 RICH_CAPTIONS_FILE = "rich_captions.txt"
 RICH_CAPTIONS_MAX = 6
 
+RICH_BIRTHDAY_MONTH = 7
+RICH_BIRTHDAY_DAY = 8
+RICH_BIRTH_YEAR = 1984   # turns 42 in 2026 (meaning-of-life gag); age auto-increments yearly
 
-def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "", pose: str = "") -> str:
+RICH_BIRTHDAY_CLAUSE = (
+    " IMPORTANT: today is the person's BIRTHDAY — turn the scene into an opulent, over-the-top "
+    "luxury BIRTHDAY CELEBRATION: a lavish party with a giant multi-tiered birthday cake, "
+    "balloons, party decorations and a celebratory banner. The cake and/or banner MUST clearly "
+    "and legibly display the number \"{age}\" (their age). Keep it tasteful and photorealistic, "
+    "celebrating their {age}th birthday in grand style."
+)
+
+
+def is_rich_birthday(now: datetime) -> bool:
+    """True when *now* is the rich character's birthday (July 8, any year)."""
+    return now.month == RICH_BIRTHDAY_MONTH and now.day == RICH_BIRTHDAY_DAY
+
+
+def rich_birthday_age(now: datetime) -> int:
+    """Age the character turns on *now*'s birthday (now.year - RICH_BIRTH_YEAR)."""
+    return now.year - RICH_BIRTH_YEAR
+
+
+def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "", pose: str = "", birthday: bool = False, age: int | None = None) -> str:
     """Return the full editing prompt for one wealth-escalation iteration.
 
     Richness escalation is implicit: each run takes the previous output as input,
@@ -134,6 +156,7 @@ def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "",
     a clause is added asking the model to incorporate those elements tastefully.
     When ``pose`` is non-empty (one entry from :data:`POSE_ACTIVITIES`), a clause forces
     the model to show the person in that specific activity so poses vary each iteration.
+    When ``birthday`` is True, appends :data:`RICH_BIRTHDAY_CLAUSE` (birthday party theme).
     When ``anchor`` is True, appends :data:`RICH_FACE_ANCHOR_CLAUSE` instructing the
     model that a second reference image (the original) is provided to lock the face.
     """
@@ -154,6 +177,8 @@ def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "",
             f" In THIS image, show the person {pose}."
             " VARY the pose and activity each time — do NOT default to sitting and toasting with champagne."
         )
+    if birthday and age is not None:
+        base += RICH_BIRTHDAY_CLAUSE.format(age=age)
     if anchor:
         base += RICH_FACE_ANCHOR_CLAUSE
     return base
@@ -422,6 +447,8 @@ async def generate_rich_caption(
     level: int,
     history: str = "",
     recent_captions: str = "",
+    birthday: bool = False,
+    age: int | None = None,
     _client: object | None = None,
 ) -> tuple[str, str]:
     """Generate a cocky first-person caption comparing BEFORE and AFTER images.
@@ -465,6 +492,14 @@ async def generate_rich_caption(
                 "text": (
                     "TEXTOS ANTERIORES (NO repitas su estructura, aperturas, insultos ni"
                     f" despedidas — usa vocabulario y coletillas DISTINTAS):\n{recent_captions}"
+                ),
+            })
+        if birthday and age is not None:
+            user_parts.append({
+                "type": "text",
+                "text": (
+                    f"HOY ES TU CUMPLEAÑOS: hoy cumples {age} años. Celébralo A LO GRANDE en el mensaje además de "
+                    f"presumir de tu riqueza a costa del grupo — menciona EXPLÍCITAMENTE que cumples {age}."
                 ),
             })
         user_parts.append({
@@ -576,6 +611,11 @@ async def run_rich_iteration(
     now = _now or datetime.now(pytz.timezone(settings.timezone))
     date_str = now.strftime("%Y-%m-%d")
 
+    birthday = is_rich_birthday(now)
+    age = rich_birthday_age(now)
+    if birthday:
+        log.info("run_rich_iteration: BIRTHDAY MODE active — age=%d", age)
+
     # Read state BEFORE editing
     image_history = format_history_for_prompt(settings.state_dir, max_items=12)
     full_history = format_history_for_prompt(settings.state_dir)
@@ -606,7 +646,7 @@ async def run_rich_iteration(
              level, base_image, using_anchor, winners, themes)
 
     pose = random.choice(POSE_ACTIVITIES)
-    prompt = build_rich_prompt(history=image_history, anchor=using_anchor, themes=themes, pose=pose)
+    prompt = build_rich_prompt(history=image_history, anchor=using_anchor, themes=themes, pose=pose, birthday=birthday, age=age)
 
     png_bytes = await edit_rich_image(
         api_key=api_key,
@@ -623,7 +663,7 @@ async def run_rich_iteration(
     Path(tmp_path).write_bytes(png_bytes)
 
     # Generate caption via main chat model — best-effort, never fatal
-    caption = "🤑 Cada día más rico a vuestra costa"
+    caption = f"🎂 ¡Hoy cumplo {age} y me lo monto a lo grande a vuestra costa!" if birthday else "🤑 Cada día más rico a vuestra costa"
     if settings.openai_api_key and settings.openai_base_url and settings.openai_model:
         try:
             caption, memo = await generate_rich_caption(
@@ -635,13 +675,15 @@ async def run_rich_iteration(
                 level=level,
                 history=full_history,
                 recent_captions=recent_captions,
+                birthday=birthday,
+                age=age,
                 _client=_caption_client,
             )
             append_history(settings.state_dir, date_str, level, memo)
             append_caption(settings.state_dir, caption)
         except Exception as exc:
             log.warning("run_rich_iteration: caption generation failed: %s", exc)
-            caption = "🤑 Cada día más rico a vuestra costa"
+            caption = f"🎂 ¡Hoy cumplo {age} y me lo monto a lo grande a vuestra costa!" if birthday else "🤑 Cada día más rico a vuestra costa"
 
     # Atomic rename: remove stale final if present, then promote temp
     final_path = os.path.join(settings.state_dir, "rich_modified.png")

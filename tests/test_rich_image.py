@@ -1093,6 +1093,9 @@ class TestRunRichIteration:
         assert caption == "Soy millonario, pringados"
 
     async def test_caption_falls_back_when_caption_client_raises(self, tmp_path):
+        from datetime import datetime
+        import pytz
+
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         data_dir = tmp_path / "data"
@@ -1103,14 +1106,19 @@ class TestRunRichIteration:
         fake = _fake_client()
         bad_cap = MagicMock()
         bad_cap.chat.completions.create = AsyncMock(side_effect=RuntimeError("caption API down"))
+        non_birthday_now = datetime(2026, 7, 9, 11, 0, 0, tzinfo=pytz.UTC)
 
         out_path, level, caption = await run_rich_iteration(
-            settings, _client=fake, _caption_client=bad_cap, _data_dir=str(data_dir)
+            settings, _client=fake, _caption_client=bad_cap, _data_dir=str(data_dir),
+            _now=non_birthday_now,
         )
         assert caption == "🤑 Cada día más rico a vuestra costa"
         assert Path(out_path).exists()
 
     async def test_caption_falls_back_when_chat_not_configured(self, tmp_path):
+        from datetime import datetime
+        import pytz
+
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         data_dir = tmp_path / "data"
@@ -1125,8 +1133,9 @@ class TestRunRichIteration:
             openai_model="",
         )
         fake = _fake_client()
+        non_birthday_now = datetime(2026, 7, 9, 11, 0, 0, tzinfo=pytz.UTC)
         out_path, level, caption = await run_rich_iteration(
-            settings, _client=fake, _data_dir=str(data_dir)
+            settings, _client=fake, _data_dir=str(data_dir), _now=non_birthday_now,
         )
         assert caption == "🤑 Cada día más rico a vuestra costa"
         assert Path(out_path).exists()
@@ -1253,6 +1262,9 @@ class TestRunRichIteration:
 
     async def test_caption_error_memo_not_appended_image_still_written(self, tmp_path):
         """When caption raises, no history line is written, but image is saved."""
+        from datetime import datetime
+        import pytz
+
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         data_dir = tmp_path / "data"
@@ -1263,12 +1275,14 @@ class TestRunRichIteration:
         fake_img = _fake_client(base64.b64encode(b"PNG").decode())
         bad_cap = MagicMock()
         bad_cap.chat.completions.create = AsyncMock(side_effect=RuntimeError("down"))
+        non_birthday_now = datetime(2026, 7, 9, 11, 0, 0, tzinfo=pytz.UTC)
 
         out_path, level, caption = await run_rich_iteration(
             settings,
             _client=fake_img,
             _caption_client=bad_cap,
             _data_dir=str(data_dir),
+            _now=non_birthday_now,
         )
 
         assert caption == "🤑 Cada día más rico a vuestra costa"
@@ -2844,3 +2858,244 @@ class TestBuildRichPromptPose:
         themes_pos = p.index(themes)
         pose_pos = p.index(pose)
         assert themes_pos < pose_pos
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Birthday mode — July 8 every year
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichBirthdayMode:
+    """Tests for the birthday mode (July 8 every year).
+
+    Contract under test:
+    - RICH_BIRTHDAY_MONTH=7, RICH_BIRTHDAY_DAY=8, RICH_BIRTH_YEAR=1984
+    - is_rich_birthday(now) → True iff month==7 and day==8
+    - rich_birthday_age(now) → now.year - RICH_BIRTH_YEAR
+    - build_rich_prompt(birthday=True, age=N) → birthday-party clause with str(N) + cake/birthday words
+    - build_rich_prompt(birthday=False) → no birthday clause; augments not replaces base
+    - run_rich_iteration(_now=July 8) → prompt contains birthday clause + "42"; caption
+      messages receive birthday instruction mentioning age; birthday-aware fallback when
+      no chat model configured
+    """
+
+    # ── is_rich_birthday ───────────────────────────────────────────────────────
+
+    def test_is_rich_birthday_true_on_july_8_2026(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_birthday
+        import pytz
+        assert is_rich_birthday(datetime(2026, 7, 8, 10, 0, 0, tzinfo=pytz.UTC)) is True
+
+    def test_is_rich_birthday_true_another_year_july_8(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_birthday
+        import pytz
+        assert is_rich_birthday(datetime(2030, 7, 8, 12, 0, 0, tzinfo=pytz.UTC)) is True
+
+    def test_is_rich_birthday_false_july_7(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_birthday
+        import pytz
+        assert is_rich_birthday(datetime(2026, 7, 7, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_rich_birthday_false_july_9(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_birthday
+        import pytz
+        assert is_rich_birthday(datetime(2026, 7, 9, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_rich_birthday_false_jan_8_guards_month_day_confusion(self):
+        # Jan 8 has day==8 but wrong month — guards (month, day) transposition.
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_birthday
+        import pytz
+        assert is_rich_birthday(datetime(2026, 1, 8, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    # ── rich_birthday_age ──────────────────────────────────────────────────────
+
+    def test_rich_birthday_age_2026_is_42(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import rich_birthday_age, RICH_BIRTH_YEAR
+        import pytz
+        age = rich_birthday_age(datetime(2026, 7, 8, tzinfo=pytz.UTC))
+        assert age == 2026 - RICH_BIRTH_YEAR
+
+    def test_rich_birthday_age_increments_year_on_year(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import rich_birthday_age
+        import pytz
+        age_2026 = rich_birthday_age(datetime(2026, 7, 8, tzinfo=pytz.UTC))
+        age_2027 = rich_birthday_age(datetime(2027, 7, 8, tzinfo=pytz.UTC))
+        assert age_2027 == age_2026 + 1
+
+    # ── build_rich_prompt — birthday parameter ─────────────────────────────────
+
+    def test_build_rich_prompt_birthday_true_contains_age_and_celebration(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(birthday=True, age=42)
+        assert "42" in p
+        lower = p.lower()
+        assert (
+            "birthday" in lower
+            or "cumpleaños" in lower
+            or "cake" in lower
+            or "tarta" in lower
+            or "celebr" in lower
+            or "party" in lower
+            or "fiesta" in lower
+        )
+
+    def test_build_rich_prompt_birthday_false_no_birthday_clause(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(birthday=False)
+        lower = p.lower()
+        assert "birthday" not in lower
+        assert "cumpleaños" not in lower
+        assert "42" not in p
+
+    def test_build_rich_prompt_birthday_true_augments_base_not_replaces(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt, RICH_EDIT_PROMPT
+        p = build_rich_prompt(birthday=True, age=42)
+        # Birthday mode augments — must start with (and include) the base prompt
+        assert p.startswith(RICH_EDIT_PROMPT)
+        # Core identity-preservation language must still be present
+        assert "same face" in p.lower()
+
+    # ── run_rich_iteration — birthday integration ───────────────────────────────
+
+    async def test_run_rich_iteration_birthday_date_prompt_has_birthday_clause(self, tmp_path):
+        """On July 8, the image-edit prompt must contain the birthday clause with age 42."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("¡Feliz cumpleaños!")
+        birthday_now = datetime(2026, 7, 8, 11, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=birthday_now,
+        )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        assert "42" in img_prompt
+        lower = img_prompt.lower()
+        assert (
+            "birthday" in lower
+            or "cumpleaños" in lower
+            or "cake" in lower
+            or "tarta" in lower
+            or "celebr" in lower
+            or "party" in lower
+            or "fiesta" in lower
+        )
+
+    async def test_run_rich_iteration_non_birthday_date_no_birthday_clause(self, tmp_path):
+        """On a non-birthday date, image-edit prompt must NOT contain birthday clause."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("normal caption")
+        non_birthday_now = datetime(2026, 7, 9, 11, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=non_birthday_now,
+        )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        lower = img_prompt.lower()
+        assert "birthday" not in lower
+        assert "cumpleaños" not in lower
+
+    async def test_run_rich_iteration_birthday_caption_receives_birthday_instruction(self, tmp_path):
+        """On July 8, the caption messages must contain a birthday instruction mentioning age 42."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("¡Feliz cumpleaños!")
+        birthday_now = datetime(2026, 7, 8, 11, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=birthday_now,
+        )
+
+        messages = fake_cap.chat.completions.create.call_args.kwargs["messages"]
+        # Collect all text from every message (system + user parts)
+        all_text = ""
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                all_text += " " + content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        all_text += " " + part["text"]
+        assert "42" in all_text
+        lower = all_text.lower()
+        assert "birthday" in lower or "cumpleaños" in lower or "celebr" in lower
+
+    async def test_run_rich_iteration_birthday_fallback_caption_when_no_chat(self, tmp_path):
+        """On birthday with no chat model configured, fallback caption must be birthday-aware."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG")
+
+        settings = _make_settings(
+            tmp_path,
+            state_dir=str(state_dir),
+            openai_api_key="",
+            openai_base_url="",
+            openai_model="",
+        )
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        birthday_now = datetime(2026, 7, 8, 11, 0, 0, tzinfo=pytz.UTC)
+
+        _, _, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _data_dir=str(data_dir),
+            _now=birthday_now,
+        )
+
+        lower = caption.lower()
+        assert "birthday" in lower or "cumpleaños" in lower or "42" in caption
