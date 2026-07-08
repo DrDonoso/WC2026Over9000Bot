@@ -616,6 +616,54 @@ class TestMatchResultIsFinal:
             _match(duration="PENALTY_SHOOTOUT", penalty_home=0, penalty_away=0, winner="DRAW")
         ) is False
 
+    # ── KO-draw deferral regression (bug: SUI 0-0 COL announced bare) ────────
+
+    def test_ko_finished_draw_regular_is_not_final(self):
+        """BUG REPRO: LAST_16 FINISHED 0-0 winner=DRAW duration=REGULAR must defer."""
+        assert match_result_is_final(
+            _match(stage="LAST_16", home_score=0, away_score=0,
+                   winner="DRAW", duration="REGULAR",
+                   penalty_home=None, penalty_away=None)
+        ) is False
+
+    def test_ko_finished_winner_none_regular_is_not_final(self):
+        """KO match with winner=None (API may transiently omit winner) must defer."""
+        assert match_result_is_final(
+            _match(stage="LAST_16", home_score=0, away_score=0,
+                   winner=None, duration="REGULAR",
+                   penalty_home=None, penalty_away=None)
+        ) is False
+
+    def test_ko_finished_extra_time_no_winner_is_not_final(self):
+        """KO match FINISHED after ET with no decisive winner must still defer."""
+        assert match_result_is_final(
+            _match(stage="LAST_16", home_score=0, away_score=0,
+                   winner=None, duration="EXTRA_TIME",
+                   penalty_home=None, penalty_away=None)
+        ) is False
+
+    def test_ko_settled_by_penalties_is_final(self):
+        """KO match with complete penalty shootout (4-3, HOME_TEAM wins) → announce."""
+        assert match_result_is_final(
+            _match(stage="LAST_16", home_score=0, away_score=0,
+                   duration="PENALTY_SHOOTOUT", penalty_home=4, penalty_away=3,
+                   winner="HOME_TEAM")
+        ) is True
+
+    def test_ko_decided_in_regulation_is_final(self):
+        """KO match won in regulation (QUARTER_FINALS 2-1) → announce immediately."""
+        assert match_result_is_final(
+            _match(stage="QUARTER_FINALS", home_score=2, away_score=1,
+                   winner="HOME_TEAM", duration="REGULAR")
+        ) is True
+
+    def test_group_stage_draw_regular_is_final(self):
+        """Group-stage 0-0 draw is a valid final result — must NOT be deferred."""
+        assert match_result_is_final(
+            _match(stage="GROUP_STAGE", home_score=0, away_score=0,
+                   winner="DRAW", duration="REGULAR")
+        ) is True
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # standard_competition_positions

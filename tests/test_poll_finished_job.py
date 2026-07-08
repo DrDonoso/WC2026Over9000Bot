@@ -2378,3 +2378,62 @@ class TestSharedFootballClient:
 
         shared.get_all_matches.assert_called_once()
         mk.assert_not_called()
+
+
+# ── KO-draw deferral integration ───────────────────────────────────────────
+
+
+def _ko_draw_match(mid: int = 1, duration: str = "REGULAR", winner: str | None = "DRAW") -> Match:
+    """Switzerland 0-0 Colombia — knockout draw match (the bug-reproducing fixture)."""
+    from dataclasses import replace
+    m = _make_match(mid, home_name="Switzerland", away_name="Colombia",
+                    home_tla="SUI", away_tla="COL", winner=winner)
+    return replace(m, stage="LAST_16", group=None, home_score=0, away_score=0, duration=duration)
+
+
+class TestKnockoutDrawDeferral:
+    """Regression: FINISHED 0-0 knockout match must not be announced until a
+    decisive winner (or complete penalty result) is confirmed.
+
+    Bug: SUI 0-0 COL Final card sent with no penalty winner because
+    match_result_is_final returned True for duration=REGULAR / winner=DRAW.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ko_draw_finished_regular_deferred_not_announced(self, tmp_path):
+        """BUG REPRODUCTION: LAST_16 FINISHED 0-0 winner=DRAW duration=REGULAR
+        must not send a message and must not be added to finished_announced."""
+        settings = _make_settings(tmp_path, ai=False)
+        match = _ko_draw_match(1, duration="REGULAR", winner="DRAW")
+        ctx, mock_client = _ctx_for_result(settings, match)
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_not_awaited()
+        assert 1 not in ctx.bot_data["finished_announced"]  # not marked done → retries later
+
+    @pytest.mark.asyncio
+    async def test_ko_draw_announced_once_penalties_settle(self, tmp_path):
+        """Once penalties + winner are confirmed the match must be announced."""
+        from dataclasses import replace
+        settings = _make_settings(tmp_path, ai=False)
+        match = replace(
+            _ko_draw_match(1, duration="PENALTY_SHOOTOUT", winner="HOME_TEAM"),
+            penalty_home=4, penalty_away=3,
+        )
+        ctx, mock_client = _ctx_for_result(settings, match)
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__.pred_loader.load", return_value={"participants": {}}),
+            patch("worldcup_bot.__main__.compute_general_ranking", return_value=[]),
+        ):
+            await poll_finished_matches_job(ctx)
+
+        ctx.bot.send_message.assert_awaited()
+        assert 1 in ctx.bot_data["finished_announced"]

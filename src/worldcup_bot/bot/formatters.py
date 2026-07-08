@@ -15,10 +15,18 @@ import pytz
 from telegram import InlineKeyboardButton
 
 from worldcup_bot.api.models import Match, Standing
+from worldcup_bot.data.stages import KNOCKOUT_STAGES
 from worldcup_bot.data.tla_map import tla_to_iso
 
 if TYPE_CHECKING:
     from worldcup_bot.porra.camps import MatchCamps
+
+# Knockout stage API names — matches in these stages can never end level.
+# THIRD_PLACE is not in KNOCKOUT_STAGES (no elecciones points) but is still
+# single-elimination, so we include it here explicitly.
+_KNOCKOUT_STAGE_NAMES: frozenset[str] = (
+    frozenset(api for api, _, _ in KNOCKOUT_STAGES) | {"THIRD_PLACE"}
+)
 
 # ── person-name bolding ───────────────────────────────────────────────────────
 
@@ -612,6 +620,11 @@ def match_result_is_final(match: Match) -> bool:
     decisive winner is set — football-data can briefly flip a knockout match to
     FINISHED mid-shootout with a transient score, which is what produced the wrong
     'Final' card.
+
+    Knockout matches (incl. 3rd-place playoff) can never end level. If a FINISHED
+    knockout match has no decisive winner yet, football-data's free tier hasn't
+    populated the shootout result yet — defer until it does. Group-stage draws are
+    valid final results and are unaffected by this check.
     """
     if match.duration == "PENALTY_SHOOTOUT":
         return (
@@ -619,6 +632,10 @@ def match_result_is_final(match: Match) -> bool:
             and match.penalty_away is not None
             and match.winner in ("HOME_TEAM", "AWAY_TEAM")
         )
+    # Knockout matches cannot end level: if FINISHED without a decisive winner,
+    # football-data hasn't populated the shootout result yet (free-tier lag) — defer.
+    if match.stage in _KNOCKOUT_STAGE_NAMES and match.winner not in ("HOME_TEAM", "AWAY_TEAM"):
+        return False
     return True
 
 
