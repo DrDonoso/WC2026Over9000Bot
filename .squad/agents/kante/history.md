@@ -1,6 +1,35 @@
 # Kanté — Backend Developer
 
-**Project:** WorldCup2026Over9000TelegramBot | **Stack:** Python, PTB, football-data.org, Reddit scanner, LLM | **Current:** 2346 tests ✅
+**Project:** WorldCup2026Over9000TelegramBot | **Stack:** Python, PTB, football-data.org, Reddit scanner, LLM | **Current:** 2351 tests ✅
+
+## Learnings
+
+### 2026-07-08 — KO draw-deferral fix (Switzerland 0-0 Colombia false notification)
+
+**Bug:** `match_result_is_final` only deferred when `duration == "PENALTY_SHOOTOUT"`. football-data's free tier initially reports a 0-0 KO match as `FINISHED` with `duration="REGULAR"` and `winner="DRAW"` (or `None`), before later setting `duration="PENALTY_SHOOTOUT"` and populating the penalties block. The old gate returned `True` immediately → the wrong bare "0-0" Final notification fired.
+
+**Fix:** Added module-level `_KNOCKOUT_STAGE_NAMES` frozenset (derived from `KNOCKOUT_STAGES` + `"THIRD_PLACE"`) in `formatters.py`. New branch in `match_result_is_final`: if `match.stage in _KNOCKOUT_STAGE_NAMES` and `match.winner not in ("HOME_TEAM", "AWAY_TEAM")` → return `False`. Group-stage draws (winner=`"DRAW"`) are still valid finals and return `True` unchanged.
+
+**Key invariant:** A KO match can NEVER legitimately end level — so any FINISHED KO match without a decisive winner is still mid-processing at the API tier. The existing deferral loop in `__main__.py:1858-1869` retries without marking the match announced, so it self-corrects on the next tick once the API populates the winner + penalties.
+
+**Files changed:** `src/worldcup_bot/bot/formatters.py` only. `THIRD_PLACE` included cheaply since it's also single-elimination. Tests: 161 tests in `test_formatters.py` + `test_poll_finished_job.py` all green (no new tests written — Buffon owns that).
+
+**Gotcha:** The module docstring says "Depends only on data/tla_map" — now also imports `data/stages`. Both are pure data modules; no circular dependency risk.
+
+
+
+### 2026-07-08 — Rich image birthday mode
+
+**Feature:** On July 8 each year, `run_rich_iteration` enters birthday mode — the image still wealth-escalates but also gets a lavish birthday-party theme (cake showing the age, balloons, banner). Caption also celebrates the birthday. Age auto-increments from `RICH_BIRTH_YEAR = 1984`; turns 42 in 2026 (meaning-of-life gag).
+
+**Key file:** `src/worldcup_bot/ai/rich_image.py`  
+- Constants added at ~line 125: `RICH_BIRTHDAY_MONTH`, `RICH_BIRTHDAY_DAY`, `RICH_BIRTH_YEAR`, `RICH_BIRTHDAY_CLAUSE`  
+- Pure helpers at ~line 138: `is_rich_birthday(now)`, `rich_birthday_age(now)`  
+- `build_rich_prompt` — new `birthday=False, age=None` params; birthday clause appended BEFORE anchor clause  
+- `generate_rich_caption` — new `birthday=False, age=None` kwargs; birthday instruction injected BEFORE JSON format part  
+- `run_rich_iteration` — computes birthday/age after `now`, logs info when active, passes to both functions; fallback caption is birthday-themed when active
+
+**Test fragility to flag:** 3 pre-existing tests (`test_caption_falls_back_when_caption_client_raises`, `test_caption_falls_back_when_chat_not_configured`, `test_caption_error_memo_not_appended_image_still_written`) call `run_rich_iteration` without pinning `_now`. They fail on July 8 every year because birthday mode fires and the fallback caption changes. Buffon must add `_now=datetime(year, 3, 15, ...)` (any non-July-8 date) to those 3 tests for date independence.
 
 ## 2026-07-05 Summary (REJECTED & REWORKED)
 

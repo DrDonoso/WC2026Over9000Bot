@@ -193,3 +193,9 @@ ew_seen = new on a difference or equal update, the lagging source's baseline nat
 **Verdict:** ✅ **APPROVE** — The fix is correct and safe to commit.
 **Follow-up required:** Buffon MUST add the "legit re-goal after disallowed" regression test (step 4: API catches up to 0-0, then a real 1-0 goal happens and should be announced).
 
+
+## 2026-07-08T11:23:02+02:00 - Review KO Draw Deferral Bug Fix
+
+**Task:** Review Kanté's fix for the KO match draw announcement bug.
+**Verdict:** ✅ APPROVE
+**Reasoning:** The fix correctly defers knockout matches (including THIRD_PLACE) that flip to FINISHED without a decisive winner. Group stage draws are correctly unaffected. While a permanent stall exists if the API never provides a winner, this is an acceptable risk because announcing a draw for a KO match would corrupt the porra state, and football-data reliably populates shootout results within minutes.
