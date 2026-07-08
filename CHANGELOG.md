@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260708.02] - 2026-07-08
+
+- fix(porra): defer knockout Final recap until a decisive winner is set
+
+
 ## [20260708] - 2026-07-08
 
 - feat(rich): birthday mode on July 8 (turns 42 in 2026)
