@@ -5,6 +5,16 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260708] - 2026-07-08
+
+- feat(rich): birthday mode on July 8 (turns 42 in 2026)
+- Merged buffon-var-two-source-regression.md and pirlo-goal-flood-review.md into decisions entry (2026-07-07 SHIPPED)
+- Deleted merged inbox files
+- Added 3 orchestration logs (kante, buffon, pirlo)
+- Added session log with root cause, solution, tests, review, deployment status
+- Updated agent histories (kante, buffon, pirlo)
+
+
 ## [20260707] - 2026-07-07
 
 - fix(goals): prevent VAR-disallowed goal flood from cross-source seen desync
