@@ -176,16 +176,36 @@ where N = active users, P_in/P_out = real model price per 1M tokens.
 
 ---
 
-## Prior Sessions Summary (2026-07-01 to 2026-07-09)
+### 2026-07-10 — /calcularperfiles hidden admin command + _run_profile_update shared helper
 
-- **2026-07-08:** KO draw-deferral fix (Switzerland 0-0 Colombia false notification). Added _KNOCKOUT_STAGE_NAMES frozenset in formatters.py to defer FINISHED KO matches without a decisive winner. Tests: 161 in test_formatters.py, all green.
+**What:** On-demand trigger for the daily 04:00 picante profile-update job. Mirrors the `rich_image_job` / `cmd_evil_sanchez` / `_evolve_and_send_rich_image` split pattern exactly.
 
-- **2026-07-08:** Rich image birthday mode (July 8 annual). Birthday-themed images with wealth escalation. Cake imagery + balloons. Auto-incrementing age from RICH_BIRTH_YEAR=1984 (age 42 in 2026). Caption celebratory. Tests: 14 new in test_rich_image.py.
+**Files modified:** `src/worldcup_bot/__main__.py` only.
 
-- **2026-07-07:** USA-Belgium goal flood post-mortem. Cross-source score reconciliation bug: when thread reports goal+VAR disallowed before API catches up, API's seen baseline drifts, causing false goal+false disallowed oscillation. Fix: advance OTHER source's seen to pre-VAR score on disallowed claim inside lock. .squad/skills/two-source-score-reconciliation/SKILL.md.
+**Shared helper — `_run_profile_update(context) -> int`** (`__main__.py:222`):
+- Extracted from the old `profile_update_job` body.
+- RAISES on error (no ai client → `RuntimeError`; any downstream error propagates).
+- Returns `int`: distinct participant count from processed messages; `0` if no new messages (no AI call made; `save_last_run` still called).
+- All lazy imports stay inside the function (mirrors old style).
 
-- **2026-07-06:** Clip fallback fix. Reddit soft-blocks datacenter IPs with HTTP 200 + empty JSON children. Code gated fallback on posts is None only → missed soft-blocks. Fix: normalize with or [], unconditional fallback when no JSON match. Tests: 5 new regression tests in test_clip_finder.py.
+**Refactored job — `profile_update_job(context)`** (`__main__.py:267`):
+- Guards: `picante_profiles_enabled` check (returns, no log) + `profile_ai is None` check (WARNING + return) — both **outside** the helper, **outside** try/except, preserving original behaviour.
+- `try: delta = await _run_profile_update(context)` → logs info on success; `except Exception: log.exception(...)` swallows (identical observable behaviour to before).
 
-- **2026-07-01–2026-07-05:** /elecciones feature increments (MVP + image renderers + hourglass). Knockout matrix image (PIL, twemoji CDN flags). Phase-selector inline keyboard. CHOICES_TYPE env var. Cache with mtime+results hash. Multiple rejects (cache staleness, message split >4096) all fixed by Nesta on re-submission.
+**New command — `cmd_calcularperfiles(update, context)`** (`__main__.py:377`):
+- Feature-disabled guard: replies in Spanish mentioning `PICANTE_PROFILES_ENABLED`, returns.
+- Sends "⏳ Calculando perfiles…" then calls `await _run_profile_update(context)`.
+- count > 0 → "✅ Perfiles actualizados: {count} usuario(s) procesado(s)."
+- count == 0 → "ℹ️ No hay mensajes nuevos desde la última actualización; perfiles sin cambios."
+- Exception → `log.exception` + "💥 Error calculando los perfiles, revisa los logs."
+- Advances `last_run` (incremental; next 04:00 run only sees messages after this one — intended).
 
-- **2026-07-01–2026-07-03:** Podium image rendering feature. New src/worldcup_bot/bot/podium_image.py module. Circular crop + crown drawing + placeholder tiles. Album → text fallback chain. 45 edge-case tests.
+**Registration:** `__main__.py:2488` — `CommandHandler("calcularperfiles", cmd_calcularperfiles)` in the hidden-commands block after `/perfil`. NOT in `_HELP_COMMANDS`/`/start`.
+
+**Access control:** hidden-by-omission (same as `/evilsanchez`, `/perfil`, `/tongocheck`).
+
+**Tests:** 2586 passed (0 regressions). Helper returns `int` → easily unit-testable; command uses `update.message.reply_text` only.
+
+
+
+_See history-archive.md for prior sessions (2026-07-01 to 2026-07-09)._

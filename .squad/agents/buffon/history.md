@@ -1,9 +1,48 @@
 # Buffon — QA / Tester
 
 **Project:** WorldCup2026Over9000TelegramBot  
-**Current test count:** 2586 (as of 2026-07-10)
+**Current test count:** 2609 (as of 2026-07-10)
 
-## Current Session: 2026-07-10 — /perfil Hidden Admin Command QA Gate (✅ APPROVE)
+## Current Session: 2026-07-10 — /calcularperfiles + _run_profile_update QA Gate (✅ APPROVE)
+
+**Kanté's change:** New hidden command `cmd_calcularperfiles` in `src/worldcup_bot/__main__.py` (~line 377), backed by the extracted shared helper `_run_profile_update` (~line 222). The helper is the core AI pipeline (load_since → AI pass → save_profiles → advance last_run); the job wraps it best-effort; the command exposes it on-demand with user feedback.
+
+**Tests added:** 23 new tests in `tests/test_main_calcularperfiles.py` → 3 new classes:
+
+- `TestCmdCalcularPerfiles` (+11):
+  - `test_feature_off_replies_disabled_message`: OFF → reply has `PICANTE_PROFILES_ENABLED` + `No hay nada que calcular`; `_run_profile_update` not called.
+  - `test_feature_off_full_reply_text`: exact substring `La función de perfiles está desactivada`.
+  - `test_feature_on_n_gt_0_sends_progress_message`: N>0 → reply list contains `⏳ Calculando perfiles`.
+  - `test_feature_on_n_gt_0_sends_success_with_count`: N=3 → `✅ Perfiles actualizados: 3 usuario(s) procesado(s).` exact.
+  - `test_feature_on_n_gt_0_two_replies_sent`: exactly 2 replies (progress + result).
+  - `test_feature_on_zero_sends_no_new_messages_reply`: 0 → `ℹ️ No hay mensajes nuevos desde la última actualización; perfiles sin cambios.` exact.
+  - `test_feature_on_zero_sends_progress_before_no_new_msg`: still sends `⏳` even when 0.
+  - `test_helper_raises_sends_friendly_error_reply`: raises → `💥 Error calculando los perfiles, revisa los logs.` exact.
+  - `test_helper_raises_does_not_propagate`: no exception escapes.
+  - `test_calcularperfiles_not_in_help_commands`: `calcularperfiles` not in `_HELP_COMMANDS.lower()`.
+  - `test_calcularperfiles_registered_in_main`: `CommandHandler("calcularperfiles", cmd_calcularperfiles)` in source.
+
+- `TestRunProfileUpdateHelper` (+8):
+  - `test_no_messages_returns_0`: empty timeline → returns 0.
+  - `test_no_messages_ai_not_called`: `update_profiles_from_conversation` NOT called.
+  - `test_no_messages_last_run_advanced`: `save_last_run` called even with 0 messages.
+  - `test_with_messages_calls_ai`: messages present → AI called once.
+  - `test_with_messages_returns_distinct_participant_count`: 3 messages from 2 users → result=2.
+  - `test_messages_without_username_excluded_from_count`: missing/empty username → not counted.
+  - `test_no_profile_ai_client_raises_runtime_error`: absent client → `RuntimeError("no profile_ai_client")` raised (not swallowed).
+
+- `TestProfileUpdateJobRegression` (+5):
+  - `test_job_swallows_run_helper_exception`: RuntimeError from helper → job silent.
+  - `test_job_swallows_arbitrary_exception`: ValueError from helper → job silent.
+  - `test_job_skips_when_feature_off`: OFF → helper not called.
+  - `test_job_skips_when_no_profile_ai_client`: no client → helper not called.
+  - `test_job_calls_helper_when_feature_on_and_ai_configured`: ON + client → helper awaited.
+
+**Outcome:** 2609 passed, 3 warnings, 0 regressions (+23 vs prior 2586). APPROVE ✅
+
+---
+
+
 
 **Kanté's change:** New hidden admin command `cmd_perfil` in `src/worldcup_bot/bot/handlers.py` (~line 1373). Loads `picante_profiles.json` via `load_profiles`, parses `context.args[0].strip().lstrip("@").lower()`, and renders all UserProfile fields as plain text. Not listed in `/start` or `/help`.
 
@@ -100,40 +139,6 @@ Coverage includes:
 
 **Key invariant guarded:** On July 10, rich_modified.png byte-content is UNCHANGED (direct filesystem assertion), load_level returns seeded value. Edge case: fresh install requires pre-seeded rich_modified.png for 3-image path to fully activate (production ready).
 
----
 
-## Prior Sessions Summary (2026-07-01 to 2026-07-09)
 
-- **2026-07-08:** KO Draw Deferral Regression Tests. 8 new tests for Kanté's match_result_is_final fix. Tests: ko_finished_draw_regular_is_not_final, ko_finished_extra_time_no_winner_is_not_final, group_stage_draw_regular_is_final, plus integration tests. All green.
-
-- **2026-07-08:** Rich Birthday Mode — QA Gate. 14 tests in TestRichBirthdayMode for July-8 annual birthday feature. Fixed 3 pre-existing tests that broke on July 8 (injected _now to non-birthday date). Result: 251 tests passed.
-
-- **2026-07-07:** USA-Belgium Goal Flood — Post-Mortem. 4 tests in TestVARCrossSourceRaceRegression to prevent oscillation when thread reports goal+VAR before API. Critical coverage gap: precondition requires seen_api BELOW pre-goal score (not synced). All green.
-
-- **2026-07-01–2026-07-05:** /elecciones feature testing. 30+ tests for phase selector keyboard, knockout matrix image (PIL, twemoji CDN flags), groups text renderer, cache + message-split fixes. Multiple rework cycles by Nesta; all guarded.
-
-- **2026-07-01–2026-07-03:** Podium image feature testing. 45 edge-case tests for initials, circular crop, crown drawing, name truncation, font fallback, photo failures, total-failure variants, text centering, tie-aware positioning, emoji selection.
-
----
-
-## Key Testing Learnings (across sessions)
-
-- **Birthday fallback date rule:** Any test asserting generic fallback caption must inject _now to non-birthday date (neither July 8 nor July 10). Without _now, datetime.now() is called; on a birthday, birthday-aware fallback is returned instead.
-
-- **3-image path prerequisite:** edit_rich_image sets use_anchor = anchor_path is not None and paths differ. On first-ever run base==original, so use_anchor=False even with anchor passed. To assert 3 images reliably, pre-seed state_dir/rich_modified.png.
-
-- **Cross-source VAR regression coverage gap:** Two-source tests must vary seen_api to be BELOW pre-goal score. Oscillation triggers only when lagging source is behind at disallowed time. Tests seeding seen_api at pre-VAR score miss the bug.
-
-- **KO-draw deferral stages:** Covers LAST_32, LAST_16, QUARTER_FINALS, SEMI_FINALS, FINAL, THIRD_PLACE. Group-stage draws remain valid finals.
-
-- **timeline_store._now injection:** Module-level `_now` callable must be patched via `patch("worldcup_bot.chat.timeline_store._now", new=lambda: _FIXED_DT)`. The trim cutoff depends on it; tests that don't care about trim must use large window_days or patch _now to a datetime far enough from the entries' timestamps.
-
-- **profile_updater _now injection:** Unlike timeline_store, profile_updater's `_now` is a keyword parameter `_now=lambda: dt`. Pass directly when calling `update_profiles_from_conversation(...)`.
-
-- **maybe_reply pique persistence guard:** To trigger pique persistence, three conditions must all hold: `picante_profiles_enabled(settings)=True`, `profiles is not None`, `author_username != ""`. Profiles is None when profiles_path is empty string (guard in code: `if profiles_path: profiles = load_profiles(...)`).
-
-- **others_cap in build_picante_user_message:** The OTROS section only renders users with `equipo` OR `tono` set; users with only `rasgos`/`motes` are collected in seen_in_buffer but produce no `others_lines` entry. Always give others at least one of equipo/tono to verify cap behavior.
-
-- **M4 cap drop order:** `[-CAP:]` on `list(dict.fromkeys([*existing, *new]))` drops the OLDEST (leftmost/existing) entries first. To test the drop, use existing(E) + new(N) where E+N > CAP with zero overlap; oldest E items beyond (E+N-CAP) are absent, all new items survive. (e.g. MOTES_CAP=8: 5 old + 6 new = 11 → drops old1..old3, keeps old4,old5,new1..new6).
-
-- **M5 participant count:** `participants = list({m["username"] for m in timeline_messages if m.get("username")})` — unique non-empty usernames only. Same user sending 3 messages counts as N=1 → max_tokens=200.
+_See history-archive.md for prior sessions (2026-07-01 to 2026-07-09)._

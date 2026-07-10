@@ -2860,3 +2860,57 @@ Los test files nuevos (test_timeline_store, test_profiles, test_profile_updater 
 
 *Kanté — 2026-07-10T12:00:56+02:00*
 
+
+
+# Decision: /calcularperfiles hidden admin command
+
+**Date:** 2026-07-10  
+**Author:** Kanté (backend)  
+**Status:** Implemented
+
+## Context
+
+The daily 04:00 `profile_update_job` processes the picante timeline and updates per-user profiles. There was no way to trigger this on demand (e.g. after adding new messages to the timeline, or after enabling the feature mid-day). The only option was waiting until 04:00 or restarting the bot.
+
+## Decision
+
+Add a hidden admin command `/calcularperfiles` that fires the same profile-update pipeline immediately, following the same job/command split pattern as `/evilsanchez` → `rich_image_job`.
+
+## Pattern applied: shared-helper split
+
+```
+_run_profile_update(context) -> int   ← RAISES, returns participant count
+       ↑                    ↑
+profile_update_job      cmd_calcularperfiles
+  (swallows errors)       (reports errors to invoker)
+```
+
+This mirrors `_evolve_and_send_rich_image` / `rich_image_job` / `cmd_evil_sanchez` exactly. The rule is:
+- The **shared helper raises** — so the manual command can catch and report failures.
+- The **scheduled job swallows** — so a transient error never kills the bot's job queue.
+- The **command checks the feature flag first** — replies in Spanish if `PICANTE_PROFILES_ENABLED=0`.
+
+## Key design choices
+
+1. **Return value is participant count, not message count.** The helper returns `len({username for m in messages})` — 0 means "no new messages, no AI call". This is sufficient for the command reply and for the job's log.
+
+2. **`profile_ai is None` guard stays in the job, not the helper.** The job logs a WARNING and returns cleanly; the helper raises RuntimeError if called without an AI client. This preserves the original job's observable log behaviour.
+
+3. **`last_run` advances on every call** — including the manual one. A later 04:00 run will only process messages after the manual trigger. This is intentional: the manual command is a full incremental pass, not a preview.
+
+4. **No feature-flag check in the helper.** The caller (job or command) is responsible for the feature-enabled guard. The helper assumes it is called only when the feature is on.
+
+5. **Hidden by omission.** Not listed in `_HELP_COMMANDS` or `/start`. Registration is in the hidden-commands block alongside `/evilsanchez` and `/perfil`.
+
+## Files changed
+
+- `src/worldcup_bot/__main__.py`:
+  - `_run_profile_update` extracted at line 222
+  - `profile_update_job` refactored at line 267 (behaviour unchanged)
+  - `cmd_calcularperfiles` added at line 377
+  - `CommandHandler("calcularperfiles", cmd_calcularperfiles)` registered at line 2488
+
+## Test result
+
+2586 passed, 0 failures (full suite).
+
