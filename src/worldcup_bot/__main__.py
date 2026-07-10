@@ -219,6 +219,51 @@ async def rich_image_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 # ── daily picante profile update job ────────────────────────────────────────
 
 
+async def _run_profile_update(context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Core profile-update logic shared by the daily job and the /calcularperfiles command.
+
+    Loads messages since last_run, runs a single AI pass over the full attributed
+    conversation, saves updated profiles, and advances last_run.
+
+    Returns the number of distinct participants whose messages were processed
+    (0 when there are no new messages — no AI call is made in that case).
+    Unlike profile_update_job, this function RAISES on any error so callers
+    (e.g. the manual command) can report the failure to the invoker.
+    """
+    from worldcup_bot.chat.profile_updater import update_profiles_from_conversation
+    from worldcup_bot.chat.profiles import load_profiles, save_profiles
+    from worldcup_bot.chat.timeline_store import load_last_run, load_since, save_last_run
+    from datetime import timezone as _tz
+
+    settings: Settings = context.bot_data["settings"]
+    profile_ai: AIClient | None = context.bot_data.get("profile_ai_client")
+    if profile_ai is None:
+        raise RuntimeError("no profile_ai_client configured")
+
+    state_dir: str = settings.state_dir
+    profiles_path: str = context.bot_data.get("picante_profiles_path", "") or f"{state_dir}/picante_profiles.json"
+
+    now = datetime.now(_tz.utc)
+    last_run = load_last_run(state_dir)
+
+    messages = load_since(state_dir, last_run)
+    if not messages:
+        save_last_run(state_dir, now)
+        return 0
+
+    current_profiles = load_profiles(profiles_path)
+    updated = await update_profiles_from_conversation(
+        messages,
+        current_profiles,
+        profile_ai,
+        piques_cap=settings.picante_profiles_piques_cap,
+    )
+    save_profiles(profiles_path, updated)
+    save_last_run(state_dir, now)
+
+    return len({m["username"] for m in messages if m.get("username")})
+
+
 async def profile_update_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Daily job: update per-user profiles via single group-conversation AI pass.
 
@@ -227,51 +272,21 @@ async def profile_update_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     AI call so the model reads users in context.
     Best-effort — never fatal; logs WARNING on any error.
     """
-    from worldcup_bot.chat.profile_updater import update_profiles_from_conversation
-    from worldcup_bot.chat.profiles import load_profiles, save_profiles
-    from worldcup_bot.chat.timeline_store import load_last_run, load_since, save_last_run
-    from datetime import timezone as _tz
+    settings: Settings = context.bot_data["settings"]
+    if not picante_profiles_enabled(settings):
+        return
+
+    profile_ai: AIClient | None = context.bot_data.get("profile_ai_client")
+    if profile_ai is None:
+        log.warning("profile_update_job: no profile_ai_client, skipping")
+        return
 
     try:
-        settings: Settings = context.bot_data["settings"]
-        if not picante_profiles_enabled(settings):
-            return
-
-        profile_ai: AIClient | None = context.bot_data.get("profile_ai_client")
-        if profile_ai is None:
-            log.warning("profile_update_job: no profile_ai_client, skipping")
-            return
-
-        state_dir: str = settings.state_dir
-        profiles_path: str = context.bot_data.get("picante_profiles_path", "")
-        if not profiles_path:
-            profiles_path = f"{state_dir}/picante_profiles.json"
-
-        now = datetime.now(_tz.utc)
-        last_run = load_last_run(state_dir)
-
-        messages = load_since(state_dir, last_run)
-        if not messages:
+        delta = await _run_profile_update(context)
+        if delta:
+            log.info("profile_update_job: updated %d participants", delta)
+        else:
             log.info("profile_update_job: no new messages since last run, skipping AI call")
-            save_last_run(state_dir, now)
-            return
-
-        current_profiles = load_profiles(profiles_path)
-        updated = await update_profiles_from_conversation(
-            messages,
-            current_profiles,
-            profile_ai,
-            piques_cap=settings.picante_profiles_piques_cap,
-        )
-        save_profiles(profiles_path, updated)
-        save_last_run(state_dir, now)
-
-        delta = len({m["username"] for m in messages if m.get("username")})
-        log.info(
-            "profile_update_job: updated %d participants from %d messages",
-            delta,
-            len(messages),
-        )
     except Exception:
         log.exception("profile_update_job: error (non-fatal)")
 
@@ -357,6 +372,43 @@ async def cmd_evil_sanchez(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
     await update.message.reply_text("✅ Sánchez enviado al grupo.")
+
+
+async def cmd_calcularperfiles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hidden manual trigger for the daily 04:00 picante profile update. /calcularperfiles
+
+    Runs the same pipeline as profile_update_job (load messages since last_run →
+    single AI call over the full conversation → save updated profiles → advance
+    last_run) so the admin can fire it on demand without waiting for the
+    scheduled run.  Not listed in /start or /help.
+    """
+    settings: Settings = context.bot_data["settings"]
+
+    if not picante_profiles_enabled(settings):
+        await update.message.reply_text(
+            "⚠️ La función de perfiles está desactivada "
+            "(PICANTE_PROFILES_ENABLED no está activo). No hay nada que calcular."
+        )
+        return
+
+    await update.message.reply_text("⏳ Calculando perfiles…")
+    try:
+        count = await _run_profile_update(context)
+    except Exception:
+        log.exception("cmd_calcularperfiles: error updating profiles")
+        await update.message.reply_text(
+            "💥 Error calculando los perfiles, revisa los logs."
+        )
+        return
+
+    if count > 0:
+        await update.message.reply_text(
+            f"✅ Perfiles actualizados: {count} usuario(s) procesado(s)."
+        )
+    else:
+        await update.message.reply_text(
+            "ℹ️ No hay mensajes nuevos desde la última actualización; perfiles sin cambios."
+        )
 
 
 async def _enrich_scorer(
@@ -2433,6 +2485,7 @@ def build_app(settings: Settings) -> Application:
         CommandHandler("tongocheck", cmd_tongocheck),
         CommandHandler("evilsanchez", cmd_evil_sanchez),
         CommandHandler("perfil", cmd_perfil),
+        CommandHandler("calcularperfiles", cmd_calcularperfiles),
     ]
 
     for handler in handlers:
