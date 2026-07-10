@@ -5,6 +5,16 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260710.04] - 2026-07-10
+
+- feat(picante): hidden /perfil command to inspect a user's profile
+- Merged kante-perfil-command.md from inbox to decisions.md
+- Deleted processed inbox file
+- Wrote orchestration logs (kante-11, buffon-7)
+- Wrote session log (perfil-command feature)
+- Updated Kanté and Buffon history.md
+
+
 ## [20260710.03] - 2026-07-10
 
 - feat(picante): per-user auto-learned profiles (off by default)
