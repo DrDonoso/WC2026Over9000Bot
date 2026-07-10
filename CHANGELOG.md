@@ -5,6 +5,12 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260710.02] - 2026-07-10
+
+- chore(squad): commit agent history and drop stale inbox entry
+- refactor(picante): use recent chat context only when related to the last message
+
+
 ## [20260710] - 2026-07-10
 
 - feat(rich-image): Micky birthday special on July 10 (3-image composition)
