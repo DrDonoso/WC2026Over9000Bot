@@ -66,6 +66,14 @@ class Settings:
     final_correction_window_minutes: int = 30
     # ── /elecciones display mode ─────────────────────────────────────────────
     choices_type: str = "text"   # "text" | "image"
+    # ── Picante per-user profiles (feature flag OFF by default) ──────────────
+    picante_profiles_enabled: bool = False
+    picante_store_text: bool = True
+    picante_profile_model: str = "gpt-5.4-nano"
+    picante_profiles_window_days: int = 2
+    picante_profiles_others_cap: int = 3
+    picante_profiles_piques_cap: int = 5
+    picante_profiles_update_hour: int = 4
 
 
 def _parse_bool(raw: str) -> bool:
@@ -90,6 +98,11 @@ def picante_enabled(settings: "Settings") -> bool:
 def revive_enabled(settings: "Settings") -> bool:
     """Return True when revive is explicitly enabled AND AI is configured."""
     return settings.chat_revive_enabled and ai_enabled(settings)
+
+
+def picante_profiles_enabled(settings: "Settings") -> bool:
+    """Return True when profiles feature is enabled AND picante is enabled."""
+    return settings.picante_profiles_enabled and picante_enabled(settings)
 
 
 def image_ai_enabled(settings: "Settings") -> bool:
@@ -179,4 +192,11 @@ def load_settings() -> Settings:
         revive_jitter_seconds=int(os.getenv("REVIVE_JITTER_SECONDS", "2700")),
         final_correction_window_minutes=int(os.getenv("FINAL_CORRECTION_WINDOW_MINUTES", "30")),
         choices_type=os.getenv("CHOICES_TYPE", "text"),
+        picante_profiles_enabled=_parse_bool(os.getenv("PICANTE_PROFILES_ENABLED", "0")),
+        picante_store_text=_parse_bool(os.getenv("PICANTE_STORE_TEXT", "1")),
+        picante_profile_model=os.getenv("PICANTE_PROFILE_MODEL", "gpt-5.4-nano"),
+        picante_profiles_window_days=int(os.getenv("PICANTE_PROFILES_WINDOW_DAYS", "2")),
+        picante_profiles_others_cap=int(os.getenv("PICANTE_PROFILES_OTHERS_CAP", "3")),
+        picante_profiles_piques_cap=int(os.getenv("PICANTE_PROFILES_PIQUES_CAP", "5")),
+        picante_profiles_update_hour=int(os.getenv("PICANTE_PROFILES_UPDATE_HOUR", "4")),
     )

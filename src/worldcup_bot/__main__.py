@@ -61,7 +61,7 @@ from worldcup_bot.bot.handlers import (
     cmd_ver_gol_callback,
     make_client,
 )
-from worldcup_bot.config import Settings, ai_enabled, image_ai_enabled, load_settings, picante_enabled, revive_enabled
+from worldcup_bot.config import Settings, ai_enabled, image_ai_enabled, load_settings, picante_enabled, picante_profiles_enabled, revive_enabled
 from worldcup_bot.espn.client import ESPNClient
 from worldcup_bot.espn.formatter import format_match_stats
 from worldcup_bot.porra import predictions as pred_loader
@@ -213,6 +213,66 @@ async def rich_image_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         await _evolve_and_send_rich_image(context)
     except Exception:
         log.exception("rich_image_job: error (non-fatal)")
+
+
+# ── daily picante profile update job ────────────────────────────────────────
+
+
+async def profile_update_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily job: update per-user profiles via single group-conversation AI pass.
+
+    Incremental (Refinement 1): only processes messages newer than last_run.
+    Single-call (Refinement 3): feeds the full attributed conversation in one
+    AI call so the model reads users in context.
+    Best-effort — never fatal; logs WARNING on any error.
+    """
+    from worldcup_bot.chat.profile_updater import update_profiles_from_conversation
+    from worldcup_bot.chat.profiles import load_profiles, save_profiles
+    from worldcup_bot.chat.timeline_store import load_last_run, load_since, save_last_run
+    from datetime import timezone as _tz
+
+    try:
+        settings: Settings = context.bot_data["settings"]
+        if not picante_profiles_enabled(settings):
+            return
+
+        profile_ai: AIClient | None = context.bot_data.get("profile_ai_client")
+        if profile_ai is None:
+            log.warning("profile_update_job: no profile_ai_client, skipping")
+            return
+
+        state_dir: str = settings.state_dir
+        profiles_path: str = context.bot_data.get("picante_profiles_path", "")
+        if not profiles_path:
+            profiles_path = f"{state_dir}/picante_profiles.json"
+
+        now = datetime.now(_tz.utc)
+        last_run = load_last_run(state_dir)
+
+        messages = load_since(state_dir, last_run)
+        if not messages:
+            log.info("profile_update_job: no new messages since last run, skipping AI call")
+            save_last_run(state_dir, now)
+            return
+
+        current_profiles = load_profiles(profiles_path)
+        updated = await update_profiles_from_conversation(
+            messages,
+            current_profiles,
+            profile_ai,
+            piques_cap=settings.picante_profiles_piques_cap,
+        )
+        save_profiles(profiles_path, updated)
+        save_last_run(state_dir, now)
+
+        delta = len({m["username"] for m in messages if m.get("username")})
+        log.info(
+            "profile_update_job: updated %d participants from %d messages",
+            delta,
+            len(messages),
+        )
+    except Exception:
+        log.exception("profile_update_job: error (non-fatal)")
 
 
 def _fetch_yesterday_winners(
@@ -2321,6 +2381,25 @@ def build_app(settings: Settings) -> Application:
         else:
             app.bot_data["ai_client"] = None
 
+    # ── Picante per-user profiles (optional feature, flag OFF by default) ────
+    if picante_profiles_enabled(settings):
+        profiles_path = f"{settings.state_dir}/picante_profiles.json"
+        app.bot_data["picante_profiles_path"] = profiles_path
+        # Cheap dedicated model for profile summarization; fallback to main model
+        profile_model = settings.picante_profile_model
+        if not profile_model:
+            log.warning(
+                "PICANTE_PROFILE_MODEL not set — falling back to OPENAI_MODEL (%s). "
+                "Consider setting PICANTE_PROFILE_MODEL=gpt-5.4-nano for cost savings.",
+                settings.openai_model,
+            )
+            profile_model = settings.openai_model
+        app.bot_data["profile_ai_client"] = AIClient(
+            settings.openai_api_key,
+            settings.openai_base_url,
+            profile_model,
+        )
+
     handlers = [
         CommandHandler("start", cmd_start),
         CommandHandler("help", cmd_help),
@@ -2482,6 +2561,22 @@ def main() -> None:
         log.info(
             "Picante chat replies DISABLED — "
             "set CHAT_PICANTE_ENABLED=1 (and OPENAI_* vars) to enable."
+        )
+
+    if picante_profiles_enabled(settings):
+        app.job_queue.run_daily(
+            profile_update_job,
+            time=dtime(hour=settings.picante_profiles_update_hour, minute=0, tzinfo=tz),
+            name="picante_profile_update",
+        )
+        log.info(
+            "Picante profiles update ENABLED — daily at %02d:00 %s",
+            settings.picante_profiles_update_hour,
+            settings.timezone,
+        )
+    else:
+        log.info(
+            "Picante profiles update DISABLED — set PICANTE_PROFILES_ENABLED=1 to enable."
         )
 
     if revive_enabled(settings):

@@ -21,7 +21,8 @@ from telegram.ext import ContextTypes
 from worldcup_bot.chat.buffer import RingBuffer
 from worldcup_bot.chat.picante import maybe_reply
 from worldcup_bot.chat.state import ChatState, save_chat_state
-from worldcup_bot.config import Settings, picante_enabled
+from worldcup_bot.chat.timeline_store import append_message as timeline_append
+from worldcup_bot.config import Settings, picante_enabled, picante_profiles_enabled
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +96,19 @@ async def on_group_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         state_path = context.bot_data.get("chat_state_path")
         if state_path:
             save_chat_state(state_path, state)
+
+    # 7.5. Accumulate message for profiles (best-effort, never breaks on_group_text)
+    if picante_profiles_enabled(settings) and settings.picante_store_text:
+        try:
+            timeline_append(
+                settings.state_dir,
+                username,
+                text,
+                now_utc,
+                window_days=settings.picante_profiles_window_days,
+            )
+        except Exception as exc:
+            log.warning("listener: timeline append failed: %s", exc)
 
     # 8. Maybe fire a picante reply
     if picante_enabled(settings):

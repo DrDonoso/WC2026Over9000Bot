@@ -9,14 +9,15 @@ from __future__ import annotations
 import logging
 import random
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytz
 
 from worldcup_bot.ai.client import AIClient, AIError
 from worldcup_bot.chat.buffer import RingBuffer
+from worldcup_bot.chat.profiles import UserProfile, get_profile, load_profiles, save_profiles
 from worldcup_bot.chat.state import ChatState, save_chat_state
-from worldcup_bot.config import Settings
+from worldcup_bot.config import Settings, picante_profiles_enabled
 
 log = logging.getLogger(__name__)
 
@@ -76,16 +77,21 @@ def build_picante_system_prompt() -> str:
     return _SYSTEM
 
 
-def build_picante_user_message(messages: list[dict]) -> str:
+def build_picante_user_message(
+    messages: list[dict],
+    *,
+    profiles: dict[str, UserProfile] | None = None,
+    author_username: str = "",
+    others_cap: int = 3,
+) -> str:
     """Build the user prompt, highlighting the triggering message (messages[-1]).
 
-    The triggering message is always ``messages[-1]`` — the listener appends it
-    to the buffer right before calling ``maybe_reply``, so it is always last.
+    When *profiles* and *author_username* are provided, prepends a "PERFILES DEL
+    GRUPO" block with the author's profile first, then up to *others_cap* other
+    recently-seen users from the buffer.  If profiles is None or author_username
+    is empty, the output is identical to the no-profiles behaviour.
 
-    Structure (two-section):
-    - CONTEXTO RECIENTE block (only when prior messages exist), instructed to use
-      ONLY when clearly related to the last message.
-    - ÚLTIMO MENSAJE block: the trigger; the model must reply to this, in its language.
+    Never raises — all profile logic has silent fallbacks.
     """
     if not messages:
         return "(sin contexto)"
@@ -100,6 +106,67 @@ def build_picante_user_message(messages: list[dict]) -> str:
 
     parts: list[str] = []
 
+    # ── Profiles block (optional) ────────────────────────────────────────────
+    try:
+        if profiles is not None and author_username:
+            profile_parts: list[str] = []
+
+            def _fmt_profile(p: UserProfile, label: str) -> str:
+                lines = [label]
+                if p.rasgos:
+                    lines.append(f"Rasgos: {p.rasgos}")
+                if p.equipo:
+                    lines.append(f"Equipo favorito: {p.equipo}")
+                if p.motes:
+                    lines.append(f"Motes/apodos: {', '.join(p.motes)}")
+                if p.temas:
+                    lines.append(f"Temas/aficiones: {', '.join(p.temas)}")
+                if p.tono:
+                    lines.append(f"Tono a usar: {p.tono}")
+                if p.piques_recientes:
+                    recent = p.piques_recientes[-3:]  # last 3 for brevity
+                    piques_str = " | ".join(r.get("texto", "") for r in recent if r.get("texto"))
+                    if piques_str:
+                        lines.append(f"Piques recientes: {piques_str}")
+                return "\n".join(lines)
+
+            author_profile = get_profile(profiles, author_username)
+            if author_profile:
+                profile_parts.append(_fmt_profile(author_profile, f"[AUTOR: {author_username}]"))
+
+            # Collect other users seen in the buffer (excluding author), up to others_cap
+            seen_in_buffer: list[str] = []
+            for m in reversed(messages):
+                u = m.get("username") or ""
+                if u and u != author_username and u not in seen_in_buffer:
+                    seen_in_buffer.append(u)
+                if len(seen_in_buffer) >= others_cap:
+                    break
+
+            others_lines: list[str] = []
+            for u in seen_in_buffer:
+                p = get_profile(profiles, u)
+                if p:
+                    summary_parts = []
+                    if p.equipo:
+                        summary_parts.append(f"Equipo: {p.equipo}")
+                    if p.tono:
+                        summary_parts.append(f"Tono: {p.tono}")
+                    if summary_parts:
+                        others_lines.append(f"[{u}] {', '.join(summary_parts)}")
+
+            if others_lines:
+                profile_parts.append("[OTROS PARTICIPANTES RECIENTES]\n" + "\n".join(others_lines))
+
+            if profile_parts:
+                parts.append(
+                    "PERFILES DEL GRUPO — úsalos para personalizar el comentario:\n\n"
+                    + "\n\n".join(profile_parts)
+                )
+    except Exception as exc:
+        log.warning("build_picante_user_message: profiles block error — %s", exc)
+
+    # ── Context + trigger blocks ─────────────────────────────────────────────
     if prior:
         prior_block = "\n".join(_fmt(m) for m in prior)
         parts.append(
@@ -156,8 +223,30 @@ async def maybe_reply(
             return
 
         messages = buf.snapshot()
+
+        # ── Load profiles (best-effort — failures degrade gracefully) ─────────
+        profiles: dict | None = None
+        author_username = ""
+        if picante_profiles_enabled(settings):
+            try:
+                profiles_path: str = context.bot_data.get("picante_profiles_path", "")
+                if profiles_path:
+                    profiles = load_profiles(profiles_path)
+            except Exception as exc:
+                log.warning("maybe_reply: load_profiles failed — %s — firing without profiles", exc)
+                profiles = None
+            try:
+                author_username = (messages[-1].get("username") or "") if messages else ""
+            except Exception:
+                author_username = ""
+
         system = build_picante_system_prompt()
-        user_msg = build_picante_user_message(messages)
+        user_msg = build_picante_user_message(
+            messages,
+            profiles=profiles,
+            author_username=author_username,
+            others_cap=settings.picante_profiles_others_cap,
+        )
 
         text = await ai.complete(
             system,
@@ -183,6 +272,24 @@ async def maybe_reply(
             state.picante_daily_count,
             settings.picante_max_per_day,
         )
+
+        # ── Persist pique into author's profile (best-effort) ─────────────────
+        if picante_profiles_enabled(settings) and profiles is not None and author_username:
+            try:
+                now_utc_iso = datetime.now(timezone.utc).isoformat()
+                profiles_path = context.bot_data.get("picante_profiles_path", "")
+                if profiles_path:
+                    # Re-load to get freshest state before mutating
+                    fresh = load_profiles(profiles_path)
+                    profile = fresh.get(author_username) or UserProfile(username=author_username)
+                    piques = list(profile.piques_recientes)
+                    piques.append({"ts": now_utc_iso, "texto": text[:200]})
+                    piques = piques[-settings.picante_profiles_piques_cap:]
+                    profile.piques_recientes = piques
+                    fresh[author_username] = profile
+                    save_profiles(profiles_path, fresh)
+            except Exception as exc:
+                log.warning("maybe_reply: persist pique failed — %s", exc)
 
     except AIError as exc:
         log.warning("picante: AI error — %s", exc)

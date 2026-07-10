@@ -36,6 +36,7 @@ from worldcup_bot.chat.picante import (
     min_buffer_gate,
     probability_gate,
 )
+from worldcup_bot.chat.profiles import UserProfile, save_profiles
 from worldcup_bot.chat.revive import (
     compute_inactive_candidates,
     revive_inactive_job,
@@ -1112,3 +1113,187 @@ class TestReviveInactiveJob:
         await revive_inactive_job(ctx)
         chat_id = ctx.bot.send_message.call_args.kwargs["chat_id"]
         assert chat_id == "-9998887776"
+
+
+# ── maybe_reply — picante profiles integration ────────────────────────────────
+
+
+class TestMaybeReplyWithProfiles:
+    """Tests for the profile injection and pique persistence paths in maybe_reply."""
+
+    def _setup(self, tmp_path, piques_cap: int = 3, **extra_settings):
+        """Return (settings, buf, state, state_path, update, context, ai, profiles_path)."""
+        profiles_path = str(tmp_path / "profiles.json")
+        save_profiles(profiles_path, {})
+
+        settings = _ai_settings(
+            picante_profiles_enabled=True,
+            picante_profiles_piques_cap=piques_cap,
+            picante_profiles_others_cap=3,
+            **extra_settings,
+        )
+
+        buf = RingBuffer(maxlen=30)
+        for i in range(5):
+            buf.append(**_item("alice", f"mensaje {i} de prueba largo"))
+
+        state = ChatState(picante_last_ts=0.0, picante_daily_count=0, picante_last_date="")
+        state_path = str(tmp_path / "state.json")
+
+        update = MagicMock()
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+
+        ai = MagicMock()
+        ai.complete = AsyncMock(return_value="¡Picante reply!")
+
+        context = MagicMock()
+        context.bot_data = {"picante_profiles_path": profiles_path}
+
+        return settings, buf, state, state_path, update, context, ai, profiles_path
+
+    async def test_feature_flag_off_no_perfiles_in_prompt(self, tmp_path):
+        """Profiles flag OFF → no PERFILES block in the AI user prompt."""
+        settings = _ai_settings()  # picante_profiles_enabled defaults to False
+
+        buf = RingBuffer(maxlen=30)
+        for i in range(5):
+            buf.append(**_item("alice", f"mensaje {i} de prueba"))
+        state = ChatState(picante_last_ts=0.0, picante_daily_count=0, picante_last_date="")
+        state_path = str(tmp_path / "state.json")
+
+        update = MagicMock()
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+        ai = MagicMock()
+        ai.complete = AsyncMock(return_value="reply")
+        context = MagicMock()
+        context.bot_data = {}  # no picante_profiles_path
+
+        with patch("worldcup_bot.chat.picante.random.random", return_value=0.0):
+            await maybe_reply(update, context, buf, state, state_path, settings, ai)
+
+        # Reply sent without crashing despite missing profiles_path
+        update.message.reply_text.assert_called_once()
+        # PERFILES must not appear in the prompt (flag OFF)
+        call_args = ai.complete.call_args
+        user_msg = call_args[0][1]
+        assert "PERFILES" not in user_msg
+
+    async def test_pique_persisted_after_successful_reply(self, tmp_path):
+        """After a successful reply, author's pique is written to profiles.json."""
+        from worldcup_bot.chat.profiles import load_profiles as _load
+
+        settings, buf, state, sp, update, context, ai, profiles_path = self._setup(tmp_path)
+
+        with patch("worldcup_bot.chat.picante.random.random", return_value=0.0):
+            await maybe_reply(update, context, buf, state, sp, settings, ai)
+
+        loaded = _load(profiles_path)
+        assert "alice" in loaded
+        assert len(loaded["alice"].piques_recientes) == 1
+        assert loaded["alice"].piques_recientes[0]["texto"] == "¡Picante reply!"
+
+    async def test_pique_text_truncated_to_200_chars(self, tmp_path):
+        """Pique texto must be ≤ 200 characters regardless of reply length."""
+        from worldcup_bot.chat.profiles import load_profiles as _load
+
+        settings, buf, state, sp, update, context, ai, profiles_path = self._setup(tmp_path)
+        long_reply = "A" * 300
+        ai.complete = AsyncMock(return_value=long_reply)
+
+        with patch("worldcup_bot.chat.picante.random.random", return_value=0.0):
+            await maybe_reply(update, context, buf, state, sp, settings, ai)
+
+        loaded = _load(profiles_path)
+        assert "alice" in loaded
+        pique_text = loaded["alice"].piques_recientes[0]["texto"]
+        assert len(pique_text) == 200
+        assert pique_text == "A" * 200
+
+    async def test_piques_truncated_to_piques_cap(self, tmp_path):
+        """Old piques beyond piques_cap are discarded (newest kept)."""
+        from worldcup_bot.chat.profiles import load_profiles as _load
+
+        piques_cap = 3
+        settings, buf, state, sp, update, context, ai, profiles_path = self._setup(
+            tmp_path, piques_cap=piques_cap
+        )
+        # Pre-seed alice's profile with exactly piques_cap piques
+        existing_piques = [
+            {"ts": f"2026-07-0{i}T10:00:00+00:00", "texto": f"pique {i}"}
+            for i in range(1, piques_cap + 1)
+        ]
+        from worldcup_bot.chat.profiles import UserProfile as _UP
+        save_profiles(profiles_path, {"alice": _UP(username="alice", piques_recientes=existing_piques)})
+
+        with patch("worldcup_bot.chat.picante.random.random", return_value=0.0):
+            await maybe_reply(update, context, buf, state, sp, settings, ai)
+
+        loaded = _load(profiles_path)
+        assert len(loaded["alice"].piques_recientes) == piques_cap  # cap not exceeded
+        # The newest pique is the one we just added
+        assert loaded["alice"].piques_recientes[-1]["texto"] == "¡Picante reply!"
+
+    async def test_corrupt_profiles_file_reply_still_sent(self, tmp_path):
+        """A corrupt profiles.json must not prevent the reply from being sent."""
+        settings, buf, state, sp, update, context, ai, profiles_path = self._setup(tmp_path)
+        # Corrupt the profiles file
+        (tmp_path / "profiles.json").write_text("corrupted {{{ json", encoding="utf-8")
+
+        with patch("worldcup_bot.chat.picante.random.random", return_value=0.0):
+            await maybe_reply(update, context, buf, state, sp, settings, ai)
+
+        # Reply still sent despite corrupt profile
+        update.message.reply_text.assert_called_once()
+        update.message.reply_text.assert_called_with("¡Picante reply!", parse_mode=None)
+
+    async def test_empty_profiles_path_no_pique_persisted_reply_sent(self, tmp_path):
+        """profiles_path empty string → no pique persisted, but reply is still sent."""
+        settings = _ai_settings(
+            picante_profiles_enabled=True,
+            picante_profiles_piques_cap=3,
+        )
+        buf = RingBuffer(maxlen=30)
+        for i in range(5):
+            buf.append(**_item("alice", f"mensaje {i} de prueba"))
+        state = ChatState(picante_last_ts=0.0, picante_daily_count=0, picante_last_date="")
+        state_path = str(tmp_path / "state.json")
+
+        update = MagicMock()
+        update.message = MagicMock()
+        update.message.reply_text = AsyncMock()
+        ai = MagicMock()
+        ai.complete = AsyncMock(return_value="respuesta")
+
+        context = MagicMock()
+        context.bot_data = {"picante_profiles_path": ""}  # empty → no persistence
+
+        with patch("worldcup_bot.chat.picante.random.random", return_value=0.0):
+            await maybe_reply(update, context, buf, state, state_path, settings, ai)
+
+        update.message.reply_text.assert_called_once_with("respuesta", parse_mode=None)
+
+    async def test_reply_uses_main_ai_client_not_profile_model(self, tmp_path):
+        """The reply is generated by the main ai argument, not a separate profile client."""
+        settings, buf, state, sp, update, context, ai, profiles_path = self._setup(tmp_path)
+        ai.complete = AsyncMock(return_value="respuesta del main ai")
+
+        with patch("worldcup_bot.chat.picante.random.random", return_value=0.0):
+            await maybe_reply(update, context, buf, state, sp, settings, ai)
+
+        # Main AI was called exactly once (for the reply)
+        ai.complete.assert_called_once()
+        update.message.reply_text.assert_called_with("respuesta del main ai", parse_mode=None)
+
+    async def test_pique_persistence_failure_does_not_prevent_reply(self, tmp_path):
+        """If pique persistence raises internally, reply has already been sent."""
+        settings, buf, state, sp, update, context, ai, profiles_path = self._setup(tmp_path)
+
+        # Make save_profiles raise inside the pique block
+        with patch("worldcup_bot.chat.picante.save_profiles", side_effect=Exception("disk full")):
+            with patch("worldcup_bot.chat.picante.random.random", return_value=0.0):
+                await maybe_reply(update, context, buf, state, sp, settings, ai)
+
+        # Reply was already sent before the persistence attempt
+        update.message.reply_text.assert_called_once()

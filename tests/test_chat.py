@@ -21,6 +21,7 @@ from worldcup_bot.chat.picante import (
     daily_cap_gate,
     min_buffer_gate,
 )
+from worldcup_bot.chat.profiles import UserProfile
 from worldcup_bot.chat.revive import (
     build_revive_user_message,
     compute_inactive_candidates,
@@ -219,6 +220,165 @@ class TestPicanteSystemPrompt:
         assert "relacionado" in label
         assert ("tenlo en cuenta" in label) or ("aprovéch" in label)    # use-it branch
         assert "ignóralo" in label or "ignora" in label                 # ignore-it branch
+
+
+# ── build_picante_user_message WITH profiles ──────────────────────────────────
+
+
+class TestPicanteUserMessageWithProfiles:
+    """Tests for the optional PERFILES DEL GRUPO block in the user prompt."""
+
+    from worldcup_bot.chat.profiles import UserProfile as _UP
+
+    def _profile(self, username: str, **kwargs) -> "UserProfile":
+        from worldcup_bot.chat.profiles import UserProfile
+        return UserProfile(username=username, **kwargs)
+
+    def _msgs(self, *items: tuple[str, str]) -> list[dict]:
+        return [{"username": u, "display_name": u.title(), "text": t} for u, t in items]
+
+    # ── no-profiles path (behaviour unchanged) ────────────────────────────────
+
+    def test_no_profiles_block_when_profiles_is_none(self):
+        """Default call (profiles=None) must NOT include any PERFILES block."""
+        msgs = self._msgs(("alice", "hola"), ("bob", "qué tal"))
+        result = build_picante_user_message(msgs)
+        assert "PERFILES" not in result
+
+    def test_no_profiles_block_when_author_username_empty(self):
+        """profiles provided but author_username='' → same as no-profiles."""
+        profiles = {"alice": self._profile("alice", rasgos="extrovertida")}
+        msgs = self._msgs(("alice", "hola"), ("bob", "qué tal"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="")
+        assert "PERFILES" not in result
+
+    def test_no_profiles_block_when_empty_profiles_dict(self):
+        """profiles={} with a valid author_username → no block (nothing to show)."""
+        msgs = self._msgs(("alice", "hola"), ("bob", "qué tal"))
+        result = build_picante_user_message(msgs, profiles={}, author_username="alice")
+        assert "PERFILES" not in result
+
+    def test_output_identical_to_no_profiles_when_profiles_none(self):
+        """Passing profiles=None must produce exactly the same result as default."""
+        msgs = self._msgs(("alice", "hola"), ("bob", "qué tal"))
+        default_result = build_picante_user_message(msgs)
+        explicit_none = build_picante_user_message(msgs, profiles=None, author_username="")
+        assert default_result == explicit_none
+
+    # ── profiles present path ─────────────────────────────────────────────────
+
+    def test_perfiles_block_present_when_author_has_profile(self):
+        profiles = {"alice": self._profile("alice", rasgos="directa y sin filtro")}
+        msgs = self._msgs(("alice", "hola"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice")
+        assert "PERFILES DEL GRUPO" in result
+
+    def test_author_label_in_block(self):
+        profiles = {"alice": self._profile("alice", rasgos="extrovertida")}
+        msgs = self._msgs(("alice", "hola"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice")
+        assert "[AUTOR: alice]" in result
+
+    def test_author_rasgos_appear_in_block(self):
+        profiles = {"alice": self._profile("alice", rasgos="muy sarcástica")}
+        msgs = self._msgs(("alice", "hola"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice")
+        assert "muy sarcástica" in result
+
+    def test_author_equipo_in_block(self):
+        profiles = {"alice": self._profile("alice", equipo="España")}
+        msgs = self._msgs(("alice", "hola"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice")
+        assert "España" in result
+
+    def test_author_motes_in_block(self):
+        profiles = {"alice": self._profile("alice", motes=["Ali", "la boss"])}
+        msgs = self._msgs(("alice", "hola"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice")
+        assert "Ali" in result
+        assert "la boss" in result
+
+    def test_author_piques_recientes_in_block(self):
+        profiles = {
+            "alice": self._profile(
+                "alice",
+                piques_recientes=[{"ts": "t", "texto": "pique previo aquí"}],
+            )
+        }
+        msgs = self._msgs(("alice", "hola"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice")
+        assert "pique previo aquí" in result
+
+    def test_others_section_present_when_others_have_equipo(self):
+        profiles = {
+            "alice": self._profile("alice", rasgos="author"),
+            "bob": self._profile("bob", equipo="Argentina"),
+        }
+        msgs = self._msgs(("bob", "primer mensaje"), ("alice", "segundo"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice")
+        assert "OTROS PARTICIPANTES RECIENTES" in result
+        assert "Argentina" in result
+
+    def test_others_cap_respected(self):
+        """Only up to others_cap users appear in the OTROS section."""
+        profiles = {
+            "alice": self._profile("alice", rasgos="author"),
+            "u1": self._profile("u1", equipo="España"),
+            "u2": self._profile("u2", equipo="Francia"),
+            "u3": self._profile("u3", equipo="Brasil"),
+            "u4": self._profile("u4", equipo="Alemania"),
+        }
+        msgs = self._msgs(
+            ("u4", "m4"), ("u1", "m1"), ("u2", "m2"), ("u3", "m3"), ("alice", "último")
+        )
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice", others_cap=2)
+        # Only 2 others should appear in the OTROS section
+        # Reversed traversal: alice(skip), u3, u2 — cap=2
+        otros_count = result.count("Equipo:")
+        # author may or may not have equipo; count [uN] tags in OTROS section
+        assert otros_count <= 2
+
+    def test_author_profile_precedes_otros_section(self):
+        """AUTOR block must appear before OTROS in the output."""
+        profiles = {
+            "alice": self._profile("alice", rasgos="extrovertida"),
+            "bob": self._profile("bob", equipo="Argentina"),
+        }
+        msgs = self._msgs(("bob", "hola"), ("alice", "último"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice")
+        assert result.index("[AUTOR: alice]") < result.index("OTROS")
+
+    def test_author_has_no_profile_but_others_do(self):
+        """Author absent from profiles, but others present → still shows OTROS block."""
+        profiles = {
+            "bob": self._profile("bob", equipo="Argentina", tono="sarcástico"),
+        }
+        msgs = self._msgs(("bob", "hola"), ("alice", "último"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice")
+        # No AUTOR block (alice has no profile)
+        assert "[AUTOR: alice]" not in result
+        # OTROS block should appear with bob
+        assert "Argentina" in result
+
+    def test_profiles_error_falls_back_gracefully(self):
+        """Raising exception inside the profiles block must not propagate.
+        The base ÚLTIMO MENSAJE block must always be present."""
+        # Pass an object that raises when iterated/accessed
+        class _BadProfiles:
+            def __contains__(self, _): raise RuntimeError("boom")
+            def get(self, *a): raise RuntimeError("boom")
+
+        msgs = self._msgs(("alice", "hola"))
+        # Must not raise — falls back silently
+        result = build_picante_user_message(msgs, profiles=_BadProfiles(), author_username="alice")  # type: ignore
+        assert "ÚLTIMO MENSAJE" in result
+
+    def test_perfiles_block_comes_before_contexto_and_ultimo(self):
+        """Order: PERFILES → CONTEXTO → ÚLTIMO MENSAJE."""
+        profiles = {"alice": self._profile("alice", rasgos="extrovertida")}
+        msgs = self._msgs(("bob", "contexto"), ("alice", "trigger"))
+        result = build_picante_user_message(msgs, profiles=profiles, author_username="alice")
+        assert result.index("PERFILES") < result.index("CONTEXTO") < result.index("ÚLTIMO MENSAJE")
 
 
 # ── Revive candidate selection ────────────────────────────────────────────────
