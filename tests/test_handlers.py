@@ -32,6 +32,7 @@ from worldcup_bot.bot.handlers import (
     cmd_lista_aciertos_actual,
     cmd_mis_predicciones,
     cmd_participantes,
+    cmd_perfil,
     cmd_simula_gol,
     cmd_start,
     cmd_tongo,
@@ -40,6 +41,7 @@ from worldcup_bot.bot.handlers import (
 from worldcup_bot.api.client import FootballAPIError
 from worldcup_bot.api.models import Match, Standing
 from worldcup_bot.bot.formatters import format_user_detail, participant_photo_url
+from worldcup_bot.chat.profiles import UserProfile
 from worldcup_bot.config import Settings
 from worldcup_bot.data.tongo import TongoConfig, TongoConfigError
 from worldcup_bot.porra.engine import UserRankEntry
@@ -3507,3 +3509,190 @@ class TestCmdEnDirectoScheduleLive:
 
         text = update.message.reply_text.call_args[0][0]
         assert "No hay partidos" in text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cmd_perfil — hidden admin: inspect a user's picante auto-learned profile
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_pepe_profile() -> dict[str, UserProfile]:
+    """Return a profiles dict with one complete UserProfile fixture for 'pepe'."""
+    profile = UserProfile(
+        username="pepe",
+        rasgos="Muy picante y provocador",
+        equipo="Argentina",
+        motes=["Pepito", "El crack"],
+        temas=["cine", "fútbol"],
+        tono="Irónico y directo",
+        piques_recientes=[{"ts": "2026-07-10T12:00:00Z", "texto": "Qué golazo más cutre"}],
+        pinned_fields=[],
+        updated_at="2026-07-10T04:00:00Z",
+    )
+    return {"pepe": profile}
+
+
+class TestCmdPerfil:
+    """Tests for the hidden admin command /perfil @usuario."""
+
+    async def test_found_profile_reply_contains_key_fields(self, fake_settings):
+        """Found profile → reply contains rasgos, equipo, mote, tema, tono, pique texto."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=["@pepe"])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "🕵️ Perfil de @pepe" in text
+        assert "Muy picante y provocador" in text
+        assert "Argentina" in text
+        assert "Pepito" in text
+        assert "cine" in text
+        assert "Irónico y directo" in text
+        assert "Qué golazo más cutre" in text
+
+    async def test_at_prefix_and_mixed_case_resolved_to_lowercase_key(self, fake_settings):
+        """'/perfil @Pepe' → strips '@', lowercases → finds 'pepe'."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=["@Pepe"])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "🕵️ Perfil de @pepe" in text
+
+    async def test_username_without_at_also_resolves(self, fake_settings):
+        """'/perfil PEPE' (no @ prefix) also resolves to 'pepe'."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=["PEPE"])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "🕵️ Perfil de @pepe" in text
+
+    async def test_not_found_sends_not_found_message_with_available_list(self, fake_settings):
+        """Unknown user → not-found message + list of available profiles."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=["@nobody"])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "No hay perfil para @nobody" in text
+        assert "@pepe" in text  # listed in Perfiles disponibles
+
+    async def test_no_args_empty_profiles_replies_simple_usage(self, fake_settings):
+        """No args + empty profiles → simple 'Uso: /perfil @usuario' (no list)."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=[])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value={}):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Uso: /perfil @usuario" in text
+        assert "Perfiles disponibles" not in text
+
+    async def test_no_args_with_existing_profiles_lists_them(self, fake_settings):
+        """No args + profiles exist → usage + 'Perfiles disponibles: @pepe'."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=[])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Uso: /perfil @usuario" in text
+        assert "Perfiles disponibles" in text
+        assert "@pepe" in text
+
+    async def test_empty_profiles_with_arg_sends_config_hint(self, fake_settings):
+        """Arg given but profiles empty → config hint with PICANTE_PROFILES_ENABLED + 04:00."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=["pepe"])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value={}):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "No hay perfiles todavía" in text
+        assert "PICANTE_PROFILES_ENABLED" in text
+        assert "04:00" in text
+
+    async def test_unexpected_error_sends_friendly_reply(self, fake_settings):
+        """load_profiles raises → no exception propagates; friendly Spanish error reply sent."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=["@pepe"])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", side_effect=RuntimeError("disco lleno")):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "❌" in text
+        assert "Error inesperado" in text
+        assert "logs" in text.lower()
+
+    async def test_perfil_not_in_start_help(self, fake_settings):
+        """/perfil is NOT mentioned in /start help text (hidden command)."""
+        update = _make_update()
+        context = _make_context(fake_settings)
+
+        await cmd_start(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "perfil" not in text.lower()
+
+    async def test_empty_fields_shown_as_dash(self, fake_settings):
+        """Profile with no rasgos/equipo/tono → those fields show '—'."""
+        sparse = UserProfile(username="pepe")
+        profiles = {"pepe": sparse}
+        update = _make_update()
+        context = _make_context(fake_settings, args=["pepe"])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=profiles):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Rasgos:  —" in text
+        assert "Equipo:  —" in text
+        assert "Tono:    —" in text
+
+    async def test_updated_at_shown_in_reply(self, fake_settings):
+        """updated_at value is included in the reply footer."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=["pepe"])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Actualizado: 2026-07-10T04:00:00Z" in text
+
+    async def test_piques_recientes_block_rendered(self, fake_settings):
+        """piques_recientes renders 'Piques recientes:' block with ts + texto."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=["pepe"])
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cmd_perfil(update, context)
+
+        text = update.message.reply_text.call_args[0][0]
+        assert "Piques recientes:" in text
+        assert "2026-07-10T12:00:00Z" in text
+        assert "Qué golazo más cutre" in text
+
+    async def test_uses_picante_profiles_path_from_bot_data(self, fake_settings):
+        """Reads picante_profiles_path from bot_data (not only settings fallback)."""
+        update = _make_update()
+        context = _make_context(fake_settings, args=["pepe"])
+        context.bot_data["picante_profiles_path"] = "custom/path/profiles.json"
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()) as mock_load:
+            await cmd_perfil(update, context)
+
+        mock_load.assert_called_once_with("custom/path/profiles.json")

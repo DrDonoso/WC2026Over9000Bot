@@ -58,6 +58,7 @@ from worldcup_bot.bot.handlers import (
     cmd_update_diario,
     cmd_recalcular,
     cmd_tongocheck,
+    cmd_perfil,
     cmd_ver_gol_callback,
     make_client,
 )
@@ -2431,6 +2432,7 @@ def build_app(settings: Settings) -> Application:
         CommandHandler("recalcular", cmd_recalcular),
         CommandHandler("tongocheck", cmd_tongocheck),
         CommandHandler("evilsanchez", cmd_evil_sanchez),
+        CommandHandler("perfil", cmd_perfil),
     ]
 
     for handler in handlers:

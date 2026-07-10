@@ -83,6 +83,7 @@ from worldcup_bot.reddit.vergol_stats import load_stats as _vs_load_stats
 from worldcup_bot.reddit.vergol_stats import record_view as _vs_record_view
 from worldcup_bot.reddit.vergol_stats import save_stats as _vs_save_stats
 from worldcup_bot.reddit.video import VideoTooLargeError, compress_if_needed, probe_video
+from worldcup_bot.chat.profiles import get_profile, load_profiles
 from worldcup_bot.tve import load_tve_broadcasts, tve_channel_for
 
 log = logging.getLogger(__name__)
@@ -1364,6 +1365,98 @@ async def cmd_tongocheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"✅ TongoUsers.yml OK — {detail}")
     else:
         await update.message.reply_text(f"❌ TongoUsers.yml: {detail}")
+
+
+# ── /perfil — hidden admin: inspect a user's picante auto-learned profile ──────
+
+
+async def cmd_perfil(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hidden admin: inspect a user's picante auto-learned profile. /perfil @usuario
+
+    Loads picante_profiles.json from state_dir and renders the full UserProfile
+    for the given username.  Not listed in /start help.
+    """
+    settings: Settings = context.bot_data["settings"]
+    profiles_path: str = context.bot_data.get(
+        "picante_profiles_path",
+        f"{settings.state_dir}/picante_profiles.json",
+    )
+
+    try:
+        profiles = load_profiles(profiles_path)
+
+        # ── Argument parsing ───────────────────────────────────────────────────
+        if not context.args:
+            if profiles:
+                available = ", ".join(f"@{u}" for u in sorted(profiles))
+                await update.message.reply_text(
+                    f"Uso: /perfil @usuario\n\nPerfiles disponibles: {available}"
+                )
+            else:
+                await update.message.reply_text("Uso: /perfil @usuario")
+            return
+
+        raw = context.args[0].strip().lstrip("@").lower()
+        if not raw:
+            await update.message.reply_text("Uso: /perfil @usuario")
+            return
+
+        # ── Profiles file empty / missing ──────────────────────────────────────
+        if not profiles:
+            await update.message.reply_text(
+                "No hay perfiles todavía. "
+                "¿Está activada la feature (PICANTE_PROFILES_ENABLED=1) "
+                "y ha corrido el job de las 04:00?"
+            )
+            return
+
+        # ── Profile lookup ─────────────────────────────────────────────────────
+        profile = get_profile(profiles, raw)
+        if profile is None:
+            available = ", ".join(f"@{u}" for u in sorted(profiles))
+            await update.message.reply_text(
+                f"No hay perfil para @{raw} todavía.\n\nPerfiles disponibles: {available}"
+            )
+            return
+
+        # ── Format profile ─────────────────────────────────────────────────────
+        def _val(v: str | None) -> str:
+            return v if v else "—"
+
+        def _list(items: list) -> str:
+            return ", ".join(str(i) for i in items) if items else "—"
+
+        lines = [
+            f"🕵️ Perfil de @{profile.username}",
+            "",
+            f"Rasgos:  {_val(profile.rasgos)}",
+            f"Equipo:  {_val(profile.equipo)}",
+            f"Motes:   {_list(profile.motes)}",
+            f"Temas:   {_list(profile.temas)}",
+            f"Tono:    {_val(profile.tono)}",
+        ]
+
+        if profile.pinned_fields:
+            lines.append(f"Fijados: {_list(profile.pinned_fields)}")
+
+        if profile.piques_recientes:
+            lines.append("")
+            lines.append("Piques recientes:")
+            for p in profile.piques_recientes:
+                ts = p.get("ts", "?")
+                texto = p.get("texto", "")
+                lines.append(f"  • [{ts}] {texto}")
+
+        lines.append("")
+        lines.append(f"Actualizado: {_val(profile.updated_at)}")
+
+        await update.message.reply_text("\n".join(lines))
+
+    except Exception:
+        log.exception("cmd_perfil: error inesperado")
+        await update.message.reply_text(
+            "❌ Error inesperado inspeccionando el perfil. Revisa los logs."
+        )
 
 
 # ── /recalcular — hidden admin: rebuild history with current scoring ──────────
