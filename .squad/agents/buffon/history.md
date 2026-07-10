@@ -1,7 +1,31 @@
 # Buffon — QA / Tester
 
 **Project:** WorldCup2026Over9000TelegramBot  
-**Current test count:** 2419 (as of 2026-07-10)
+**Current test count:** 2586 (as of 2026-07-10)
+
+## Current Session: 2026-07-10 — /perfil Hidden Admin Command QA Gate (✅ APPROVE)
+
+**Kanté's change:** New hidden admin command `cmd_perfil` in `src/worldcup_bot/bot/handlers.py` (~line 1373). Loads `picante_profiles.json` via `load_profiles`, parses `context.args[0].strip().lstrip("@").lower()`, and renders all UserProfile fields as plain text. Not listed in `/start` or `/help`.
+
+**Tests added:** 13 new tests in `tests/test_handlers.py` → new class `TestCmdPerfil`:
+
+- `test_found_profile_reply_contains_key_fields`: Full fixture profile; asserts 🕵️ header + rasgos/equipo/motes/temas/tono/pique texto all present.
+- `test_at_prefix_and_mixed_case_resolved_to_lowercase_key`: `@Pepe` → finds `"pepe"`.
+- `test_username_without_at_also_resolves`: `PEPE` (no `@`) → finds `"pepe"`.
+- `test_not_found_sends_not_found_message_with_available_list`: `@nobody` → exact prefix `"No hay perfil para @nobody"` + `@pepe` in available list.
+- `test_no_args_empty_profiles_replies_simple_usage`: Empty profiles + no args → `"Uso: /perfil @usuario"` without `"Perfiles disponibles"`.
+- `test_no_args_with_existing_profiles_lists_them`: Profiles present + no args → usage + `"Perfiles disponibles"` + `"@pepe"`.
+- `test_empty_profiles_with_arg_sends_config_hint`: Arg given + empty profiles → `"No hay perfiles todavía"` + `"PICANTE_PROFILES_ENABLED"` + `"04:00"`.
+- `test_unexpected_error_sends_friendly_reply`: `load_profiles` raises → `"❌"` + `"Error inesperado"` + `"logs"` in reply; no exception propagates.
+- `test_perfil_not_in_start_help`: `/start` help text does not contain `"perfil"` (hidden guard).
+- `test_empty_fields_shown_as_dash`: UserProfile with no rasgos/equipo/tono → each line shows `"—"`.
+- `test_updated_at_shown_in_reply`: `updated_at` value appears verbatim in footer.
+- `test_piques_recientes_block_rendered`: `"Piques recientes:"` block present with ts + texto.
+- `test_uses_picante_profiles_path_from_bot_data`: `bot_data["picante_profiles_path"]` is the path passed to `load_profiles`.
+
+**Outcome:** 2586 passed, 3 warnings, 0 regressions (+13 vs prior 2573). APPROVE ✅
+
+---
 
 ## Current Session: 2026-07-10 — Profile Updater M3/M4/M5 Regression Lock-in (✅ APPROVE)
 

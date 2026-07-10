@@ -1,3 +1,38 @@
+# Decision: /perfil hidden admin command
+
+**Date:** 2026-07-10  
+**Author:** Kanté  
+**Status:** implemented
+
+## Context
+
+Admin needed to inspect auto-learned picante user profiles without docker-exec'ing into the container to read `picante_profiles.json` directly.
+
+## Decision
+
+Added a hidden `/perfil @usuario` Telegram command. Read-only inspector of `UserProfile` data — no changes to profile logic.
+
+## Key choices
+
+| # | Choice | Rationale |
+|---|--------|-----------|
+| 1 | **Placed in `handlers.py`** (not `__main__.py`) | Mirrors `/tongocheck`; keeps hidden admin commands co-located. |
+| 2 | **No access-control gate** | Matches the existing hidden-by-omission pattern (`/tongocheck`, `/recalcular`, `/evilsanchez` have none). |
+| 3 | **Profiles path from `bot_data["picante_profiles_path"]` with fallback** | Consistent with how `maybe_reply` reads it; no hardcoded paths. |
+| 4 | **Plain text output (no HTML parse_mode)** | All adjacent hidden commands use plain text. Profile values are free text — plain text avoids escaping complexity and matches the surrounding style. |
+| 5 | **Lists available usernames on not-found / no-args** | Avoids the frustrating "no hay perfil" dead end — admin immediately knows what keys exist. |
+| 6 | **Top-level import of `load_profiles`/`get_profile`** | Consistent with codebase rule (no inline imports in production modules). |
+
+## Files changed
+
+- `src/worldcup_bot/bot/handlers.py` — new import (line 86) + `cmd_perfil` (line 1374)
+- `src/worldcup_bot/__main__.py` — import (line 61) + `CommandHandler("perfil", cmd_perfil)` (line 2435)
+
+## Tests
+
+2573 pass, 0 regressions (test_handlers.py: 166 pass).
+
+
 # Decision: Picante prompt — balanced conditional context usage
 
 **Date:** 2026-07-10T11:31:40+02:00

@@ -145,6 +145,37 @@ where N = active users, P_in/P_out = real model price per 1M tokens.
 
 ---
 
+### 2026-07-10 — /perfil hidden admin command
+
+**What:** Read-only Telegram command `/perfil @usuario` to inspect a user's auto-learned picante profile from the chat (no docker-exec needed).
+
+**Placement:** `src/worldcup_bot/bot/handlers.py:1374` (`cmd_perfil`) — consistent with `cmd_tongocheck` (line 1348) and other hidden admin handlers in the same file.
+
+**Access control:** Same as `/tongocheck` and `/recalcular` — no explicit user/group gate; hidden-by-omission (not listed in `_HELP_COMMANDS`/`/start`). Anyone who discovers the command can invoke it.
+
+**How it reads profiles:**
+- Path from `context.bot_data["picante_profiles_path"]` with fallback to `f"{settings.state_dir}/picante_profiles.json"`.
+- Calls `load_profiles(path)` → `dict[str, UserProfile]` (never raises, {} if missing/corrupt).
+- Calls `get_profile(profiles, username)` for lookup (key = lowercase, no `@`).
+
+**Argument parsing:** `context.args[0].strip().lstrip("@").lower()`. Accepts `/perfil @nombre` and `/perfil nombre`. No args → usage + list of known usernames.
+
+**Output format:** Plain text (matching adjacent hidden commands). Fields: rasgos, equipo, motes, temas, tono, pinned_fields (if set), piques_recientes (ts + texto per bullet), updated_at.
+
+**Error cases (all replied in Spanish):**
+- No args → usage + available usernames (if any).
+- Profiles empty/missing → feature-check hint (PICANTE_PROFILES_ENABLED, 04:00 job).
+- Username not found → names the available users.
+- Unexpected exception → Spanish error + `log.exception`.
+
+**Registration:** `__main__.py:2435` — `CommandHandler("perfil", cmd_perfil)` appended to the hidden-commands block (after `/evilsanchez`). Imported at `__main__.py:61`.
+
+**New imports in handlers.py:** `from worldcup_bot.chat.profiles import get_profile, load_profiles` (line 86).
+
+**Tests:** 2573 pass (0 regressions). `cmd_perfil` is unit-testable: reads path from `context.bot_data`, uses `update.message.reply_text` only.
+
+---
+
 ## Prior Sessions Summary (2026-07-01 to 2026-07-09)
 
 - **2026-07-08:** KO draw-deferral fix (Switzerland 0-0 Colombia false notification). Added _KNOCKOUT_STAGE_NAMES frozenset in formatters.py to defer FINISHED KO matches without a decisive winner. Tests: 161 in test_formatters.py, all green.
