@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260710] - 2026-07-10
+
+- feat(rich-image): Micky birthday special on July 10 (3-image composition)
+
+
 ## [20260708.02] - 2026-07-08
 
 - fix(porra): defer knockout Final recap until a decisive winner is set
