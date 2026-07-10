@@ -15,6 +15,7 @@ import pytest
 from worldcup_bot.chat.buffer import RingBuffer
 from worldcup_bot.chat.state import ChatState, load_chat_state, save_chat_state
 from worldcup_bot.chat.picante import (
+    build_picante_system_prompt,
     build_picante_user_message,
     cooldown_gate,
     daily_cap_gate,
@@ -191,6 +192,33 @@ class TestPicanteUserMessage:
         assert "ÚLTIMO MENSAJE" in result
         assert "alice: hola!" in result
         assert "CONTEXTO" not in result
+
+
+class TestPicanteSystemPrompt:
+    """Regression guard: system prompt must express the balanced conditional context rule.
+
+    Catches two regressions:
+    - revert to 'always ignore' (old EXCLUSIVAMENTE / IGNÓRALOS por completo wording)
+    - drift to 'always use context' (removing the ignore branch)
+    """
+
+    def test_system_prompt_has_conditional_context_rule(self):
+        """Both 'use when related' AND 'ignore when not related' branches must be present."""
+        s = build_picante_system_prompt().lower()
+        assert "relacionado" in s                                        # conditional pivot
+        assert ("tenlo en cuenta" in s) or ("aprovéch" in s)            # use-it branch
+        assert "ignóralo" in s or "ignora" in s                         # ignore-it branch
+
+    def test_user_message_context_label_has_conditional_rule(self):
+        """CONTEXTO label (when prior messages exist) must also encode both branches."""
+        msgs = [
+            {"display_name": "Alice", "text": "primer mensaje"},
+            {"display_name": "Bob", "text": "segundo mensaje"},
+        ]
+        label = build_picante_user_message(msgs).lower()
+        assert "relacionado" in label
+        assert ("tenlo en cuenta" in label) or ("aprovéch" in label)    # use-it branch
+        assert "ignóralo" in label or "ignora" in label                 # ignore-it branch
 
 
 # ── Revive candidate selection ────────────────────────────────────────────────

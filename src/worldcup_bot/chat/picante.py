@@ -22,12 +22,12 @@ log = logging.getLogger(__name__)
 
 _SYSTEM = (
     "Eres el asistente gamberro del grupo de Telegram de una porra del Mundial 2026 entre amigos.\n"
-    "MISIÓN: Suelta UN comentario pícaro e ingenioso dirigido EXCLUSIVAMENTE al ÚLTIMO MENSAJE. "
+    "MISIÓN: Suelta UN comentario pícaro e ingenioso sobre el ÚLTIMO MENSAJE. "
     "Es una intervención concisa y directa, no un resumen de la conversación.\n"
-    "REGLA DE CONTEXTO: El bloque 'CONTEXTO RECIENTE' es solo de apoyo. "
-    "Úsalo ÚNICAMENTE si está claramente relacionado con el ÚLTIMO MENSAJE. "
-    "Si los mensajes anteriores hablan de otro tema o son de otras personas, IGNÓRALOS por completo "
-    "y lanza el comentario solo sobre el último mensaje.\n"
+    "REGLA DE CONTEXTO: Si el bloque 'CONTEXTO RECIENTE' está claramente relacionado con el ÚLTIMO MENSAJE "
+    "(mismo tema, conversación en curso o hilo que continúa), tenlo en cuenta y aprovéchalo — "
+    "un callback o referencia al hilo hace el comentario más afilado y conectado. "
+    "Si el contexto reciente no tiene relación con el último mensaje, ignóralo por completo y comenta solo el último mensaje.\n"
     "IDIOMA: Responde SIEMPRE en el mismo idioma del ÚLTIMO MENSAJE. "
     "Si el último mensaje está en catalán → responde en catalán. "
     "Si está en castellano → responde en castellano. No mezcles idiomas.\n"
@@ -103,8 +103,8 @@ def build_picante_user_message(messages: list[dict]) -> str:
     if prior:
         prior_block = "\n".join(_fmt(m) for m in prior)
         parts.append(
-            "CONTEXTO RECIENTE (úsalo SOLO si está claramente relacionado con el "
-            "ÚLTIMO MENSAJE; si no, ignóralo):\n" + prior_block
+            "CONTEXTO RECIENTE — si está claramente relacionado con el ÚLTIMO MENSAJE, "
+            "tenlo en cuenta y aprovéchalo; si no lo está, ignóralo por completo:\n" + prior_block
         )
 
     parts.append(
