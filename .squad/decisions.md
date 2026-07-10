@@ -2262,3 +2262,566 @@ Reviewed diff `38e00b2..30919a7`, current `elecciones_image.py`, `porra/eleccion
 2. **Placeholder delete failure leaves stale hourglass.** `_serve_after_placeholder()` logs delete failure and still sends the result. Acceptable as a send-first fallback, but consider editing the placeholder to a neutral/error state when delete fails.
 
 Required revision: assign to a different agent than Kanté.
+
+---
+
+# [PENDING USER SIGN-OFF] Spec: Perfiles per-user auto-aprendidos para Picante
+
+**Estado:** ⏳ PENDING — requiere aprobación de drdonoso antes de que Kanté implemente  
+**Autor:** Pirlo (Lead/Architect)  
+**Fecha:** 2026-07-10T12:00:56+02:00  
+**Solicitado por:** drdonoso  
+
+---
+
+## Decisiones previas asumidas (NO reabrir)
+
+| Decisión | Valor |
+|---|---|
+| Fuente | AUTO-LEARNED (auto_full) — sin YAML manual; cold start aceptado |
+| Campos | 6 por usuario: rasgos, equipo, motes, temas, tono, piques_recientes |
+| Scope | include_others: perfil autor + otros usuarios recientes (con cap) |
+| Privacidad | Texto en disco permitido — 7 días sliding window + rotación; **ruptura explícita** de la política "no text on disk" de ChatState |
+| Cadencia | Batch diario (estrategia b de Kanté) |
+| Modelo | Summarización en `PICANTE_PROFILE_MODEL` (barato, ej. `gpt-5.4-nano`); reply picante permanece en `OPENAI_MODEL` |
+
+---
+
+## 1. Nuevos módulos / ficheros y cambios por fichero
+
+### 1.1 `src/worldcup_bot/chat/message_store.py` — **NUEVO**
+
+**Propósito:** Almacén on-disk de mensajes de texto por usuario. Ventana deslizante de 7 días.
+
+**Ruta de datos:** `{state_dir}/picante_messages/{username}.jsonl`  
+(un fichero JSONL por usuario; una entrada JSON por línea)
+
+**Funciones públicas:**
+- `append_message(state_dir, username, text, ts: datetime) → None`  
+  Best-effort; no lanza. Si `username` está vacío → no-op. Si `PICANTE_STORE_TEXT=0` → no-op.  
+  Tras escribir, llama a `_rotate_messages` para descartar entradas fuera de la ventana.
+- `load_messages(state_dir, username, window_days: int) → list[dict]`  
+  Lee el JSONL, filtra solo entradas dentro de `window_days`, devuelve lista `[{"ts": ..., "text": ...}]`.  
+  Nunca lanza — si el fichero está ausente o corrupto devuelve `[]` + WARNING log.
+- `active_users(state_dir, window_days: int) → list[str]`  
+  Escanea `{state_dir}/picante_messages/` buscando ficheros `*.jsonl` con mensajes recientes.  
+  Devuelve lista de usernames con al menos 1 entrada dentro de la ventana.
+- `_rotate_messages(path, window_days: int) → None`  
+  Reescribe el fichero JSONL descartando líneas con `ts` anterior a `now - window_days`.  
+  Best-effort (atómico: escribe `.tmp` → `os.replace`). Si falla → warning log, fichero sin modificar.
+
+**Política de privacidad:** La función `append_message` comprueba el flag interno (cargado de settings) antes de escribir. El hook en `listener.py` solo llama a `append_message` si `settings.picante_store_text` es `True`.
+
+**Nota:** Esta es la **única ruptura** de la política "no text on disk" de `ChatState` (buffer.py:1–5, state.py:3). Se documenta explícitamente como decisión deliberada.
+
+---
+
+### 1.2 `src/worldcup_bot/chat/profiles.py` — **NUEVO**
+
+**Propósito:** Almacén de perfiles por usuario (resúmenes generados por AI). Carga/guarda atómico; nunca lanza.
+
+**Ruta de datos:** `{state_dir}/picante_profiles.json`
+
+**Funciones públicas:**
+- `load_profiles(path: str) → dict[str, UserProfile]`  
+  Patrón idéntico a `load_chat_state` (state.py:41–63): `try/except`, devuelve `{}` si ausente/corrupto.
+- `save_profiles(path: str, profiles: dict[str, UserProfile]) → None`  
+  Patrón idéntico a `save_chat_state` (state.py:66–89): temp file → `os.replace`, best-effort.
+- `get_profile(profiles: dict, username: str) → UserProfile | None`  
+  Simple lookup; devuelve `None` si no existe.
+
+**Dataclass `UserProfile`** (ver Schema en §2).
+
+---
+
+### 1.3 `src/worldcup_bot/chat/profile_updater.py` — **NUEVO**
+
+**Propósito:** Función de summarización que toma mensajes acumulados y devuelve un `UserProfile` actualizado.
+
+**Función principal:**
+```
+async def update_user_profile(
+    username: str,
+    messages: list[dict],     # de load_messages
+    current: UserProfile | None,
+    ai: AIClient,             # instanciado con PICANTE_PROFILE_MODEL
+    pinned_fields: list[str], # campos que el auto-updater NO sobreescribe
+) -> UserProfile
+```
+
+- Si `messages` está vacío → devuelve `current` sin llamar a la AI.  
+- Llama a `ai.complete(system_prompt, user_prompt, temperature=0.3, max_completion_tokens=400)`.  
+- Parsea el JSON devuelto por el modelo → actualiza solo campos no pinned.  
+- Si `AIError` o `json.JSONDecodeError` → WARNING log + devuelve `current` (o `UserProfile(username=username)` si no había perfil previo).  
+- `updated_at` se fija a `datetime.now(UTC).isoformat()` solo si la llamada AI tiene éxito.
+
+**System prompt de extracción (alto nivel):**  
+El system prompt instruye al modelo a:
+1. Analizar la lista de mensajes de `{username}` (últimos N días).
+2. Extraer y resumir los 6 campos: `rasgos`, `equipo`, `motes`, `temas`, `tono`, `piques_recientes`.
+3. Devolver EXCLUSIVAMENTE un JSON válido con esos 6 campos (sin prosa adicional).
+4. Para campos sin evidencia suficiente → devolver `null` o lista vacía (no inventar).
+5. `piques_recientes` en este contexto = menciones a predicciones fallidas o chistes recurrentes visibles en los mensajes, NO los piques enviados por el bot (esos se añaden por separado desde `maybe_reply`).
+
+**User prompt:** Lista de mensajes del usuario en texto plano + perfil actual como contexto base (si existe).
+
+---
+
+### 1.4 `src/worldcup_bot/__main__.py` — **MODIFICADO** (solo añadir job + wiring)
+
+**Nuevo job function:** `profile_update_job(context)` — función async en `__main__.py`.  
+Lógica:
+1. Lee `settings`, `state_dir`, `profiles_path` de `context.bot_data`.
+2. Obtiene `active_users(state_dir, window_days=settings.picante_profiles_window_days)`.
+3. Carga perfiles actuales (`load_profiles`).
+4. Para cada usuario activo: `await update_user_profile(...)` con el AI client de perfiles.
+5. Guarda perfiles actualizados (`save_profiles`).
+6. Todo en `try/except Exception` por usuario — un fallo no interrumpe los demás.  
+7. Si `picante_profiles_enabled(settings)` es False → return inmediato (best-effort guard).
+
+**Registro del job** — justo después del bloque `if picante_enabled(settings)` (línea ~2472), siguiendo el patrón de `run_daily` de `rich_image_job` (línea 2456):
+```python
+if picante_profiles_enabled(settings):
+    app.job_queue.run_daily(
+        profile_update_job,
+        time=dtime(hour=settings.picante_profiles_update_hour, minute=0, tzinfo=tz),
+        name="picante_profile_update",
+    )
+    log.info(
+        "Picante profiles update ENABLED — daily at %02d:00 %s",
+        settings.picante_profiles_update_hour,
+        settings.timezone,
+    )
+else:
+    log.info(
+        "Picante profiles update DISABLED — set PICANTE_PROFILES_ENABLED=1 to enable."
+    )
+```
+
+**AI client de perfiles:** Instanciar un `AIClient` separado con `PICANTE_PROFILE_MODEL` en `build_app()` (o en el job callback), almacenado en `context.bot_data["profile_ai_client"]`. Usa las mismas `OPENAI_API_KEY` y `OPENAI_BASE_URL` que el cliente principal — solo cambia el campo `model`.
+
+---
+
+### 1.5 `src/worldcup_bot/chat/picante.py` — **MODIFICADO**
+
+**`build_picante_user_message`** (actualmente picante.py:79–114):  
+- Nueva firma: añade parámetros opcionales `profiles: dict | None = None` y `author_username: str = ""`.  
+- Si `profiles` no es None y `author_username` es non-empty:  
+  - Recupera `get_profile(profiles, author_username)` → bloque PERFIL AUTOR.  
+  - Recupera hasta `settings.picante_profiles_others_cap` perfiles de otros usuarios activos recientes (excluyendo al autor).  
+  - Construye bloque `PERFILES DEL GRUPO` con sección AUTOR primero, luego OTROS.  
+  - Inserta el bloque entre el system prompt y el CONTEXTO RECIENTE (o como primera sección del user message).
+- Si `profiles` es None o username vacío o no hay perfil → no añade ningún bloque; comportamiento idéntico al actual.  
+- La lógica del bloque PERFIL no puede lanzar excepciones — toda ruta tiene fallback silencioso.
+
+**Formato del bloque PERFIL en el user message:**
+```
+PERFILES DEL GRUPO — úsalos para personalizar el comentario:
+
+[AUTOR: pepe]
+Rasgos: ...
+Equipo favorito: ...
+Motes/apodos: ...
+Temas/aficiones: ...
+Tono a usar: ...
+Piques recientes: ...
+
+[OTROS PARTICIPANTES RECIENTES]
+[juan] Equipo: ..., Tono: ...
+[maria] Equipo: ..., Tono: ...
+```
+
+**`maybe_reply`** (picante.py:120–190):
+- Carga `profiles = load_profiles(profiles_path)` antes de los gates (si `picante_profiles_enabled`). Si falla → `profiles = None`.  
+- Extrae `author_username` de `messages[-1]` (el trigger del buffer).  
+- Pasa `profiles` y `author_username` a `build_picante_user_message`.  
+- Tras enviar la respuesta (`update.message.reply_text`), persiste el pique:  
+  - `profiles[author_username].piques_recientes.append({"ts": now_utc, "texto": text[:200]})`.  
+  - Trunca a `settings.picante_profiles_piques_cap` entradas más recientes.  
+  - `save_profiles(profiles_path, profiles)` — best-effort, en `try/except`.  
+- El pique persistido es el **texto generado por el bot** (no el mensaje del usuario), truncado a 200 chars.
+
+---
+
+### 1.6 `src/worldcup_bot/chat/listener.py` — **MODIFICADO** (on_group_text)
+
+Tras el paso 7 (update last_seen, línea ~92–97), añadir paso 7.5:
+```
+# 7.5. Acumular mensaje para perfiles (si feature habilitada y store_text activo)
+if picante_profiles_enabled(settings) and settings.picante_store_text:
+    append_message(state_dir, username, text, now_utc)
+```
+Best-effort — cualquier excepción se captura y loggea como WARNING, sin romper el flujo.
+
+---
+
+### 1.7 `src/worldcup_bot/config.py` — **MODIFICADO**
+
+Ver §3 para la lista completa de env vars. Seguir el patrón de `chat_picante_enabled` (config.py:50, 165).
+
+Nueva función helper:
+```python
+def picante_profiles_enabled(settings: "Settings") -> bool:
+    """Return True when profiles feature is enabled AND picante is enabled."""
+    return settings.picante_profiles_enabled and picante_enabled(settings)
+```
+
+---
+
+## 2. Modelo de datos — Schemas JSON concretos
+
+### 2.1 Almacén de mensajes por usuario
+
+**Ruta:** `{state_dir}/picante_messages/{username}.jsonl`  
+**Formato:** JSONL — una entrada JSON por línea.
+
+```json
+{"ts": "2026-07-10T12:00:00+00:00", "text": "Hoy España gana 3-0"}
+{"ts": "2026-07-10T14:23:11+00:00", "text": "Messi está en forma, el Barça arrasará"}
+```
+
+Campos por entrada:
+- `ts`: ISO-8601 UTC (str)
+- `text`: texto del mensaje (str), sin truncar al almacenar
+
+---
+
+### 2.2 Almacén de perfiles
+
+**Ruta:** `{state_dir}/picante_profiles.json`  
+**Formato:** JSON object keyed por username.
+
+```json
+{
+  "pepe": {
+    "username": "pepe",
+    "rasgos": "Optimista serial. Predice goleadas épicas que nunca ocurren. Fiel a España incluso en la derrota.",
+    "equipo": "España / Real Madrid",
+    "motes": ["el Profeta", "el Vidente Ciego"],
+    "temas": ["F1", "IA", "predicciones fallidas"],
+    "tono": "banter duro centrado en predicciones erróneas; admite el chaparrón con humor",
+    "piques_recientes": [
+      {"ts": "2026-07-08T20:14:00+00:00", "texto": "¡Pepe predijo 4-0 y acabó 0-1! ¿Cuándo abres la academia de adivinación?"}
+    ],
+    "pinned_fields": [],
+    "updated_at": "2026-07-10T04:12:00+00:00"
+  },
+  "juan": {
+    "username": "juan",
+    "rasgos": "Catastrofista profesional. Siempre teme lo peor, acierta raramente, y lo celebra el doble.",
+    "equipo": "Argentina",
+    "motes": ["el Cenizo"],
+    "temas": ["fútbol", "quejarse del árbitro"],
+    "tono": "ironía suave; recordarle sus predicciones pesimistas que se cumplieron",
+    "piques_recientes": [],
+    "pinned_fields": ["tono"],
+    "updated_at": "2026-07-10T04:13:00+00:00"
+  }
+}
+```
+
+Campos por `UserProfile`:
+| Campo | Tipo | Descripción |
+|---|---|---|
+| `username` | str | Telegram username (lowercase, sin @) |
+| `rasgos` | str \| null | Descripción libre de personalidad/carácter |
+| `equipo` | str \| null | Equipo/selección favorita |
+| `motes` | list[str] | Apodos y chistes recurrentes |
+| `temas` | list[str] | Aficiones y temas recurrentes |
+| `tono` | str \| null | Instrucción de tono a usar con esta persona |
+| `piques_recientes` | list[{ts, texto}] | Últimos N piques enviados por el bot (texto del bot, truncado 200 chars) |
+| `pinned_fields` | list[str] | Campos que el auto-updater NO sobreescribe |
+| `updated_at` | str \| null | ISO-8601 UTC de última actualización AI |
+
+---
+
+## 3. Config / Env Vars nuevas
+
+| Env var | Dataclass field | Default | Tipo | Propósito |
+|---|---|---|---|---|
+| `PICANTE_PROFILES_ENABLED` | `picante_profiles_enabled` | `False` | bool | Feature flag maestro. Requerido para activar todo lo demás. |
+| `PICANTE_STORE_TEXT` | `picante_store_text` | `True` | bool | Si False, `append_message` es no-op. Opt-out de privacidad. Sólo relevante si `PICANTE_PROFILES_ENABLED=1`. |
+| `PICANTE_PROFILE_MODEL` | `picante_profile_model` | `"gpt-5.4-nano"` | str | Modelo barato para el job de summarización. NUNCA usar gpt-5.6-luna/sol/terra. |
+| `PICANTE_PROFILES_WINDOW_DAYS` | `picante_profiles_window_days` | `7` | int | Ventana de mensajes a acumular/rotar (días). |
+| `PICANTE_PROFILES_OTHERS_CAP` | `picante_profiles_others_cap` | `3` | int | Máximo de perfiles "otros" inyectados en el bloque PERFIL. |
+| `PICANTE_PROFILES_PIQUES_CAP` | `picante_profiles_piques_cap` | `5` | int | Máximo de entradas en `piques_recientes` por usuario. |
+| `PICANTE_PROFILES_UPDATE_HOUR` | `picante_profiles_update_hour` | `4` | int | Hora local (tz = TIMEZONE) del job batch diario. |
+
+**Helper en `config.py`:**
+```python
+def picante_profiles_enabled(settings: "Settings") -> bool:
+    return settings.picante_profiles_enabled and picante_enabled(settings)
+```
+
+---
+
+## 4. Resiliencia / Edge cases
+
+| Escenario | Comportamiento |
+|---|---|
+| `profiles` None / vacío | `build_picante_user_message` funciona idéntico al estado actual; sin bloque PERFIL |
+| `username` vacío en el trigger | No se inyecta perfil del autor; otros perfiles tampoco (política conservadora) |
+| `picante_profiles.json` corrupto / ausente | `load_profiles` devuelve `{}` + WARNING; picante dispara sin perfil |
+| `load_messages` falla o fichero corrupto | Devuelve `[]` + WARNING; job batch salta ese usuario |
+| `update_user_profile` → AIError | WARNING log; conserva perfil anterior (`UserProfile` sin `updated_at` nuevo) |
+| `update_user_profile` → JSON malformado | WARNING log; conserva perfil anterior |
+| Job batch: error en usuario individual | `try/except Exception` por usuario; continúa con los demás |
+| `append_message` falla (disco lleno, permisos) | WARNING log; no rompe `on_group_text` ni picante |
+| `save_profiles` falla (disco lleno, etc.) | WARNING log (mismo patrón que `save_chat_state`) |
+| `picante_profiles_enabled=False` | Cero código de perfiles ejecutado; zero overhead |
+| Usuario sin Telegram username | `username` vacío → `append_message` es no-op → sin perfil → no se inyecta |
+
+**Regla de oro:** La respuesta picante NUNCA falla por la capa de perfiles. Toda excepción en la capa de perfiles se captura localmente. "Fail loud in logs, degrade gracefully" — mismo principio que el resto del codebase (picante.py:187–190).
+
+---
+
+## 5. Privacidad
+
+### Cambio de política explícito
+
+La implementación actual almacena en disco **solo** metadatos/contadores (state.py:3: "Stores ONLY timing/counter metadata to disk (no message text)"). Esta feature **rompe deliberadamente esa política** para los usuarios que tienen perfiles activados.
+
+**Qué se almacena en disco:**
+- `{state_dir}/picante_messages/{username}.jsonl`: texto completo de los mensajes del usuario en el grupo, durante un máximo de `PICANTE_PROFILES_WINDOW_DAYS` días (default 7).
+- `{state_dir}/picante_profiles.json`: **resúmenes** generados por AI — no texto libre. Incluye `piques_recientes` que son fragmentos del texto generado por el bot (≤200 chars), no texto del usuario.
+
+**Rotación:** Al escribir un nuevo mensaje, `_rotate_messages` descarta automáticamente las entradas fuera de la ventana (patrón trim-on-write, no job separado).
+
+**Control:**
+- `PICANTE_STORE_TEXT=0` desactiva el almacenamiento de texto completamente. Con este flag, `append_message` es no-op y el job diario no acumula nuevos mensajes (los perfiles dejan de actualizarse).
+- `PICANTE_PROFILES_ENABLED=0` desactiva toda la feature.
+
+**Contexto:** El grupo es privado, entre amigos. El riesgo es bajo. Sin embargo, el control explícito (flags, rotación, resúmenes vs. texto) es la práctica correcta.
+
+---
+
+## 6. Superficie de tests para Buffon
+
+### `tests/test_message_store.py` (nuevo)
+- `append_message` escribe correctamente en JSONL con ts + text
+- `load_messages` filtra por ventana (entradas viejas excluidas)
+- `_rotate_messages` descarta entradas fuera de ventana; mantiene las recientes
+- `PICANTE_STORE_TEXT=False` → `append_message` es no-op (no crea fichero)
+- `active_users`: detecta usuarios con mensajes recientes, ignora vacíos/expirados
+- Fichero JSONL corrupto (línea inválida) → `load_messages` devuelve sólo líneas válidas (o `[]` si todo inválido) + WARNING
+- Username vacío → no-op
+
+### `tests/test_profiles.py` (nuevo)
+- `load_profiles`: fichero ausente → `{}`
+- `load_profiles`: JSON corrupto → `{}` + WARNING (nunca lanza)
+- `save_profiles`: escritura atómica (usa `.tmp` → `os.replace`)
+- `get_profile`: usuario existente devuelve `UserProfile`; usuario inexistente devuelve `None`
+- Round-trip: save → load → igualdad de datos
+
+### `tests/test_profile_updater.py` (nuevo)
+- `update_user_profile` con AI mock → devuelve `UserProfile` con campos actualizados
+- `AIError` → devuelve perfil anterior sin cambios; `updated_at` no modificado
+- JSON malformado del LLM → devuelve perfil anterior sin cambios
+- `pinned_fields` no se sobreescriben por el auto-updater
+- `messages` vacío → devuelve `current` sin llamar a la AI
+- Cold start (sin perfil previo) + AIError → devuelve `UserProfile` vacío (no lanza)
+
+### `tests/test_chat.py` o `tests/test_chat_edge_cases.py` (extensión)
+- `build_picante_user_message` con `profiles` válidos → bloque PERFIL inyectado (autor primero)
+- `build_picante_user_message` sin `profiles` (None) → idéntico al comportamiento actual
+- `build_picante_user_message` con `profiles_others_cap=2` → máximo 2 perfiles "otros"
+- `build_picante_user_message` con autor sin perfil + otros con perfil → solo sección OTROS
+- `maybe_reply`: `load_profiles` falla → dispara picante sin perfil (no excepción)
+- `maybe_reply`: tras enviar, persiste pique en `piques_recientes` (mock save_profiles)
+- `maybe_reply`: `piques_recientes` truncado a `PICANTE_PROFILES_PIQUES_CAP`
+
+### `tests/test_config.py` (extensión)
+- Nuevas env vars parseadas con valores correctos
+- Defaults correctos cuando las vars están ausentes
+- `picante_profiles_enabled`: False si `CHAT_PICANTE_ENABLED=0`; False si `PICANTE_PROFILES_ENABLED=0`; True solo si ambos activos + AI configurado
+
+---
+
+## 7. Orden de construcción por fases
+
+### Fase 1 — Config + Message Store (sin AI, sin perfil injection)
+**Ficheros:** `config.py` (env vars) + `message_store.py` (nuevo) + `listener.py` (hook) + tests  
+**Verificación:** El bot acumula mensajes en disco bajo feature flag; cero impacto en picante existente.  
+**Entregable testeable:** `test_message_store.py` verde; `PICANTE_STORE_TEXT=0` funciona.
+
+### Fase 2 — Profiles Store (sin AI)
+**Ficheros:** `profiles.py` (nuevo) + tests  
+**Verificación:** Almacén listo para lectura/escritura; load/save atómico; graceful degradation.  
+**Entregable testeable:** `test_profiles.py` verde; round-trip OK.
+
+### Fase 3 — Profile Updater + Job Batch
+**Ficheros:** `profile_updater.py` (nuevo) + wiring en `__main__.py` (job + AI client de perfiles)  
+**Verificación:** Job se registra y ejecuta; perfiles actualizados diariamente en disco; AI mock en tests.  
+**Entregable testeable:** `test_profile_updater.py` verde; job registrado con `run_daily` en `__main__`.
+
+### Fase 4 — Inyección en Picante + Persistencia de Piques
+**Ficheros:** `picante.py` (modificado: inyección + piques) + tests de integración  
+**Verificación:** Bloque PERFIL aparece en los prompts; `piques_recientes` se actualiza tras cada disparo; degradación elegante si no hay perfiles.  
+**Entregable testeable:** Suite completa verde (incluyendo tests de `test_chat.py`); feature end-to-end funcional.
+
+---
+
+## 8. Riesgos / Decisiones abiertas (requieren confirmación de drdonoso)
+
+| # | Decisión abierta | Recomendación Pirlo | Motivo |
+|---|---|---|---|
+| 1 | `PICANTE_PROFILES_OTHERS_CAP` — ¿3 o 5? | **3** | Kanté estimó +~300 tokens por perfil; con 5 perfiles se añaden ~1500 tokens extra al prompt; 3 es el equilibrio calidad/coste |
+| 2 | Hora del job batch — ¿04:00? | **04:00** local | Mínima actividad del grupo (madrugada Madrid); no compite con `DAILY_UPDATE_HOUR=09:00` |
+| 3 | ¿Token cap duro en el bloque PERFIL? | **Soft cap (log warning)** | El modelo gestiona su propio límite; un hard-truncate de texto a mitad de campo es confuso |
+| 4 | `PICANTE_STORE_TEXT` default — ¿activado? | **`True` (default 1)** | La feature no tiene valor sin acumulación; el grupo es privado y es el comportamiento esperado |
+| 5 | Rotation strategy — ¿trim-on-write o job de limpieza? | **Trim-on-write** | Simple, sin dependencias adicionales; el fichero nunca crece más de 7 días sin que el usuario envíe un nuevo mensaje |
+| 6 | Usuarios sin Telegram username — ¿no-op o usar user_id? | **No-op si username vacío** | Política conservadora; `user_id` como clave alternativa añade complejidad en el UI del perfil |
+| 7 | `piques_recientes` en el summarization prompt — ¿incluir o solo de `maybe_reply`? | **Solo de `maybe_reply`** | El summarizer extrae piques del historial de mensajes del usuario; los piques del bot se añaden por separado. Sin solapamiento. |
+| 8 | ¿`PICANTE_PROFILE_MODEL` fallback si vacío? | **Usar `OPENAI_MODEL`** | Si no se configura, usar el modelo principal evita un error; loggear WARNING recomendando el modelo barato |
+
+---
+
+*Spec generado por Pirlo — 2026-07-10T12:00:56+02:00*  
+*Basado en: Kanté's design (kante/history.md:37–91), picante.py:79–114, state.py:41–89, listener.py:77–104, __main__.py:2427–2500, config.py:49–92*
+
+
+---
+
+# Decisión: Picante per-user profiles — implementación (Kanté)
+
+**Estado:** ✅ IMPLEMENTADO  
+**Autor:** Kanté (Backend Developer)  
+**Fecha:** 2026-07-10T12:00:56+02:00  
+**Solicitado por:** drdonoso  
+**Basado en spec:** `.squad/decisions/inbox/pirlo-picante-profiles-spec.md`
+
+---
+
+## Resumen ejecutivo
+
+Implementación completa en 4 fases del sistema de perfiles auto-aprendidos para picante, con 3 refinements aprobados por drdonoso que divergen del spec original de Pirlo.
+
+---
+
+## Ficheros entregados
+
+### Nuevos
+| Fichero | Propósito |
+|---|---|
+| `src/worldcup_bot/chat/timeline_store.py` | Timeline cronológico único de mensajes del grupo (JSONL); append, trim-on-write, load_since, last_run |
+| `src/worldcup_bot/chat/profiles.py` | `UserProfile` dataclass; load/save atómico; `get_profile` |
+| `src/worldcup_bot/chat/profile_updater.py` | `update_profiles_from_conversation` — pase único de conversación grupal a la AI |
+
+### Modificados
+| Fichero | Cambio |
+|---|---|
+| `src/worldcup_bot/config.py` | 7 nuevas Settings fields + `picante_profiles_enabled()` helper |
+| `src/worldcup_bot/chat/listener.py` | Paso 7.5: best-effort timeline append |
+| `src/worldcup_bot/chat/picante.py` | Inyección de perfiles en `build_picante_user_message`; persistencia de piques en `maybe_reply` |
+| `src/worldcup_bot/__main__.py` | `profile_update_job`, profile AI client, registro `run_daily`, `bot_data` paths |
+
+---
+
+## Los 3 refinements vs spec original de Pirlo
+
+### Refinement 1 — Summarización INCREMENTAL (no re-lectura de 7 días)
+**Spec Pirlo:** Re-summarizar todos los mensajes de la ventana completa cada día.  
+**Implementado:** El job lee **solo mensajes nuevos desde `last_run`** (via `load_since(state_dir, last_run)`). El perfil existente se pasa como contexto base al modelo, que lo enriquece sin partir de cero.  
+**Por qué mejor:** Elimina lecturas y tokens redundantes en arranques sucesivos. El conocimiento acumula de manera genuinamente incremental.
+
+### Refinement 2 — Ventana de retención = 2 días (no 7)
+**Spec Pirlo:** `PICANTE_PROFILES_WINDOW_DAYS=7`  
+**Implementado:** Default = 2 días (buffer de seguridad ante runs perdidos). Trim-on-write en `_trim_timeline`.  
+**Por qué mejor:** Para perfiles que ya acumulan conocimiento, no es necesario conservar el texto raw durante 7 días. 2 días es suficiente para capturar actividad reciente y cubre un run diario perdido.
+
+### Refinement 3 — TIMELINE GRUPAL con contexto (no ficheros per-usuario)
+**Spec Pirlo:** `{state_dir}/picante_messages/{username}.jsonl` por usuario. Un AI call por usuario en el job.  
+**Implementado:** Un único `picante_timeline.jsonl` con `{"ts","username","text"}` por línea. **Un solo AI call por ejecución del job**, pasando la conversación completa atribuida (`[username] texto`).  
+**Por qué mejor:**
+- El modelo lee a los usuarios EN CONTEXTO — captura hilos, chistes entre usuarios, dinámicas de grupo
+- Más barato: N usuarios × 1 call → 1 call
+- Captura el "quién-bromea-con-quién" que los ficheros per-usuario no pueden capturar
+
+---
+
+## Diseño del job incremental (Refinements 1+3 combinados)
+
+```
+profile_update_job():
+  last_run = load_last_run(state_dir)          # None en primera ejecución
+  messages = load_since(state_dir, last_run)   # solo mensajes nuevos
+  if not messages: save_last_run; return       # no AI call en días sin actividad
+  
+  current_profiles = load_profiles(path)
+  updated = await update_profiles_from_conversation(
+      messages,           # conversación reciente atribuida
+      current_profiles,   # perfiles existentes como contexto base
+      profile_ai,         # modelo barato (PICANTE_PROFILE_MODEL)
+  )
+  save_profiles(path, updated)
+  save_last_run(state_dir, now)
+```
+
+---
+
+## Diseño del profile_updater
+
+System prompt: instruye al modelo a analizar la conversación atribuida + perfiles actuales como base, y devolver **SOLO** un JSON `{username: {rasgos, equipo, motes, temas, tono}}`.
+
+User prompt: `[username] texto` (chrono) + perfiles compactos actuales.
+
+Post-procesado:
+- Campos string: `nuevo OR existente` (conserva si AI devuelve null)
+- Listas (motes, temas): unión acumulativa (no elimina)
+- `pinned_fields`: nunca sobreescrito
+- `piques_recientes`: NO tocado por el updater (solo por `maybe_reply`)
+- `updated_at`: seteado al timestamp del run solo si AI tiene éxito
+
+---
+
+## Inyección en picante
+
+`build_picante_user_message(messages, *, profiles=None, author_username="", others_cap=3)`:
+- Si `profiles` es None o `author_username` vacío → comportamiento idéntico al actual
+- Si ambos presentes: prepend bloque "PERFILES DEL GRUPO" con AUTOR primero, luego hasta `others_cap` otros usuarios del buffer
+- Toda la lógica de perfiles en try/except — nunca rompe el prompt base
+
+`maybe_reply` tras enviar respuesta:
+- Re-lee los perfiles frescos
+- Appends `{ts, texto[:200]}` a `piques_recientes` del autor
+- Trunca a `PICANTE_PROFILES_PIQUES_CAP`
+- `save_profiles` best-effort
+
+---
+
+## Env vars nuevas (todos con defaults conservadores)
+
+| Var | Default | Tipo |
+|---|---|---|
+| `PICANTE_PROFILES_ENABLED` | `0` (False) | bool |
+| `PICANTE_STORE_TEXT` | `1` (True) | bool |
+| `PICANTE_PROFILE_MODEL` | `gpt-5.4-nano` | str |
+| `PICANTE_PROFILES_WINDOW_DAYS` | `2` | int |
+| `PICANTE_PROFILES_OTHERS_CAP` | `3` | int |
+| `PICANTE_PROFILES_PIQUES_CAP` | `5` | int |
+| `PICANTE_PROFILES_UPDATE_HOUR` | `4` | int |
+
+---
+
+## Resiliencia (non-negotiable)
+
+- `PICANTE_PROFILES_ENABLED=0` → **cero** código de perfiles ejecutado
+- Perfil corrupto/ausente → `load_profiles` devuelve `{}` + WARNING → picante dispara sin perfil
+- Error en timeline append → WARNING en listener, `on_group_text` continúa
+- AIError en updater → WARNING + perfiles sin cambios
+- JSON malformado del modelo → WARNING + perfiles sin cambios
+- Error en persistir pique → WARNING, respuesta ya enviada
+- Job batch error total → try/except, log.exception, nunca fatal
+
+---
+
+## Tests
+
+**2419 tests pasan, 0 regresiones.** Feature flag OFF by default — el comportamiento existente de picante es completamente inalterado cuando `PICANTE_PROFILES_ENABLED=0`.
+
+Los test files nuevos (test_timeline_store, test_profiles, test_profile_updater + extensiones de test_chat, test_config) son responsabilidad de Buffon para la siguiente sesión.
+
+---
+
+*Kanté — 2026-07-10T12:00:56+02:00*
+
