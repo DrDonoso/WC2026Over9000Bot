@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260710.03] - 2026-07-10
+
+- feat(picante): per-user auto-learned profiles (off by default)
+
+
 ## [20260710.02] - 2026-07-10
 
 - chore(squad): commit agent history and drop stale inbox entry
