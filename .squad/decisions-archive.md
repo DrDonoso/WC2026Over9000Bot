@@ -1366,3 +1366,348 @@ The rude/chulesco caption (`RICH_CAPTION_PROMPT`) is UNCHANGED and does NOT ment
 ---
 
 
+
+
+**Date:** 2026-07-03  
+**Status:** Implemented — awaiting quick review, then commit by David
+
+---
+
+## Bug Summary
+
+Every knockout-stage match was missing the 📺 TVE label in `/hoy` and `/siguiente`. Group-stage matches were fine. Reported live by David (Argentina vs Cabo Verde at 00:00).
+
+---
+
+## Root Cause
+
+RTVE names **knockout** episode items with a leading round token:
+
+```
+"Futbol Copa Mundo Fifa 1/16 Argentina - Cabo Verde"
+                       ^^^^ round token
+```
+
+Group-stage items have no such token:
+
+```
+"Futbol Copa Mundo Fifa Argentina - Austria"
+```
+
+`_parse_teams` in `tve.py` only stripped `_WC_EPISODE_PREFIX` (`"Futbol Copa Mundo Fifa "`), leaving:
+
+```
+"1/16 Argentina - Cabo Verde"
+```
+
+Split on `" - "` → `home_raw = "1/16 Argentina"`, `away_raw = "Cabo Verde"`.  
+`ES_NAME_TO_TLA.get(_norm("1/16 argentina"))` → **None** (no entry for the token-prefixed form).
+
+Result: `home_tla = None`, `away_tla = CPV`.
+
+`tve_channel_for` same-day TLA fallback requires **both TLAs to be known** (to prevent ambiguous cross-matching for simultaneous same-day fixtures). With `home_tla = None`, the fallback was skipped → returned `None` → no 📺 label.
+
+### Live Evidence (from David's pre-fix diagnostic)
+
+All knockout broadcasts had `home_tla = None`:
+
+```
+None-CPV, None-CAN, None-JPN, None-SWE, None-AUT, None-FRA, None-NOR
+```
+
+Group-stage broadcasts parsed correctly (no round token):
+
+```
+URY-ESP, COL-POR, ECU-GER  ← these were fine
+```
+
+---
+
+## The Fix — `src/worldcup_bot/tve.py`
+
+Added `_ROUND_PREFIX_RE` constant after `_WC_EPISODE_PREFIX`:
+
+```python
+_ROUND_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"\d+/\d+"                          # fraction form: 1/16, 1/8, 1/4
+    r"|octavos?(?:\s+de\s+final)?"      # Octavos (de final)
+    r"|cuartos?(?:\s+de\s+final)?"      # Cuartos (de final)
+    r"|semifinal(?:es)?"                # Semifinal, Semifinales
+    r"|final"                           # Final
+    r"|tercer\s+puesto"                 # Tercer puesto
+    r"|3[^\s]*(?:\s*y\s*4[^\s]*)?\s*puesto"  # 3º y 4º puesto variants
+    r")\s+",
+    re.IGNORECASE,
+)
+```
+
+Applied in `_parse_teams`, after the existing episode-prefix strip:
+
+```python
+stripped = _WC_EPISODE_PREFIX.sub("", raw).strip()
+# NEW: strip leading knockout-round token
+stripped = _ROUND_PREFIX_RE.sub("", stripped)
+```
+
+### Why it's safe
+
+- The regex is anchored at `^` — only matches at the very start of the stripped name.
+- Real team names never start with `\d+/\d+` or the named round words.
+- Group-stage names have no round token → `_ROUND_PREFIX_RE.sub("", s) == s` (unchanged).
+- All round forms covered: fraction (1/16, 1/8, 1/4), named in Spanish (Octavos, Cuartos, Semifinal/es, Final, Tercer puesto, 3º y 4º puesto variants).
+- `_match_is_over`, `reconcile`, and all existing invariants are unaffected — this is purely a name-parsing fix in `tve.py`.
+
+---
+
+## Live Before/After (verified via venv + `.env`)
+
+```
+Input: "Futbol Copa Mundo Fifa 1/16 Argentina - Cabo Verde"
+
+BEFORE fix:
+  After prefix-only strip: "1/16 Argentina - Cabo Verde"
+  home_raw = "1/16 Argentina", away_raw = "Cabo Verde"
+  → (None, 'CPV')
+
+AFTER fix:
+  After round-prefix strip: "Argentina - Cabo Verde"
+  home_raw = "Argentina", away_raw = "Cabo Verde"
+  → ('ARG', 'CPV')
+
+tve_channel_for(ARG vs CPV, broadcasts):
+  BEFORE: None
+  AFTER:  'Teledeporte'
+```
+
+Today's schedule showed one ARG-CPV broadcast on Teledeporte at 21:00 UTC (60 min before the 22:00Z kickoff). The ±20 min primary window doesn't catch it, but the same-day TLA fallback does — and now that both TLAs are known, it fires correctly.
+
+---
+
+## Tests Added (17 new → 2151 total)
+
+### `tests/test_tve.py`
+
+| Class | Test | Coverage |
+|-------|------|----------|
+| `TestParseTeamsRoundPrefix` | `test_1_16_argentina_cabo_verde` | Live bug |
+| | `test_1_8_fraction_form` | 1/8 form |
+| | `test_1_4_fraction_form` | 1/4 form |
+| | `test_semifinal_singular` | "Semifinal" (without 'es') |
+| | `test_semifinales_plural` | "Semifinales" |
+| | `test_final` | "Final" |
+| | `test_cuartos_de_final` | "Cuartos de final" |
+| | `test_cuartos_without_de_final` | "Cuartos" (short form) |
+| | `test_group_stage_no_round_token_unchanged` | Regression guard |
+| | `test_group_stage_espana_unchanged` | Regression guard (accented) |
+| | `test_original_event_name_field_also_works` | Both name fields |
+| `TestParseWcBroadcastsKnockout` | `test_1_16_arg_cpv_both_tlas_parsed` | End-to-end parse |
+| | `test_1_8_fra_nor_both_tlas_parsed` | End-to-end parse |
+| | `test_semifinal_arg_fra_both_tlas_parsed` | End-to-end parse |
+| `TestTveChannelForKnockout` | `test_knockout_1_16_arg_cpv_same_day_tla_fallback` | Fallback now fires |
+| | `test_knockout_none_home_tla_returns_none` | Pre-fix regression guard |
+| | `test_knockout_la1_preferred_over_teledeporte` | La 1 preference |
+
+Full suite: **2151 passed, 0 failures**.
+
+---
+
+## Files Changed
+
+| File | Change |
+|------|--------|
+| `src/worldcup_bot/tve.py` | Added `_ROUND_PREFIX_RE`; applied in `_parse_teams`; fixed `_parse_kickoff_utc` for over-midnight hours |
+| `tests/test_tve.py` | Added `_parse_kickoff_utc` + `_parse_teams` to imports; 3 new test classes for round prefix (17 tests); 1 new class for midnight notation (6 tests) |
+| `.squad/agents/kante/history.md` | Session entry added |
+
+---
+
+## Fix 2 — `_parse_kickoff_utc`: RTVE Over-Midnight Notation (24:00 / 25:xx)
+
+**Date:** 2026-07-03 (same session, second root cause)
+
+### Root Cause
+
+The round-prefix fix surfaced a second root cause: La 1 was still being **dropped** by `parse_wc_broadcasts`.
+
+For the Argentina-Cabo Verde midnight match, the La 1 item's description is:
+
+```
+'Incluye:Nº 23 Previo\r(24:00) ARGENTINA / CABO VERDE \rNº 23 Post\r'
+```
+
+RTVE uses **Spanish TV convention**: midnight = `24:00`, and after-midnight = `25:00`, `25:30`, `26:00`, etc.
+
+`_parse_kickoff_utc` (La 1 path) extracts `"24:00"` from `_KICKOFF_RE`, then calls:
+
+```python
+datetime.strptime(f"{date_str} 24:00", "%Y%m%d %H:%M")
+```
+
+Python's `datetime.strptime` rejects hour 24 with `ValueError` → the `except` returns `None` → `parse_wc_broadcasts` logs "skipping item with unparseable kickoff" and **drops the La 1 broadcast entirely**.
+
+Result: only Teledeporte broadcast survived (it uses `begintime` directly, which had a normal hour). `tve_channel_for` returned `"Teledeporte"` instead of `"La 1"`.
+
+### The Fix
+
+Replaced `datetime.strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M")` with manual hour/minute parsing plus `timedelta` rollover:
+
+```python
+hh, mm = time_str.split(":")
+hour = int(hh)
+minute = int(mm)
+# RTVE uses Spanish "over-midnight" notation: 24:00 = midnight next day,
+# 25:30 = 01:30 next day, etc.  Roll over when hour >= 24.
+day_offset = hour // 24
+hour_mod = hour % 24
+date_base = datetime.strptime(date_str, "%Y%m%d")
+dt_naive = date_base.replace(hour=hour_mod, minute=minute) + timedelta(days=day_offset)
+local_dt = _MADRID_TZ.localize(dt_naive)
+return local_dt.astimezone(_UTC)
+```
+
+- `"24:00"` on `20260703`: `day_offset=1`, `hour_mod=0` → `datetime(2026-07-04 00:00)` Madrid CEST → **UTC 2026-07-03 22:00**
+- `"25:30"` on `20260703`: `day_offset=1`, `hour_mod=1` → `datetime(2026-07-04 01:30)` → **UTC 2026-07-03 23:30**
+- `"20:45"` (normal): `day_offset=0`, `hour_mod=20` → exact same result as before (**regression-safe**)
+
+Applied to both the description-derived `time_str` and the `begintime` fallback (same code path; defensive for both).
+
+### Live Before/After (both fixes combined)
+
+```
+_parse_kickoff_utc(La 1 item, "La 1"):
+  BEFORE fix:  None  (strptime raised ValueError on hour=24)
+  AFTER fix:   2026-07-03 22:00:00+00:00  ✓
+
+ARG/CPV La 1 broadcast:
+  BEFORE:  dropped (None kickoff → skipped)
+  AFTER:   channel=La 1, kickoff_utc=2026-07-03 22:00:00+00:00, home=ARG, away=CPV
+
+ARG/CPV Teledeporte broadcast:
+  channel=Teledeporte, kickoff_utc=2026-07-03 21:00:00+00:00 (from begintime, unchanged)
+
+tve_channel_for(ARG vs CPV):
+  BEFORE (round-prefix fix only):  'Teledeporte'  (La 1 was dropped)
+  AFTER (both fixes):              'La 1'  ✓
+  (La 1 at 22:00 UTC hits the ±20 min PRIMARY window; Teledeporte at 21:00 UTC falls back to same-day TLA; La 1 wins)
+```
+
+### Tests Added (6 new → 2157 total)
+
+#### `tests/test_tve.py` — `TestParseKickoffUtcMidnightNotation`
+
+| Test | Coverage |
+|------|----------|
+| `test_24_00_la1_description_gives_next_day_midnight` | Live bug case: `(24:00)` on 20260703 → UTC 22:00 |
+| `test_25_30_la1_description_gives_next_day_01_30` | `(25:30)` → UTC 23:30 (madrugada) |
+| `test_normal_time_la1_unchanged` | `(20:45)` → no rollover (regression guard) |
+| `test_begintime_fallback_normal_hour_unchanged` | Teledeporte begintime normal hour unchanged |
+| `test_parse_wc_broadcasts_la1_24h_item_valid_kickoff` | End-to-end: round prefix + 24:00 item → ARG, CPV, 22:00 UTC |
+| `test_tve_channel_for_la1_24h_kickoff_primary_window` | La 1 at 22:00 wins via primary window |
+
+Full suite: **2157 passed, 0 failures**.
+
+---
+
+# Review: TVE Knockout-Round Prefix + Midnight Notation Fix
+
+**Reviewer:** Pirlo (Lead)  
+**Date:** 2026-07-03  
+**Scope:** `src/worldcup_bot/tve.py` — `_ROUND_PREFIX_RE` + `_parse_kickoff_utc` rollover  
+**Test suite:** 2157 passed ✅  
+
+---
+
+## Checklist
+
+### 1. Round-Prefix Regex — No False Stripping ✅ PASS
+
+```python
+_ROUND_PREFIX_RE = re.compile(
+    r"^(?:\d+/\d+|octavos?...|cuartos?...|semifinal(?:es)?|final|tercer\s+puesto|3...puesto)\s+",
+    re.IGNORECASE,
+)
+```
+
+**Anchored at `^`** — only matches at the start of the already-prefix-stripped string.
+A team name containing a round word mid-string (hypothetical) is never affected.
+
+**Trailing `\s+` required** — the word "final" alone without a trailing space doesn't
+match; only "Final España..." (with space after) does. This prevents eating the word
+"final" if it somehow appeared as the only content.
+
+Verified with manual tests:
+- `"Uruguay - España"` → unchanged ✓ (no round token at start)
+- `"Argentina - Austria"` → unchanged ✓
+- `"Ecuador Final"` → unchanged ✓ (not anchored at start)
+- `"1/16 Argentina - Cabo Verde"` → stripped to `"Argentina - Cabo Verde"` ✓
+- `"Semifinal Brasil - Alemania"` → stripped to `"Brasil - Alemania"` ✓
+- `"Final España - Francia"` → stripped to `"España - Francia"` ✓
+
+**Both name fields** (`original_episode_name`, `original_event_name`) go through the
+same `_parse_teams` function — both get the round-prefix strip. No path is left raw.
+
+**`_teams_match` is unaffected** — the round-prefix strip only happens during TLA
+extraction in `_parse_teams`. `tve_channel_for`'s matching logic uses the extracted
+TLAs, not raw names.
+
+### 2. 24:00 Rollover — Regression-Safe for Normal Times ✅ PASS
+
+```python
+hh, mm = time_str.split(":")
+hour = int(hh)
+minute = int(mm)
+day_offset = hour // 24      # 0 for hour<24, 1 for 24-47
+hour_mod = hour % 24         # actual hour-of-day
+date_base = datetime.strptime(date_str, "%Y%m%d")
+dt_naive = date_base.replace(hour=hour_mod, minute=minute) + timedelta(days=day_offset)
+```
+
+For **normal times** (hour < 24):
+- `day_offset = 0`, `hour_mod = hour` → `date_base.replace(hour=hour, minute=minute) + 0`
+- Identical to the old `strptime(f"{date_str} {time_str}", "%Y%m%d %H:%M")`. ✓
+
+For **over-midnight** (hour ≥ 24):
+- `"24:00"` on 20260703 → `day_offset=1, hour_mod=0` → `2026-07-04 00:00` Madrid → UTC 22:00 ✓
+- `"25:30"` → `day_offset=1, hour_mod=1` → `2026-07-04 01:30` Madrid → UTC 23:30 ✓
+
+**DST-safe:** `_MADRID_TZ.localize(dt_naive)` handles the rollover date correctly —
+if the rollover crosses a DST boundary, pytz resolves the right offset.
+
+### 3. Best-Effort / Non-Fatal Preserved ✅ PASS
+
+The entire `_parse_kickoff_utc` body is wrapped in `try/except Exception` (line 298-300):
+```python
+except Exception as exc:
+    log.debug("TVE: failed to parse kickoff from item %r: %s", item, exc)
+    return None
+```
+
+If `time_str` is malformed (non-numeric, no colon, etc.), `split(":")` or `int()` will
+raise, caught by the existing except → returns None → broadcast skipped gracefully.
+Same for `_parse_teams`: returns `(None, None)` on any parse failure. No crash path.
+
+### 4. No Regression — Suite Green ✅ PASS
+
+```
+2157 passed, 5 warnings in 65.17s
+```
+
+All 86 TVE tests pass, including existing group-stage tests (regression guards) and
+23 new tests covering round prefixes + midnight notation.
+
+---
+
+## VERDICT: ✅ APPROVE
+
+Both fixes are surgical and regression-safe. The regex is properly anchored (`^` + trailing
+`\s+`), the rollover arithmetic is identity for hour<24, and all parse failures remain
+non-fatal. 2157 tests pass. Ship it.
+
+
+
+---
+
+
+
+# Decision: Freeze Clock in Revive Success-Path Tests (2026-07-04)
