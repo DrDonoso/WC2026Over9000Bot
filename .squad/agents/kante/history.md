@@ -32,6 +32,22 @@
 
 ---
 
+## Learnings
+
+### 2026-07-10 — Picante prompt recalibration (conditional context usage)
+
+**File:** `src/worldcup_bot/chat/picante.py:23-38` (`_SYSTEM`), `picante.py:104-108` (inline instruction in `build_picante_user_message`)
+
+**What changed:**
+- `_SYSTEM` REGLA DE CONTEXTO: removed "EXCLUSIVAMENTE" from MISIÓN, removed "solo de apoyo" / "IGNÓRALOS por completo" framing. Replaced with a **balanced conditional**: if CONTEXTO RECIENTE is clearly related (same topic / ongoing thread) → *tenlo en cuenta y aprovéchalo* (explicitly active); if not related → *ignóralo por completo*. The "use-it-when-related" branch is now a positive instruction, not a barely-permitted exception.
+- `build_picante_user_message` inline label: "CONTEXTO RECIENTE — si está claramente relacionado con el ÚLTIMO MENSAJE, tenlo en cuenta y aprovéchalo; si no lo está, ignóralo por completo" (was "úsalo SOLO si está claramente relacionado... si no, ignóralo").
+
+**Why:** The old absolute wording ("EXCLUSIVAMENTE", "solo de apoyo", "IGNÓRALOS por completo") biased the model toward always ignoring context, even when the recent conversation was clearly on the same topic. The plumbing was already correct — listener.py appends every valid group message to the RingBuffer *before* calling `maybe_reply`, and `build_picante_user_message` puts all prior messages (up to `chat_buffer_size`) into the CONTEXTO RECIENTE block. The fix was prompt-only.
+
+**Tests:** 156 tests green after change (test_chat.py + test_chat_edge_cases.py). No test assertions on the specific old wording substrings; no Buffon updates required from this change.
+
+---
+
 ## Prior Sessions Summary (2026-07-01 to 2026-07-09)
 
 - **2026-07-08:** KO draw-deferral fix (Switzerland 0-0 Colombia false notification). Added _KNOCKOUT_STAGE_NAMES frozenset in formatters.py to defer FINISHED KO matches without a decisive winner. Tests: 161 in test_formatters.py, all green.

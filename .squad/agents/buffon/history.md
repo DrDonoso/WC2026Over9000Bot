@@ -1,7 +1,21 @@
 # Buffon — QA / Tester
 
 **Project:** WorldCup2026Over9000TelegramBot  
-**Current test count:** 2417 (as of 2026-07-10)
+**Current test count:** 2419 (as of 2026-07-10)
+
+## Current Session: 2026-07-10 — Picante Context Recalibration — QA Gate (✅ APPROVE)
+
+**Kanté's change:** Prompt-only recalibration of `_SYSTEM` and the inline CONTEXTO label in `src/worldcup_bot/chat/picante.py`. Replaced the over-suppressing "EXCLUSIVAMENTE / solo de apoyo / IGNÓRALOS por completo" wording with a balanced conditional: if CONTEXTO RECIENTE is clearly related to the ÚLTIMO MENSAJE → use it (`tenlo en cuenta y aprovéchalo`); if not → ignore it completely. No logic, no gate functions, no structure changed.
+
+**Tests added:** `tests/test_chat.py` → new class `TestPicanteSystemPrompt` (+2 tests):
+- `test_system_prompt_has_conditional_context_rule`: tolerant keyword checks on `build_picante_system_prompt().lower()` — asserts "relacionado" (conditional pivot), "tenlo en cuenta"/"aprovéch" (use-it branch), "ignóralo"/"ignora" (ignore-it branch).
+- `test_user_message_context_label_has_conditional_rule`: same tolerant checks on the CONTEXTO label returned by `build_picante_user_message` with prior messages present.
+
+Guard catches: revert to "always ignore" (old EXCLUSIVAMENTE/IGNÓRALOS wording) AND drift to "always use context" (removing the ignore branch).
+
+**Outcome:** tests/test_chat.py + tests/test_chat_edge_cases.py: 158 passed (was 156). Full suite: 2419 passed, 3 warnings, 0 regressions. APPROVE ✅
+
+---
 
 ## Current Session: 2026-07-10 — Micky Birthday Special — QA Gate (✅ PASS)
 
