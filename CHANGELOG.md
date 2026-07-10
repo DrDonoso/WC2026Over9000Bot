@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260710.05] - 2026-07-10
+
+- feat(picante): hidden /calcularperfiles command (on-demand profile update)
+
+
 ## [20260710.04] - 2026-07-10
 
 - feat(picante): hidden /perfil command to inspect a user's profile
