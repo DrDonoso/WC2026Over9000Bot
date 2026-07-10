@@ -1,4 +1,89 @@
-﻿# Decision: Rich Birthday Mode (2026-07-08 SHIPPED)
+# Micky Birthday Special — Design Decisions
+
+**Date:** 2026-07-10  
+**Author:** Kanté (Backend Developer)  
+**Feature:** July-10 Micky birthday special in the daily "rich" image pipeline
+
+---
+
+## 1. Evolution-chain isolation — DO NOT promote into `rich_modified.png`
+
+**Decision:** On July 10, the Micky birthday image is written to `rich_micky_birthday.png`
+in the state directory. `rich_modified.png` is left **untouched**. `save_level`,
+`append_history`, and `append_caption` are **skipped**.
+
+**Rationale:**  
+The daily rich pipeline is a single-person wealth-escalation chain. If July-10's
+3-image Micky-protagonist scene were promoted as the new evolution base, the July-11
+image would continue from a scene showing _two_ people, drifting the identity chain
+away from the single "rich" character. Over subsequent days this would corrupt the
+lineage. The birthday image is a one-off celebration, not a wealth step.
+
+**Caller impact (`__main__.py:_evolve_and_send_rich_image`):**  
+```python
+out_path, level, caption = await run_rich_iteration(settings, winners=winners)
+# out_path is returned as rich_micky_birthday.png on July 10 — still a valid readable path
+with open(out_path, "rb") as photo_fh:
+    await context.bot.send_photo(...)
+```
+The caller only needs `out_path` to be a readable file. `level` is used only for
+logging and is harmlessly set to `load_level() + 1` (the would-be next level).
+No evolution chain state changes, so July-11 continues from the same base as July-9.
+
+**Alternative considered:** Simply overwrite `rich_modified.png` (same as July-8 birthday mode).  
+**Rejected because:** July-8 is still a single-person scene (just birthday-themed). July-10
+features *two people* (Micky as protagonist + rich alongside), making it categorically
+different from the normal wealth-chain images.
+
+---
+
+## 2. Three-image edit call on July 10
+
+When `micky_birthday=True`:
+- Image 1 (base): `rich_modified.png` — the current evolved rich image (style reference)
+- Image 2 (anchor): `rich_original.jpg` — clean original face (locks rich's identity)
+- Image 3 (extra): `micky.jpg` — contains both Micky and rich; used to match Micky's face
+
+`edit_rich_image` was generalised to accept `extra_paths: list[str] | None = None`.
+All file handles are now managed via `contextlib.ExitStack` (safe close on any error).
+Backward-compatible: existing 2-image and 1-image paths are unchanged when `extra_paths`
+is `None` or empty.
+
+---
+
+## 3. Graceful fallback if `micky.jpg` is absent
+
+If `find_micky_image(_data_dir)` raises `FileNotFoundError`, a WARNING is logged and
+`micky_birthday` is reset to `False`, causing the day to run as a normal iteration.
+The daily job is never crashed by a missing reference image.
+
+---
+
+## 4. Caption — explicit Micky greeting mandatory
+
+`generate_rich_caption` received `micky_birthday: bool = False`. When active, an
+instruction is injected that makes the felicitation to Micky **mandatory** in the
+AI-generated text. Fallback caption (no-AI path): 
+`f"🎂 ¡Feliz {micky_age} cumpleaños, Micky! Que los sigas cumpliendo a nuestra costa 🥂"`
+
+---
+
+## 5. `build_rich_prompt` — clean age separation
+
+`build_rich_prompt` received `micky_birthday: bool = False`. On July 10,
+`run_rich_iteration` calls it with `birthday=False, age=micky_age, micky_birthday=True`
+so that `MICKY_BIRTHDAY_CLAUSE.format(age=micky_age)` is appended with the correct age,
+and `RICH_BIRTHDAY_CLAUSE` is not touched (July 10 is not rich's birthday).
+
+---
+
+## 6. Test result
+
+All **251 existing tests** pass with no changes. The July-10 3-image path is exercised
+only when `_now=datetime(year, 7, 10)` — Buffon will add those tests separately.
+
+
+# Decision: Rich Birthday Mode (2026-07-08 SHIPPED)
 
 **Date:** 2026-07-08  
 **Authors:** Kanté (Backend Implementation), Buffon (QA Tests)  
@@ -66,6 +151,8 @@ async def generate_rich_caption(..., birthday: bool = False, age: int | None = N
 
 ---
 
+
+
 # Decision: Suiza-Colombia Porra Scoring Investigation — NO BUG (2026-07-08)
 
 **Date:** 2026-07-08  
@@ -112,6 +199,8 @@ User accepted: *"igual no hay bug, déjalo tal cual está"*
 None.
 
 ---
+
+
 
 # Decision: Knockout Final Deferral Fix (2026-07-08 SHIPPED)
 
@@ -205,6 +294,8 @@ Correctness verified. Stall risk (permanent defer if API never sends winner) is 
 Safe to deploy.
 
 ---
+
+
 
 # Decision: USA-Belgium Goal/Anulado Flood — Root Cause & Cross-Source Fix (2026-07-07 SHIPPED)
 
@@ -300,7 +391,9 @@ if any(d.kind == "disallowed" for d in deltas):
 
 ## Test Coverage — Buffon (QA)
 
-### Decision: VAR Two-Source Regression Test Coverage
+##
+
+# Decision: VAR Two-Source Regression Test Coverage
 
 The USA-Belgium incident exposed a gap: the existing regression test `test_real_var_thread_goal_then_disallowed` seeded `seen_api={3,2}` (already synced), but the actual precondition was `seen_api={0,0}` (lagging), which triggered the oscillation loop.
 
@@ -350,872 +443,7 @@ The fix is in `src/worldcup_bot/__main__.py`:
 
 ---
 
-# Decision: "Ver gol" Button Missing — Clip-Pipeline Fix (2026-07-02 SHIPPED)
 
-**Date:** 2026-07-02  
-**Authors:** Kanté (Backend Implementation), Pirlo (Lead Review)  
-**Status:** ✅ SHIPPED (commit 522ba6d)
-
----
-
-## MERGED DECISIONS (2 files → 1 entry)
-
-This entry consolidates the "Ver gol" button clip-search fix:
-1. kante-vergol-button-fix.md — Root cause analysis and implementation
-2. pirlo-vergol-button-review.md — Lead review (APPROVED)
-
----
-
-## Summary
-
-Two goals lacked the "Ver gol" clip button in the live match thread; reproduced ind_goal_clip LIVE for both:
-
-**(A) Belgium 3-2 Senegal — Tielemans 120+5' ET penalty**
-- Root cause: Search timeout (18.75 min window vs. 20–30 min for ET clip posting)
-- Fix: _MAX_CLIP_ATTEMPTS 25 → 40 (~30 min window)
-
-**(B) USA 1-0 Bosnia-Herzegovina — Balogun 45'**
-- Root cause: Reddit search miss ("United States" query doesn't match "USA" posts) + timeout
-- Fix: Added search-term normalization (_TEAM_SEARCH_SHORT + _search_term() for "usa" alias and hyphen stripping); applied to both JSON and HTML search paths; post-fetch matching unchanged
-
----
-
-## Root Cause per Goal
-
-### Goal A — Timeout (ET / match-ending penalty)
-
-_MAX_CLIP_ATTEMPTS = 25 × 45 s = ~18.75 min window.
-
-The Tielemans goal was scored at 120+5'—literally the last playable moment. After an ET penalty that clinches the match, the clip poster typically watches the final whistle + celebrations before clipping and posting. This takes 20–30 min, exceeding the 18.75 min window.
-
-### Goal B — Search Miss + Timeout (first-half stoppage goal)
-
-Two compounding issues:
-1. **Search miss:** _fetch_html_search_posts built query from raw football-data names: "United States Bosnia-Herzegovina". Reddit's index does NOT match "USA" for "United States". The clip title uses USA [1] - 0 Bosnia & Herzegovina—"United States" appears nowhere. Result: 25 HTML search results contained no goal clips.
-2. **Timeout:** A 45' goal clip posted during/after half-time may appear >18.75 min after detection.
-
----
-
-## Fixes
-
-### 1. Extend clip search window — __main__.py
-
-\\\
-_MAX_CLIP_ATTEMPTS: 25 → 40   (~18.75 min → ~30 min)
-\\\
-
-Rationale: "clips rarely appear >30–40 min after" (David's constraint). 40 attempts × 45 s = 30 min covers ET goals, halftime goals, and late-posted clips. Well within sane bounds.
-
-### 2. Search-query normalisation — clip_finder.py
-
-Added:
-\\\python
-_TEAM_SEARCH_SHORT: dict[str, str] = {"united states": "usa"}
-
-def _search_term(team: str) -> str:
-    norm = _normalize_team(team)          # WC alias applied, lowercased
-    short = _TEAM_SEARCH_SHORT.get(norm, team)
-    return short.replace("-", " ")        # strips hyphens for broader Reddit search
-\\\
-
-Applied in:
-- _fetch_html_search_posts: query now \"{_search_term(home)} {_search_term(away)}"\
-- ind_goal_clip JSON path: same query construction
-
-Effect on Goal B:
-- \_search_term("United States")\ → \"usa"\ (via alias)
-- \_search_term("Bosnia-Herzegovina")\ → \"Bosnia Herzegovina"\ (hyphen stripped)
-- Search query: \"usa+Bosnia+Herzegovina"\ → finds \USA [1] - 0 Bosnia & Herzegovina\ ✓
-
----
-
-## Invariants Preserved
-
-- \_match_post\ is unchanged — all matching logic (exact score, fuzzy teams, scorer/minute) is unaffected.
-- \_teams_match\ is unchanged — post-fetch title matching works as before.
-- Dedup in merged /new + HTML search posts is unchanged.
-- Goal A's \120+5'\ regex already worked.
-- No changes to \poll_goal_clips_job\, \_cs_add_entry\, or clip store — only search window and query strings.
-
----
-
-## Tests Added (13 new → 2134 total)
-
-All tests pass ✅. Coverage includes:
-- ET penalty regex parsing (\120+5'\ → minute 120)
-- Full \_match_post\ for both goals with actual titles
-- Search-term alias ("United States" → "usa")
-- Hyphen stripping ("Bosnia-Herzegovina" → "Bosnia Herzegovina")
-- End-to-end search URL normalization
-- Regression: non-aliased teams unaffected
-
----
-
-## Review: APPROVED ✅
-
-**Reviewer:** Pirlo (Lead)
-
-Surgical, safe changes:
-1. \_search_term\ only affects Reddit search QUERY (both paths); never post-matching logic.
-2. USA alias narrowly scoped to one entry in \_TEAM_SEARCH_SHORT\.
-3. Timeout bump (25→40) is bounded and reasonable (30 min < sane upper bound).
-4. Post-fetch matching uses original team names via \_teams_match\ fuzzy logic — no regression.
-5. Best-effort / non-fatal behavior preserved.
-6. **2134 tests pass, 0 failures.**
-
----
-
-## Files Changed
-
-| File | Change |
-|------|--------|
-| \src/worldcup_bot/reddit/clip_finder.py\ | Added \_TEAM_SEARCH_SHORT\, \_search_term()\; patched \_fetch_html_search_posts\ + \ind_goal_clip\ |
-| \src/worldcup_bot/__main__.py\ | \_MAX_CLIP_ATTEMPTS\ 25 → 40 |
-| \	ests/test_clip_finder.py\ | 13 new tests (2134 total) |
-| \.squad/agents/kante/history.md\ | Session entry added |
-
----
-
-
----
-
-# Decision: Schedule-Live Decoupling — Live Match / Goal Notification Bug Fix (2026-07-01 SHIPPED)
-
-**Date:** 2026-07-01
-**Authors:** Kanté (Backend Implementation), Pirlo (Lead Review)
-**Status:** ✅ SHIPPED (commit b2e9a71)
-
----
-
-## MERGED DECISIONS (2 files → 1 entry)
-
-This entry consolidates the schedule-live seeding fix:
-1. kante-live-seeding-fix.md — Implementation details
-2. pirlo-live-seeding-review.md — Lead review (APPROVED)
-
----
-
-# Decision: Schedule-Live Decoupling — Live Match / Goal Notification Bug Fix
-
-**Author:** Kanté  
-**Date:** 2026-07-01  
-**Status:** Implemented, awaiting commit
-
----
-
-## Root Cause
-
-football-data.org free tier updates live match status/scores with a **~1 h delay**. During that window a match that is already playing is still reported as `TIMED`. The entire goal pipeline was gated behind `IN_PLAY/PAUSED`:
-
-- `get_live_matches()` → `[m for m in ... if m.status in ("IN_PLAY","PAUSED")]`
-- `poll_goals_job` `relevant` filter → only `IN_PLAY/PAUSED` or `FINISHED+in scores`
-- `poll_thread_goals_job` calls `get_live_matches()` and only processes seeded matches
-
-Net effect: during the ~1 h API lag, nothing seeds `live_scores`, the Reddit real-time poller never looks at the thread, and `/endirecto` returns "No hay partidos en directo". Goals are announced ~1 h late when the API finally catches up.
-
----
-
-## The Fix
-
-### 1. Schedule-Live Predicate
-
-New function `match_is_schedule_live(match: Match, now_utc: datetime) -> bool` added to **`api/client.py`** (module-level, importable with no circular-import risk).
-
-Returns `True` when **all** of:
-- `match.status` not in `_TERMINAL_STATUSES = {"FINISHED","POSTPONED","SUSPENDED","CANCELLED","AWARDED"}`
-- `kickoff <= now_utc` (match has started per schedule)
-- `now_utc - kickoff <= MATCH_LIVE_WINDOW` (4 h — same ceiling as `MATCH_OVER_AGE` in `__main__.py`)
-
-New constants also in `api/client.py`:
-```python
-MATCH_LIVE_WINDOW = timedelta(hours=4)
-_TERMINAL_STATUSES = frozenset({"FINISHED", "POSTPONED", "SUSPENDED", "CANCELLED", "AWARDED"})
-```
-
-**Cross-reference:** `MATCH_LIVE_WINDOW` (4 h) must stay in sync with `MATCH_OVER_AGE` (4 h) in `__main__.py`. Both define the same ceiling for "could still be live".
-
-### 2. `get_live_matches()` Fix (`api/client.py`)
-
-```python
-def get_live_matches(self) -> list[Match]:
-    matches = self.get_all_matches()
-    now_utc = datetime.now(timezone.utc)
-    return [
-        m for m in matches
-        if m.status in ("IN_PLAY", "PAUSED") or match_is_schedule_live(m, now_utc)
-    ]
-```
-
-Fixes `/endirecto` (cmd_en_directo) and the standings live-highlight (cmd_clasificacion) with no changes to handlers.
-
-### 3. `poll_goals_job` Relevant Filter (`__main__.py`)
-
-Added `or match_is_schedule_live(m, now_utc)` to the `relevant` filter:
-
-```python
-relevant = [
-    m for m in all_matches
-    if not _match_is_over(m, now_utc)
-    and not m.in_penalty_shootout
-    and (
-        m.status in ("IN_PLAY", "PAUSED")
-        or (m.status == "FINISHED" and str(m.id) in scores)
-        or match_is_schedule_live(m, now_utc)   # NEW: catches API-lagged TIMED
-    )
-]
-```
-
-**Seeding TIMED at 0-0:** When a TIMED match has null API scores (`home_score=None`, `away_score=None`):
-- `curr_home = curr_away = 0`
-- `reconcile(None, None, 0, 0)` → `([], {"home":0,"away":0}, {"home":0,"away":0})`
-- `stored is None` → enters seeding branch
-- `curr_home > 0 or curr_away > 0` → `False` → **no catch-up delta, no announce**
-- Seeds `live_scores[match_key] = {"home":0,"away":0,"status":"TIMED"}` ✓
-
-**Invariants preserved:**
-- `goal_lock` atomic claim: unchanged
-- `reconcile()`/per-source `seen` dedup: unchanged
-- No-double-announce guarantee: seed is at 0-0; subsequent delta uses same reconcile path
-- Disallowed/VAR handling: unchanged (only triggered when same source's own value drops)
-- POSTPONED/SUSPENDED eviction: executed before `relevant` filter, evicts even newly-seeded TIMED entries
-- Over-match (4h) prune: still runs first; TIMED match >4h is evicted AND not schedule-live
-
-### 4. Reddit Thread Matching (`reddit/scanner.py`)
-
-**Findings:** `WC_TEAM_ALIASES` already handled the key Congo DR variants:
-- `"dr congo"` → `"congo dr"` ✓
-- `"d r congo"` → `"congo dr"` (D.R.Congo after dot→space) ✓
-- `"democratic republic of congo"` → `"congo dr"` ✓
-- `"dem rep congo"` → `"congo dr"` ✓
-
-**Gap found:** `"democratic republic of the congo"` (official UN name, includes "the") was missing.
-
-**Fix:** Added one alias:
-```python
-"democratic republic of the congo": "congo dr",  # official UN name variant
-```
-
-The `_normalize_team` / `_teams_match` / `_find_matching_fixture` / `scan_live_matches` pipeline was already robust. No structural changes needed.
-
----
-
-## Files Changed
-
-| File | Change |
-|------|--------|
-| `src/worldcup_bot/api/client.py` | Added `MATCH_LIVE_WINDOW`, `_TERMINAL_STATUSES`, `match_is_schedule_live()`; updated `get_live_matches()` |
-| `src/worldcup_bot/__main__.py` | Imported `match_is_schedule_live`; extended `relevant` filter in `poll_goals_job` |
-| `src/worldcup_bot/reddit/scanner.py` | Added `"democratic republic of the congo"` alias |
-| `tests/test_api_client.py` | Added `TestScheduleLivePredicate` (13 tests) + `TestGetLiveMatchesScheduleLive` (5 tests) |
-| `tests/test_poll_goals_job.py` | Added `TestScheduleLiveSeeding` (4 tests); fixed `test_no_relevant_matches_returns_early` (future kickoff) |
-| `tests/test_poll_thread_goals_job.py` | Added `TestPollThreadGoalsJobScheduleLive` (2 tests) |
-| `tests/test_handlers.py` | Added `TestCmdEnDirectoScheduleLive` (2 tests) |
-| `tests/test_reddit_scanner.py` | Added `TestCongoDRAlias` (6 tests) |
-
-**Full suite: 2102 passed, 0 failures.**
-
-
----
-
-## Lead Review — Pirlo (APPROVED)
-
-# Review: Schedule-Live Seeding Fix (Goal Pipeline)
-
-**Reviewer:** Pirlo (Lead)  
-**Date:** 2026-07-01  
-**Scope:** `api/client.py` (new predicate + get_live_matches), `__main__.py` (relevant filter), `reddit/scanner.py` (alias)  
-**Test suite:** 2102 passed ✅  
-
----
-
-## Checklist
-
-### 1. No Double Announce ✅ PASS
-
-Traced both orderings through `reconcile()` + `goal_lock`:
-
-**Thread-first-then-API-catchup (primary real-world path):**
-
-1. `poll_goals_job` seeds match at 0-0 (API scores are None → 0):  
-   `reconcile(None, None, 0, 0)` → `([], {0,0}, {0,0})` — seeds `scores[key]={0,0}`, no announce.  
-   Sets `seen_api[key] = {0,0}`.
-
-2. `poll_thread_goals_job` reads 0-1 from Reddit thread:  
-   `reconcile(None, {0,0}, 0, 1)` — seen=None, announced≠None, `_ahead({0,1},{0,0})` → True → emits ONE catchup delta.  
-   Claims `scores[key] = {0,1}` under `goal_lock`. Announces. ✓
-
-3. `poll_goals_job` ~1h later, API now reports 0-1:  
-   `reconcile({0,0}, {0,1}, 0, 1)` — new={0,1} != seen={0,0} → proceed.  
-   `_ahead({0,1}, {0,1})` → False (equal, not strictly ahead).  
-   Step 5: `([], {0,1}, {0,1})`. **No delta, no announce.** ✓
-
-**API-first (rare — API catches up before thread):**
-
-1. API reports 1-0: `reconcile({0,0}, {0,0}, 1, 0)` → `_ahead({1,0},{0,0})` → True → goal delta. Claims `scores[key]={1,0}`. Announces. ✓
-
-2. Thread later reads 1-0: `reconcile(None, {1,0}, 1, 0)` — seen=None, `_ahead({1,0},{1,0})` → False → `([], {1,0}, {1,0})`. **No delta.** ✓
-
-The `goal_lock` ensures the "read announced → reconcile → claim" is atomic between
-both pollers. The per-source `seen` baselines prevent a lagging source from interpreting
-the other source's already-announced delta as new.
-
-### 2. No False Disallowed ✅ PASS
-
-The disallowed path in `reconcile` (line 243–266) only fires when:
-- `_ahead(ann, new)` (announced > new) — announced is strictly higher
-- AND `_ahead(seen, new)` (source's own prior > new) — this source itself dropped
-
-With a 0-0 seed baseline:
-- Thread reads 0-1: `_ahead({0,0}, {0,1})` → False (ann not ahead of new) → disallowed branch NEVER entered.
-- API reads 0-1 after thread claimed {0,1}: `_ahead({0,1}, {0,1})` → False → not entered.
-
-The only way to trigger disallowed is if the SAME source's own `seen` was higher than
-its current reading — which is genuine VAR/goal reversal. The 0-0 seed cannot produce
-a false disallowed because any forward movement from 0-0 is strictly "ahead" by definition.
-
-### 3. Window Consistency ✅ PASS — No Oscillation
-
-| Elapsed | `match_is_schedule_live` | `_match_is_over` | Net status |
-|---------|--------------------------|-------------------|-----------|
-| < 4h    | True (`<=`)              | False (`>`)       | Live ✓    |
-| = 4h    | True (`<=`)              | False (`>`)       | Live ✓    |
-| > 4h    | False                    | True              | Evicted ✓ |
-
-The operators are complementary: `<=` (schedule-live) and `>` (over). At the exact
-boundary (4h), the match is still considered live. At 4h+ε it transitions to "over"
-and is both evicted AND excluded from `relevant`. No gap, no overlap, no thrash.
-
-Both constants are 4h: `MATCH_LIVE_WINDOW = timedelta(hours=4)` in `client.py` and
-`MATCH_OVER_AGE = timedelta(hours=4)` in `__main__.py`. The comment on `MATCH_LIVE_WINDOW`
-explicitly notes "Must match MATCH_OVER_AGE in __main__.py".
-
-### 4. Over-Inclusion Prevention ✅ PASS
-
-`match_is_schedule_live` returns False when:
-- Status is FINISHED/POSTPONED/SUSPENDED/CANCELLED/AWARDED (checked first, line 48)
-- Kickoff is in the future (`elapsed < 0`)
-- Kickoff was >4h ago (`elapsed > MATCH_LIVE_WINDOW`)
-- `utc_date` parsing fails (returns False on any Exception)
-
-POSTPONED/SUSPENDED eviction (lines 794-808) runs BEFORE the `relevant` filter and
-evicts seeded entries. A re-seeding is impossible because `match_is_schedule_live`
-returns False for terminal statuses → the match is NOT in `relevant`.
-
-Order of operations in `poll_goals_job`:
-1. Over-match eviction (>4h)
-2. POSTPONED/SUSPENDED eviction  
-3. Build `relevant` list (won't include evicted or terminal matches)
-
-No stale match can re-seed after eviction. ✓
-
-### 5. Null Scores ✅ PASS
-
-```python
-curr_home = int(match.home_score) if match.home_score is not None else 0
-curr_away = int(match.away_score) if match.away_score is not None else 0
-```
-
-None → 0 (no crash). Then `reconcile(None, None, 0, 0)` → seeds at 0-0, announces
-nothing. Subsequent ticks with still-null scores: `reconcile({0,0}, {0,0}, 0, 0)` →
-`new == seen` → no-op (step 2). Correct and safe.
-
-### 6. No Regression ✅ PASS
-
-- Normal IN_PLAY matches: still hit the `m.status in ("IN_PLAY", "PAUSED")` branch
-  first — unchanged logic path.
-- VAR/disallowed: reconcile logic untouched; disallowed tests still pass.
-- FINISHED catch-up: `m.status == "FINISHED" and str(m.id) in scores` branch untouched.
-- FT recap (`poll_finished_job`): uses its own `finished_announced` set — completely
-  independent of this change.
-- `get_live_matches()`: OR-expanded, not replaced. IN_PLAY/PAUSED matches are still
-  included unconditionally.
-
-Full suite: **2102 passed**, 5 warnings (pre-existing deprecation).
-
----
-
-## Additional Notes
-
-- The Congo alias addition (`"democratic republic of the congo": "congo dr"`) is a
-  trivial dictionary entry with 6 passing tests. No risk.
-- The `match_is_schedule_live` function is conservative by design: it returns False on
-  any parsing error, uses a try/except, and is gated by terminal-status exclusion. It
-  cannot widen the pipeline dangerously even with malformed API data.
-
----
-
-## VERDICT: ✅ APPROVE
-
-The fix is sound. The concurrency guarantees (no double announce, no false disallowed)
-are preserved by the unchanged `reconcile` + `goal_lock` mechanism — the change only
-widens WHICH matches enter the pipeline, not HOW goals are detected/claimed. The window
-arithmetic is tight with no oscillation risk. 2102 tests pass. Ship it.
-
-
----
-
-# Decision: Podium Drawn-Base Layout Rewrite (2026-07-01 SHIPPED)
-
-**Date:** 2026-07-01  
-**Authors:** Kanté (Backend), Pirlo (Lead Review)  
-**Status:** ✅ SHIPPED (commit 277ae2e)
-
----
-
-## MERGED DECISIONS (2 files → 1 entry)
-
-This entry consolidates the podium layout rewrite:
-1. \kante-podium-drawn-base.md\ — Drawn podium base implementation
-2. \pirlo-podium-drawn-review.md\ — Lead review (APPROVED)
-
----
-
-## Summary
-
-Rewrote \src/worldcup_bot/bot/podium_image.py\ to render a drawn 3-block podium (gold/silver/bronze) with tie-aware heights, position numbers on block fronts, circular photos as "heads" standing on each block, and crown asset (or drawn fallback) worn on top. Canvas 760×560 px. All 2018 tests green; David visually verified rendered output.
-
----
-
-## Layout Description
-
-Each participant is rendered as a vertical stack from top to bottom:
-
-1. **Crown** — asset (\crown.png\) or drawn fallback — sits on the photo head
-2. **Circular photo** ("head") — rests on top of the block with a slight overlap
-3. **Podium block** ("feet/pedestal") — anchored to the floor, height varies by rank
-
-Classic left/center/right arrangement for n=3:
-- **Center** = participants[0] (1st ranked) — tallest block
-- **Left** = participants[1] (2nd ranked)
-- **Right** = participants[2] (3rd ranked)
-
-Column display order for n=3: \[1, 0, 2]\ (index into participants list).
-
----
-
-## Module-Level Constants (all in \podium_image.py\, easy to tune)
-
-\\\python
-_CANVAS_W       = 760          # canvas total width (px)
-_CANVAS_H       = 560          # canvas total height (px)
-_BG             = (22, 27, 34) # background color (dark navy)
-
-_FLOOR_Y        = 420          # y-coordinate of the floor (all blocks end here)
-_BLOCK_W        = 200          # width of each podium block (px)
-_BLOCK_GAP      = 8            # gap between blocks (px)
-_BLOCK_HEIGHT   = {1: 175, 2: 120, 3: 85}  # height by tie-aware position
-_BLOCK_COLORS   = {            # flat fill color by position
-    1: (230, 184,   0),        # gold
-    2: (192, 192, 192),        # silver
-    3: (205, 127,  50),        # bronze
-}
-_BLOCK_TOP_DARKEN = 20         # how much to darken the top edge for depth
-
-_PHOTO_D        = 150          # photo circle diameter (px)
-_PHOTO_OVERLAP  = 10           # px the photo overlaps down into the block top
-
-_CROWN_ASSET_SIZE = 105        # width to scale the crown asset to (px)
-_CROWN_OVERLAP    = 30         # px the crown asset overlaps down into the photo top
-_DRAWN_CROWN_W    = 70         # width of the drawn (fallback) crown (px)
-_DRAWN_CROWN_H    = 40         # height of the drawn crown (px)
-_DRAWN_CROWN_OVERLAP = 10      # px the drawn crown overlaps into the photo top
-
-_FONT_SIZE_NUM  = 52           # font size for position number on block face
-_FONT_SIZE_NAME = 18           # font size for participant name label (below block)
-_NAME_Y_OFFSET  = 28           # px below block bottom for name label
-\\\
-
----
-
-## Tie-Height Mapping
-
-Ties share the **same** block height (determined by \participant["position"]\):
-
-| Positions | Block heights              |
-|-----------|---------------------------|
-| 1, 2, 3   | 175 / 120 / 85            |
-| 1, 1, 3   | 175 / 175 / 85            |
-| 1, 2, 2   | 175 / 120 / 120           |
-| 1, 1, 1   | 175 / 175 / 175           |
-
-The \position\ field comes from \standard_competition_positions()\ in \ormatters.py\, passed through \_send_ranking_with_top3_photos\ → \
-ender_podium\.
-
----
-
-## Crown Placement
-
-- **Asset (\_CROWN_IMG\ is not None):** scale to \_CROWN_ASSET_SIZE\ wide (preserve aspect ratio), alpha-composite centered on the photo column, with the crown's bottom overlapping \_CROWN_OVERLAP\ px into the photo top.
-- **Drawn fallback (\_CROWN_IMG is None\):** \_draw_crown(draw, cx, crown_top)\ draws a gold polygon crown of size \_DRAWN_CROWN_W × _DRAWN_CROWN_H\ above the photo, overlapping \_DRAWN_CROWN_OVERLAP\ px.
-- The **position number** is drawn on the **block face**, not on the crown.
-
----
-
-## Fallback Chain (unchanged)
-
-\
-ender_podium\ → \syncio.to_thread\ in \_send_ranking_with_top3_photos\:
-
-1. **Podium image** (\
-ender_podium\) → if \None\, falls back to:
-2. **Album** (existing \send_media_group\ photo strip) → if that fails, falls back to:
-3. **Plain text** (existing reply_text)
-
-\
-ender_podium\ **never raises** — wraps the entire \_render_podium\ call in \	ry/except\, returns \None\ on any error.
-
----
-
-## Tests Changed
-
-File: \	ests/test_podium_image.py\
-- \	est_canvas_dimensions_720x400\ → renamed \	est_canvas_dimensions_760x560\, assertion updated from \(720, 400)\ to \(760, 560)\
-- \	est_asset_crown_pastes_non_background_pixels\: parameter renamed \	ile_y=115\ → \photo_top_y=115\ to match new \_paste_crown_asset\ signature
-- \TestCrownAsset::test_fallback_drawn_crown_when_asset_missing\: size assertion updated \(720, 400)\ → \(760, 560)\
-
-All other tests remain unchanged; 2018 pass.
-
----
-
-## Pirlo Lead Review (2026-07-01 APPROVED)
-
-✅ **Verdict: APPROVE**
-
-**Checklist results:**
-- ✅ Never raises — full try/except around internal renderer, returns None on any failure
-- ✅ Tie-awareness — block height, color, position number keyed by \p.get("position", ...)\
-- ✅ Robustness — n=1 and n=2 handled; missing photo → placeholder; crown fallback works
-- ✅ No dead code — 350-line module with 13 functions, all called
-- ✅ Constants tunable — all layout magic numbers at module top as named constants
-- ✅ Suite green + tests retargeted — 2018 passed, new dimensions correctly asserted
-
-The rewrite is clean: 350-line module with no dead code, all correctness invariants preserved (never-raises, tie-aware, robust for edge cases), constants fully tunable, and tests correctly retargeted. David visually confirmed the output. Ship it.
-
----
-
-
-# Decision: Crown Asset Integration (2026-07-01 SHIPPED)
-
-**Date:** 2026-07-01  
-**Authors:** Kanté (Backend), Maldini (DevOps), Pirlo (Lead Review)  
-**Status:** ✅ SHIPPED (commit e53b8a5)
-
----
-
-## MERGED DECISIONS (3 files → 1 entry)
-
-This entry consolidates the crown asset integration:
-1. `kante-crown-asset.md` — Asset loader implementation
-2. `maldini-crown-packaging.md` — Packaging & attribution
-3. `pirlo-crown-asset-review.md` — Lead review (APPROVED)
-
----
-
-## Summary
-
-Swapped hand-drawn gold crown for Noto Emoji crown asset (128×128 RGBA, Apache-2.0). Asset loader prefers bundled PNG; falls back to drawn crown if missing. Packaging fix ensures asset ships in wheel/Docker image.
-
----
-
-## Asset Loader
-
-```python
-# src/worldcup_bot/bot/podium_image.py
-
-from importlib.resources import files
-
-def _load_crown_asset() -> Image.Image | None:
-    try:
-        resource = files("worldcup_bot") / "assets" / "crown.png"
-        return Image.open(io.BytesIO(resource.read_bytes())).convert("RGBA")
-    except Exception:
-        return None
-
-_CROWN_IMG: Image.Image | None = _load_crown_asset()
-```
-
-**Why `importlib.resources.files`?**  
-Works identically from source checkout and pip-installed package in Docker, as long as `pyproject.toml` ships the PNG via `package-data`. PEP 451-compliant for Python 3.9+.
-
----
-
-## Crown Rendering
-
-```python
-def _paste_crown_asset(canvas: Image.Image, cx: int, tile_y: int) -> None:
-    crown = _CROWN_IMG.resize((_CROWN_ASSET_SIZE, _CROWN_ASSET_SIZE), Image.LANCZOS)
-    x = cx - _CROWN_ASSET_SIZE // 2
-    y = tile_y - _CROWN_GAP - _CROWN_ASSET_SIZE
-    canvas.paste(crown, (x, y), crown)  # uses RGBA alpha channel as mask
-```
-
-- `_CROWN_ASSET_SIZE = 56` px
-- Crown bottom edge = `tile_y - _CROWN_GAP` = 22 px above tile top
-- Alpha-composite via RGBA mask
-
-**Fallback dispatch in `_render_podium`:**
-
-```python
-if _CROWN_IMG is not None:
-    _paste_crown_asset(canvas, cx, tile_y)
-else:
-    crown_top = tile_y - _CROWN_H - _CROWN_GAP
-    _draw_crown(draw, cx, crown_top)
-```
-
-Original 11-vertex drawn crown remains as fallback.
-
----
-
-## Packaging (Maldini)
-
-**pyproject.toml changes:**
-
-```toml
-[tool.setuptools]
-include-package-data = true
-
-[tool.setuptools.package-data]
-worldcup_bot = ["assets/*.png", "assets/*.md"]
-```
-
-**Attribution:** `src/worldcup_bot/assets/ATTRIBUTION.md` created (Noto Emoji, Google, Apache 2.0)
-
-**Verification:** Wheel built successfully; `worldcup_bot/assets/crown.png` confirmed present in wheel zip.
-
----
-
-## Testing
-
-- 5 new tests in `TestCrownAsset`: asset loaded; fallback with asset=None; fallback tie case; draw_crown and paste mutate canvas
-- 12 smoke tests in `TestRenderPodiumSmoke` pass unchanged
-- **Total: 2018 tests passed** ✅
-
----
-
-## Pirlo Lead Review (2026-07-01 APPROVED)
-
-✅ **Verdict: APPROVE**
-
-**Checklist results:**
-- ✅ Asset loading correct (`importlib.resources.files` PEP 451)
-- ✅ Fallback dispatch works (asset preferred, drawn as silent backup)
-- ✅ Packaging verified (wheel inspection confirms PNG + ATTRIBUTION.md present)
-- ✅ Attribution satisfies Apache 2.0
-- ✅ No regression (2018 tests passed)
-
----
-
----
-
-# Decision: Standard Competition Ranking (1224 style)
-
-**Date:** 2026-07-01  
-**Author:** Kanté (backend)  
-**Status:** Implemented, committed in 8987262
-
-## Summary
-Added `standard_competition_positions` helper to formatters.py that implements "1224 style" tie-aware ranking: tied participants share the same position and the next position skips accordingly. E.g., scores [31, 31, 30] → positions [1, 1, 3].
-
-## Key Details
-- **Input:** Pre-sorted list of ranking rows with `.total_score` attribute
-- **Output:** List of 1-based competition positions
-- **Tie rule:** Two rows are tied if `round(score_a, 1) == round(score_b, 1)`
-- **Used by:** `/porra`, `/general`, `/clasificacion` commands and podium image feature
-- **Test count:** 1951 passed (added 12 new tests)
-
-## Files Changed
-- `src/worldcup_bot/bot/formatters.py`: Added `standard_competition_positions` helper; updated `format_general_ranking`
-- `tests/test_formatters.py`: Added `TestStandardCompetitionPositions` (9 cases) + `TestFormatGeneralRankingTieAwareNumbering` (3 cases)
-
----
-
-# Decision: Podium Photo Compositing Feasibility & Approach
-
-**Author:** Pirlo (Lead)  
-**Date:** 2026-07-01  
-**Status:** Proposal approved, implementation completed
-
-## Feasibility Verdict
-✅ **Merging tied photos into one combined image:** Fully feasible with Pillow 12.2.0  
-✅ **Single podium image with crowns + position numbers:** Fully feasible with Pillow canvas + ImageDraw
-
-## Recommended Approach (Option B — Single Podium Image)
-- **Canvas:** Fixed 700 × 350 px, dark background
-- **Tiles:** Uniform 200×200 px, circular crop optional, LANCZOS resize
-- **Crown:** Single overlay per tile with position number inside/below
-- **Placeholders:** Missing photos render as solid-color circles + initials (first letter of display name)
-- **Layout:** Tie-aware positioning — tied positions share same y-height on canvas
-- **Fallback chain:** Podium image → album (old code) → plain text
-
-## Assets Needed
-- `crown.png`: ~5 KB, 64×64 px, transparent background (or hand-drawn)
-- `podium_font.ttf`: DejaVu Sans Bold (~700 KB, SIL OFL licensed) — required for Docker consistency
-
-## Key Decisions
-- **Missing photos:** Always generate placeholder (ensures podium always renders)
-- **Crown rendering:** Bundle PNG asset (cleanest option)
-- **Font:** Bundle TTF in assets (Docker slim images don't have system fonts reliably)
-- **Layout adaptability:** Use `standard_competition_positions` to determine tie-aware heights
-- **Always-on mode:** Replace album with podium image always (no branching on ties)
-
-## Risk Level
-Low — graceful fallback to text if anything fails. Effort estimate: ~1 working day.
-
-## Prerequisite
-`standard_competition_positions` helper must land first.
-
----
-
-# Decision: Rich Image — Country-Themed Winners (2026-07-01 SHIPPED)
-
-**Date:** 2026-07-01  
-**Author:** Kanté (Backend)  
-**Status:** ✅ SHIPPED (commit 47b7e41)
-
----
-
-## Summary
-
-Extended the daily `rich_image` feature: each day's image now incorporates opulent, country-themed luxury props inspired by yesterday's football-day winners — while the day-over-day wealth escalation continues unchanged.
-
----
-
-## New / Changed Signatures
-
-### `RICH_THEME_PROMPT` (module-level constant in `rich_image.py`)
-A tunable prompt string instructing the chat model to return one opulent/funny/specific luxury visual element per winning country — comma-separated, no extra text. Bakes in David's vibe examples: Norway→golden Viking helmet; France→jewel-encrusted baguette; Mexico→gourmet nachos with truffle; England→tea in a solid gold cup; Belgium→a parliament building they bought outright; USA→surrounded by piles of US dollar bills.
-
-### `generate_wealth_themes`
-```python
-async def generate_wealth_themes(
-    api_key: str,
-    base_url: str,
-    model: str,
-    winners: list[str],
-    *,
-    _client: object | None = None,   # inject for tests
-) -> str
-```
-- Returns `""` immediately when `winners` is empty.
-- Calls `client.chat.completions.create` with `RICH_THEME_PROMPT + " " + ", ".join(winners)`.
-- **Best-effort / never raises**: on any exception returns `", ".join(f"opulent luxury {c}-themed elements" for c in winners)`.
-- `_client` injectable (same pattern as `generate_rich_caption`).
-
-### `build_rich_prompt`
-```python
-def build_rich_prompt(
-    history: str = "",
-    anchor: bool = False,
-    themes: str = "",   # NEW — comma-sep opulent props
-    pose: str = "",     # NEW — random activity
-) -> str
-```
-When `themes` is non-empty appends:  
-`" ALSO incorporate a few of these opulent, country-themed luxury elements into the scene, worked in tastefully (inspired by yesterday's winning countries): {themes}."`  
-
-When `pose` is non-empty appends:  
-`" In THIS image, show the person {pose}. VARY the pose and activity each time — do NOT default to sitting and toasting with champagne."`  
-
-Insertion order: `history clause → themes clause → pose clause → anchor clause`.
-
-### `POSE_ACTIVITIES` (module-level list, 14 entries)
-Covering: dancing, standing on red carpet, lounging on a chaise longue, spa massage, partying with a crowd, napping in opulent bed, embracing a companion, walking a red carpet, posing with entourage, relaxing in infinity pool, being served by staff, laughing mid-celebration, striding through a luxury penthouse, being pampered at a private salon.
-
-### `run_rich_iteration`
-```python
-async def run_rich_iteration(
-    settings: Settings,
-    *,
-    _client: object | None = None,
-    _caption_client: object | None = None,
-    _data_dir: str = "/app/data",
-    _now: datetime | None = None,
-    winners: list[str] | None = None,   # NEW
-) -> tuple[str, int, str]
-```
-- Computes themes: calls `generate_wealth_themes(... _client=_caption_client)` when `winners` is truthy and all three chat-model settings are non-empty; otherwise `themes = ""`.
-- Picks random pose from `POSE_ACTIVITIES`.
-- Passes `themes` and `pose` to `build_rich_prompt`.
-- Does NOT pass `themes` to `generate_rich_caption` (caption uses original rude tone only).
-- Logs `winners` and `themes`.
-
----
-
-## Winners → Themes → Pose Flow
-
-```
-rich_image_job
-    │
-    ├─ make_client(settings)
-    │       ↓
-    │   client.get_football_day_matches(timezone, day_offset=-1, anchor_hour=...)
-    │       ↓
-    │   [FINISHED matches only; HOME_TEAM / AWAY_TEAM winners; DRAW skipped]
-    │       ↓
-    │   winners = ["Norway", "France", ...]   (or [] on error)
-    │
-    └─ run_rich_iteration(settings, winners=winners)
-            │
-            ├─ generate_wealth_themes(api_key, base_url, model, winners, _client=_caption_client)
-            │       → "golden Viking helmet, jewel-encrusted baguette"  (or fallback)
-            │
-            ├─ random.choice(POSE_ACTIVITIES)
-            │       → "dancing with champagne"
-            │
-            ├─ build_rich_prompt(history, anchor, themes=..., pose=...)
-            │       → image-edit prompt with themes + pose clauses woven in
-            │
-            ├─ edit_rich_image(... prompt=prompt ...)
-            │
-            └─ generate_rich_caption(...)
-                    → caption (themes NOT mentioned; original rude tone only)
-```
-
-Error-handling at every level:
-- `get_football_day_matches` failure → `winners = []`, job continues.
-- `generate_wealth_themes` exception → fallback string, never propagates.
-- `generate_rich_caption` exception → default fallback caption, never propagates.
-
----
-
-## Refinements Applied (2026-07-01, live-test feedback)
-
-### 1. Too Much Gold → Varied Luxury
-
-`RICH_THEME_PROMPT` now explicitly instructs the model NOT to default to gold/golden for every element and lists varied luxury materials: diamonds, platinum, marble, silk, crystal, caviar, designer furs, exotic woods, haute couture, precious jewels, rare materials. Examples reworked:
-- Norway → a diamond-encrusted Viking longship
-- France → a caviar-topped artisan baguette on a marble tray
-- Mexico → a crystal platter of truffle nachos
-- England → a silk-lined tea set with hand-painted porcelain cups
-- Belgium → a private parliament building filled with Belgian chocolate sculptures
-- USA → surrounded by piles of platinum-banded US dollar bills
-
-### 2. Repeated Pose → Random Pose/Activity
-
-`POSE_ACTIVITIES` list added with 14 varied entries. `build_rich_prompt` gained `pose` parameter. `run_rich_iteration` picks with `random.choice(POSE_ACTIVITIES)` each iteration. `RICH_EDIT_PROMPT` softened to encourage variation.
-
-### 3. Caption Reverted (Themes OUT of Caption)
-
-The rude/chulesco caption (`RICH_CAPTION_PROMPT`) is UNCHANGED and does NOT mention themes. Themes appear only in the image prompt (`build_rich_prompt`).
-
----
-
-## Files Changed
-
-| File | Change |
-|------|--------|
-| `src/worldcup_bot/ai/rich_image.py` | `RICH_THEME_PROMPT`, `POSE_ACTIVITIES` consts; `generate_wealth_themes` func; extended `build_rich_prompt`, `run_rich_iteration` |
-| `src/worldcup_bot/__main__.py` | `rich_image_job`: fetch yesterday's winners before calling `run_rich_iteration(settings, winners=winners)` |
-| `tests/test_rich_image.py` | 53 new tests (35 initial + 18 refinements) |
-
----
-
-## Test Count
-
-**2071 passed** (+53 new tests, up from 2018). All green. Live-tested by coordinator: 2 runs of 5 iterations each sent to Telegram chat 3041850; David reviewed and approved.
-
----
 
 # Decision: Podium Image Feature Implementation
 
@@ -1278,6 +506,8 @@ Entirely drawn with Pillow `ImageDraw.polygon` + `ImageDraw.ellipse`:
 
 ---
 
+
+
 # Decision: Podium Image Review — APPROVED
 
 **Reviewer:** Pirlo (Lead)  
@@ -1309,6 +539,8 @@ Entirely drawn with Pillow `ImageDraw.polygon` + `ImageDraw.ellipse`:
 
 
 ---
+
+
 
 # Decision: TVE Knockout-Round Prefix Fix
 
@@ -1653,6 +885,8 @@ non-fatal. 2157 tests pass. Ship it.
 
 ---
 
+
+
 # Decision: Freeze Clock in Revive Success-Path Tests (2026-07-04)
 
 **Date:** 2026-07-04  
@@ -1820,6 +1054,8 @@ first-run seed still seeds stale matches into `finished_announced`).
 
 ---
 
+
+
 # Decision: streamff goal-clip download — resolve source from page, resilient CDN fallback
 
 **Author:** Cannavaro (backend reliability)
@@ -1884,6 +1120,8 @@ backstop and is derived from the matched domain, not a single frozen host.
 
 ---
 
+
+
 # Decision: /elecciones increment 2 — groups image + tile-cache eviction + defensive text split
 
 **Date:** 2026-07-04  
@@ -1939,6 +1177,8 @@ Teams come from `group_compositions[letter]` in standings position order (1st in
 | 65  | Not picked by this participant (implicitly eliminated) |
 
 ---
+
+
 
 # Decision: find_goal_clip Empty-JSON Fallback Fix (2026-07-06)
 
@@ -2222,6 +1462,8 @@ This guarantees no Telegram message exceeds 4090 chars even in edge cases (many 
 
 ---
 
+
+
 # Decision: /elecciones hourglass UX
 
 **Author:** Kanté  
@@ -2260,6 +1502,8 @@ Full suite: 2324 passed, 8 pre-existing failures (unrelated).
 
 
 ---
+
+
 
 # Decision: /elecciones command implementation
 
@@ -2359,6 +1603,8 @@ Cache lives in `bot_data["elecciones_cache"]` — dict keyed by `(yaml_key, mtim
 
 ---
 
+
+
 # Decision: Production Bug Fixes — Keyboard Never Attached & FINAL 9h Late
 
 **Date:** 2026-07-04  
@@ -2443,6 +1689,8 @@ The first-run seed pass already silently seeds stale `IN_PLAY` matches (kickoff 
 
 
 ---
+
+
 
 # Decision: Container Memory-Limit Safeguard
 
