@@ -8,6 +8,7 @@ The key constant to tweak is RICH_EDIT_PROMPT (base instruction passed to the im
 from __future__ import annotations
 
 import base64
+import contextlib
 import glob as _glob
 import json
 import logging
@@ -145,7 +146,40 @@ def rich_birthday_age(now: datetime) -> int:
     return now.year - RICH_BIRTH_YEAR
 
 
-def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "", pose: str = "", birthday: bool = False, age: int | None = None) -> str:
+# ── Micky birthday constants (July 10) ───────────────────────────────────────
+
+MICKY_BIRTHDAY_MONTH = 7
+MICKY_BIRTHDAY_DAY = 10
+MICKY_BIRTH_YEAR = 1984   # turns 42 in 2026; age auto-increments yearly
+
+MICKY_IMAGE = "micky.jpg"
+
+MICKY_BIRTHDAY_CLAUSE = (
+    " IMPORTANT: a THIRD reference image is provided — it contains MICKY (the birthday man)"
+    " and also the rich character together. In this special scene MICKY is the clear"
+    " PROTAGONIST and CENTREPIECE of the composition: feature him prominently in the"
+    " foreground or centre. Place the rich character visibly NEXT TO him in a supporting role."
+    " Transform the scene into an opulent, over-the-top luxury BIRTHDAY CELEBRATION for"
+    " MICKY's {age}th birthday: a lavish party with a giant multi-tiered birthday cake,"
+    " balloons, party decorations and a celebratory banner. The cake and/or banner MUST clearly"
+    " and legibly display the number \"{age}\" (his age). Match MICKY's face EXACTLY from the"
+    " third reference image and the rich character's face EXACTLY from the second reference."
+    " Both men must be clearly visible and celebrating together. Tasteful, fully clothed,"
+    " photorealistic."
+)
+
+
+def is_micky_birthday(now: datetime) -> bool:
+    """True when *now* is Micky's birthday (July 10, any year)."""
+    return now.month == MICKY_BIRTHDAY_MONTH and now.day == MICKY_BIRTHDAY_DAY
+
+
+def micky_birthday_age(now: datetime) -> int:
+    """Age Micky turns on *now*'s birthday (now.year - MICKY_BIRTH_YEAR)."""
+    return now.year - MICKY_BIRTH_YEAR
+
+
+def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "", pose: str = "", birthday: bool = False, age: int | None = None, micky_birthday: bool = False) -> str:
     """Return the full editing prompt for one wealth-escalation iteration.
 
     Richness escalation is implicit: each run takes the previous output as input,
@@ -156,7 +190,9 @@ def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "",
     a clause is added asking the model to incorporate those elements tastefully.
     When ``pose`` is non-empty (one entry from :data:`POSE_ACTIVITIES`), a clause forces
     the model to show the person in that specific activity so poses vary each iteration.
-    When ``birthday`` is True, appends :data:`RICH_BIRTHDAY_CLAUSE` (birthday party theme).
+    When ``birthday`` is True, appends :data:`RICH_BIRTHDAY_CLAUSE` (rich's own birthday party theme).
+    When ``micky_birthday`` is True, appends :data:`MICKY_BIRTHDAY_CLAUSE` describing the third
+    reference image and instructing the model to make Micky the protagonist.
     When ``anchor`` is True, appends :data:`RICH_FACE_ANCHOR_CLAUSE` instructing the
     model that a second reference image (the original) is provided to lock the face.
     """
@@ -179,6 +215,8 @@ def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "",
         )
     if birthday and age is not None:
         base += RICH_BIRTHDAY_CLAUSE.format(age=age)
+    if micky_birthday and age is not None:
+        base += MICKY_BIRTHDAY_CLAUSE.format(age=age)
     if anchor:
         base += RICH_FACE_ANCHOR_CLAUSE
     return base
@@ -351,6 +389,27 @@ def find_original_image(data_dir: str = "/app/data") -> str:
     )
 
 
+def find_micky_image(data_dir: str = "/app/data") -> str:
+    """Return the path of the Micky reference image used on his birthday (July 10).
+
+    Looks for ``{data_dir}/rich/micky.*`` (jpg/jpeg/png first, then any match).
+    This image contains both Micky and the rich character and is passed as a third
+    reference to :func:`edit_rich_image` on Micky's birthday.
+
+    Raises FileNotFoundError if no match exists.
+    """
+    candidates = _glob.glob(os.path.join(data_dir, "rich", "micky.*"))
+    for ext in (".jpg", ".jpeg", ".png"):
+        for c in candidates:
+            if c.lower().endswith(ext):
+                return c
+    if candidates:
+        return candidates[0]
+    raise FileNotFoundError(
+        f"No Micky image found: {data_dir}/rich/micky.*"
+    )
+
+
 # ── image editing ─────────────────────────────────────────────────────────────
 
 
@@ -363,6 +422,7 @@ async def edit_rich_image(
     prompt: str,
     size: str = "1024x1024",
     anchor_path: str | None = None,
+    extra_paths: list[str] | None = None,
     _client: object | None = None,
 ) -> bytes:
     """Call the images.edit endpoint and return decoded PNG bytes.
@@ -370,6 +430,10 @@ async def edit_rich_image(
     When *anchor_path* is provided and differs from *image_path*, passes both
     images as a list ``[base_file, anchor_file]`` so the API can lock the face
     to the original reference while evolving the rest of the scene.
+
+    When *extra_paths* is provided (e.g. ``[micky_path]`` on his birthday), those
+    file handles are appended AFTER the anchor: ``[base, anchor, *extras]``.  All
+    file handles are opened and closed safely via :class:`contextlib.ExitStack`.
 
     Accepts ``_client`` for test injection (any object with an ``.images.edit``
     coroutine that returns ``resp.data[0].b64_json``).
@@ -382,27 +446,23 @@ async def edit_rich_image(
             anchor_path is not None
             and os.path.abspath(anchor_path) != os.path.abspath(image_path)
         )
-        if use_anchor:
-            img_fh = open(image_path, "rb")
-            anc_fh = open(anchor_path, "rb")
-            try:
-                resp = await client.images.edit(
-                    model=model,
-                    image=[img_fh, anc_fh],
-                    prompt=prompt,
-                    size=size,
-                )
-            finally:
-                img_fh.close()
-                anc_fh.close()
-        else:
-            with open(image_path, "rb") as img_fh:
-                resp = await client.images.edit(
-                    model=model,
-                    image=img_fh,
-                    prompt=prompt,
-                    size=size,
-                )
+        extra = [p for p in (extra_paths or []) if p]
+        with contextlib.ExitStack() as stack:
+            img_fh = stack.enter_context(open(image_path, "rb"))
+            extra_fhs = [stack.enter_context(open(p, "rb")) for p in extra]
+            if use_anchor:
+                anc_fh = stack.enter_context(open(anchor_path, "rb"))
+                image_arg: object = [img_fh, anc_fh, *extra_fhs]
+            elif extra_fhs:
+                image_arg = [img_fh, *extra_fhs]
+            else:
+                image_arg = img_fh
+            resp = await client.images.edit(
+                model=model,
+                image=image_arg,
+                prompt=prompt,
+                size=size,
+            )
         b64 = resp.data[0].b64_json
         return base64.b64decode(b64)
     except Exception as exc:
@@ -449,6 +509,7 @@ async def generate_rich_caption(
     recent_captions: str = "",
     birthday: bool = False,
     age: int | None = None,
+    micky_birthday: bool = False,
     _client: object | None = None,
 ) -> tuple[str, str]:
     """Generate a cocky first-person caption comparing BEFORE and AFTER images.
@@ -463,6 +524,9 @@ async def generate_rich_caption(
 
     ``recent_captions``: newline-joined block of recent past captions injected to
     encourage variety in openings, insults and sign-offs.
+
+    When ``micky_birthday`` is True, an explicit instruction to congratulate Micky
+    by name is injected so the caption greets him first.
 
     Raises RuntimeError only on transport/API errors; the caller decides the fallback.
     """
@@ -500,6 +564,16 @@ async def generate_rich_caption(
                 "text": (
                     f"HOY ES TU CUMPLEAÑOS: hoy cumples {age} años. Celébralo A LO GRANDE en el mensaje además de "
                     f"presumir de tu riqueza a costa del grupo — menciona EXPLÍCITAMENTE que cumples {age}."
+                ),
+            })
+        if micky_birthday and age is not None:
+            user_parts.append({
+                "type": "text",
+                "text": (
+                    f"HOY ES EL CUMPLEAÑOS DE MICKY: hoy Micky cumple {age} años."
+                    " FELICÍTALE EXPLÍCITAMENTE por su cumpleaños en el mensaje,"
+                    " deséale feliz cumpleaños por su nombre (Micky),"
+                    " y celebradlo a lo grande. El saludo a Micky es OBLIGATORIO."
                 ),
             })
         user_parts.append({
@@ -603,6 +677,12 @@ async def run_rich_iteration(
     ``_now`` overrides the current datetime (for tests).
     ``winners`` (optional): list of winning country names from yesterday's matches;
     used to generate opulent country-themed props that are woven into the scene.
+
+    **Micky birthday (July 10):** generates a special 3-image celebration scene but
+    does NOT promote the result into the evolution chain — ``rich_modified.png`` and
+    the level counter are left untouched so the daily wealth escalation continues
+    cleanly from the previous day's output the next morning.  The output is written
+    to ``rich_micky_birthday.png`` in the state directory and that path is returned.
     """
     api_key = _effective_image_api_key(settings)
     base_url = _effective_image_base_url(settings)
@@ -615,6 +695,11 @@ async def run_rich_iteration(
     age = rich_birthday_age(now)
     if birthday:
         log.info("run_rich_iteration: BIRTHDAY MODE active — age=%d", age)
+
+    micky_birthday = is_micky_birthday(now)
+    micky_age = micky_birthday_age(now)
+    if micky_birthday:
+        log.info("run_rich_iteration: MICKY BIRTHDAY MODE active — age=%d", micky_age)
 
     # Read state BEFORE editing
     image_history = format_history_for_prompt(settings.state_dir, max_items=12)
@@ -632,6 +717,19 @@ async def run_rich_iteration(
         original = base_image  # no distinct original → force single-image mode
     using_anchor = os.path.abspath(base_image) != os.path.abspath(original)
 
+    # Resolve Micky image path — fall back gracefully if absent
+    micky_path: str | None = None
+    if micky_birthday:
+        try:
+            micky_path = find_micky_image(_data_dir)
+        except FileNotFoundError:
+            log.warning(
+                "run_rich_iteration: micky.jpg not found in %s/rich/ — "
+                "falling back to normal (non-Micky) iteration",
+                _data_dir,
+            )
+            micky_birthday = False
+
     # Compute country-themed opulent props from yesterday's winners — best-effort
     themes = ""
     if winners and settings.openai_api_key and settings.openai_base_url and settings.openai_model:
@@ -642,23 +740,87 @@ async def run_rich_iteration(
             winners,
             _client=_caption_client,
         )
-    log.info("run_rich_iteration: iter=%d, base=%s, anchor=%s, winners=%s, themes=%r",
-             level, base_image, using_anchor, winners, themes)
+    log.info(
+        "run_rich_iteration: iter=%d, base=%s, anchor=%s, micky_birthday=%s, winners=%s, themes=%r",
+        level, base_image, using_anchor, micky_birthday, winners, themes,
+    )
 
     pose = random.choice(POSE_ACTIVITIES)
-    prompt = build_rich_prompt(history=image_history, anchor=using_anchor, themes=themes, pose=pose, birthday=birthday, age=age)
+    if micky_birthday:
+        # Micky birthday: Micky is protagonist; use micky_age for the birthday clause.
+        # birthday=False because July 10 is NOT rich's birthday.
+        prompt = build_rich_prompt(
+            history=image_history,
+            anchor=True,  # rich_original.jpg always included as 2nd ref
+            themes=themes,
+            pose=pose,
+            birthday=False,
+            age=micky_age,
+            micky_birthday=True,
+        )
+    else:
+        prompt = build_rich_prompt(
+            history=image_history,
+            anchor=using_anchor,
+            themes=themes,
+            pose=pose,
+            birthday=birthday,
+            age=age,
+        )
+
+    extra_paths = [micky_path] if micky_birthday and micky_path else None
+    # On Micky's birthday ensure anchor (rich_original.jpg) is always included
+    anchor_arg = original if (using_anchor or micky_birthday) else None
 
     png_bytes = await edit_rich_image(
         api_key=api_key,
         base_url=base_url,
         model=model,
         image_path=base_image,
-        anchor_path=(original if using_anchor else None),
+        anchor_path=anchor_arg,
+        extra_paths=extra_paths,
         prompt=prompt,
         _client=_client,
     )
 
     os.makedirs(settings.state_dir, exist_ok=True)
+
+    if micky_birthday:
+        # Micky birthday: write to a separate file, do NOT touch the evolution chain
+        # (rich_modified.png, level, history, captions stay unchanged so the next
+        # day's normal rich iteration continues cleanly from where it left off).
+        tmp_path = os.path.join(settings.state_dir, "rich_micky_birthday.new.png")
+        final_path = os.path.join(settings.state_dir, "rich_micky_birthday.png")
+        Path(tmp_path).write_bytes(png_bytes)
+
+        caption = f"🎂 ¡Feliz {micky_age} cumpleaños, Micky! Que los sigas cumpliendo a nuestra costa 🥂"
+        if settings.openai_api_key and settings.openai_base_url and settings.openai_model:
+            try:
+                caption, _memo = await generate_rich_caption(
+                    api_key=settings.openai_api_key,
+                    base_url=settings.openai_base_url,
+                    model=settings.openai_model,
+                    old_image_path=base_image,
+                    new_image_path=tmp_path,
+                    level=level,
+                    history=full_history,
+                    recent_captions=recent_captions,
+                    micky_birthday=True,
+                    age=micky_age,
+                    _client=_caption_client,
+                )
+            except Exception as exc:
+                log.warning("run_rich_iteration: Micky birthday caption failed: %s", exc)
+                caption = f"🎂 ¡Feliz {micky_age} cumpleaños, Micky! Que los sigas cumpliendo a nuestra costa 🥂"
+
+        if os.path.exists(final_path):
+            os.remove(final_path)
+        os.replace(tmp_path, final_path)
+        log.info("run_rich_iteration: Micky birthday image written %s (%d bytes)", final_path, len(png_bytes))
+        # Do NOT call save_level / append_history / append_caption — chain stays clean
+        return final_path, level, caption
+
+    # ── Normal (non-Micky) path ───────────────────────────────────────────────
     tmp_path = os.path.join(settings.state_dir, "rich_modified.new.png")
     Path(tmp_path).write_bytes(png_bytes)
 

@@ -3099,3 +3099,632 @@ class TestRichBirthdayMode:
 
         lower = caption.lower()
         assert "birthday" in lower or "cumpleaños" in lower or "42" in caption
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Micky birthday mode (July 10 every year)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMickyBirthdayMode:
+    """Tests for the Micky birthday special (July 10 every year).
+
+    Contract under test:
+    - MICKY_BIRTHDAY_MONTH=7, MICKY_BIRTHDAY_DAY=10, MICKY_BIRTH_YEAR=1984
+    - is_micky_birthday(now) → True iff month==7 and day==10
+    - micky_birthday_age(now) → now.year - MICKY_BIRTH_YEAR (42 in 2026, 43 in 2027)
+    - find_micky_image(data_dir) → data/rich/micky.jpg; raises FileNotFoundError if absent
+    - edit_rich_image(extra_paths=[micky_path]) → 3-element image list; all fhs closed
+    - build_rich_prompt(micky_birthday=True, age=42) → Micky protagonist clause + "42"
+    - generate_rich_caption(micky_birthday=True, age=42) → Micky felicitation in user parts
+    - run_rich_iteration(_now=July 10) → 3 images, rich_micky_birthday.png, chain untouched
+    - run_rich_iteration(_now=July 10, micky.jpg absent) → graceful fallback, rich_modified.png
+    - REGRESSION: July 8 still triggers rich birthday path; July 15 is a normal day
+    """
+
+    # ── is_micky_birthday ─────────────────────────────────────────────────────
+
+    def test_is_micky_birthday_true_on_july_10_2026(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_micky_birthday
+        import pytz
+        assert is_micky_birthday(datetime(2026, 7, 10, 10, 0, 0, tzinfo=pytz.UTC)) is True
+
+    def test_is_micky_birthday_true_another_year_july_10(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_micky_birthday
+        import pytz
+        assert is_micky_birthday(datetime(2030, 7, 10, 12, 0, 0, tzinfo=pytz.UTC)) is True
+
+    def test_is_micky_birthday_false_july_9(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_micky_birthday
+        import pytz
+        assert is_micky_birthday(datetime(2026, 7, 9, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_micky_birthday_false_july_11(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_micky_birthday
+        import pytz
+        assert is_micky_birthday(datetime(2026, 7, 11, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_micky_birthday_false_july_8_rich_birthday(self):
+        # July 8 is rich's birthday — NOT Micky's. Guards off-by-two-day confusion.
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_micky_birthday
+        import pytz
+        assert is_micky_birthday(datetime(2026, 7, 8, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_micky_birthday_false_oct_10_guards_month_day_transposition(self):
+        # Oct 10 has day==10 but wrong month — guards month/day transposition.
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_micky_birthday
+        import pytz
+        assert is_micky_birthday(datetime(2026, 10, 10, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    # ── micky_birthday_age ────────────────────────────────────────────────────
+
+    def test_micky_birthday_age_2026_is_42(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import micky_birthday_age, MICKY_BIRTH_YEAR
+        import pytz
+        age = micky_birthday_age(datetime(2026, 7, 10, tzinfo=pytz.UTC))
+        assert age == 2026 - MICKY_BIRTH_YEAR
+        assert age == 42  # explicit: 2026 - 1984
+
+    def test_micky_birthday_age_2027_is_43(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import micky_birthday_age
+        import pytz
+        age_2026 = micky_birthday_age(datetime(2026, 7, 10, tzinfo=pytz.UTC))
+        age_2027 = micky_birthday_age(datetime(2027, 7, 10, tzinfo=pytz.UTC))
+        assert age_2027 == age_2026 + 1
+        assert age_2027 == 43  # explicit: 2027 - 1984
+
+    # ── find_micky_image ──────────────────────────────────────────────────────
+
+    def test_find_micky_image_returns_jpg_when_present(self, tmp_path):
+        from worldcup_bot.ai.rich_image import find_micky_image
+        rich_dir = tmp_path / "rich"
+        rich_dir.mkdir(parents=True)
+        micky_jpg = rich_dir / "micky.jpg"
+        micky_jpg.write_bytes(b"MICKY")
+        result = find_micky_image(str(tmp_path))
+        assert os.path.abspath(result) == os.path.abspath(str(micky_jpg))
+
+    def test_find_micky_image_raises_file_not_found_when_absent(self, tmp_path):
+        from worldcup_bot.ai.rich_image import find_micky_image
+        (tmp_path / "rich").mkdir(parents=True)
+        with pytest.raises(FileNotFoundError):
+            find_micky_image(str(tmp_path))
+
+    # ── edit_rich_image — extra_paths ─────────────────────────────────────────
+
+    async def test_extra_paths_sends_list_of_three(self, tmp_path):
+        """With anchor + one extra_path, edit receives a 3-element image list."""
+        base_img = tmp_path / "base.jpg"
+        anchor_img = tmp_path / "anchor.jpg"
+        extra_img = tmp_path / "micky.jpg"
+        base_img.write_bytes(b"BASE")
+        anchor_img.write_bytes(b"ANCHOR")
+        extra_img.write_bytes(b"MICKY")
+        fake = _fake_client()
+        await edit_rich_image(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-image-2",
+            image_path=str(base_img),
+            anchor_path=str(anchor_img),
+            extra_paths=[str(extra_img)],
+            prompt="rich birthday micky",
+            _client=fake,
+        )
+        call_kwargs = fake.images.edit.call_args.kwargs
+        assert isinstance(call_kwargs["image"], list)
+        assert len(call_kwargs["image"]) == 3
+
+    async def test_extra_paths_file_handles_all_closed_after_call(self, tmp_path):
+        """ExitStack closes all file handles (base + anchor + extra) after edit returns."""
+        base_img = tmp_path / "base.jpg"
+        anchor_img = tmp_path / "anchor.jpg"
+        extra_img = tmp_path / "micky.jpg"
+        base_img.write_bytes(b"BASE")
+        anchor_img.write_bytes(b"ANCHOR")
+        extra_img.write_bytes(b"MICKY")
+        fake = _fake_client()
+        await edit_rich_image(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-image-2",
+            image_path=str(base_img),
+            anchor_path=str(anchor_img),
+            extra_paths=[str(extra_img)],
+            prompt="rich birthday micky",
+            _client=fake,
+        )
+        images = fake.images.edit.call_args.kwargs["image"]
+        assert all(fh.closed for fh in images)
+
+    async def test_extra_paths_none_preserves_two_image_behavior(self, tmp_path):
+        """extra_paths=None → existing 2-image path unchanged (regression guard)."""
+        base_img = tmp_path / "base.jpg"
+        anchor_img = tmp_path / "anchor.jpg"
+        base_img.write_bytes(b"BASE")
+        anchor_img.write_bytes(b"ANCHOR")
+        fake = _fake_client()
+        await edit_rich_image(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-image-2",
+            image_path=str(base_img),
+            anchor_path=str(anchor_img),
+            extra_paths=None,
+            prompt="rich",
+            _client=fake,
+        )
+        call_kwargs = fake.images.edit.call_args.kwargs
+        assert isinstance(call_kwargs["image"], list)
+        assert len(call_kwargs["image"]) == 2
+
+    # ── build_rich_prompt — micky_birthday parameter ──────────────────────────
+
+    def test_build_rich_prompt_micky_birthday_true_contains_age_and_protagonist_clause(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(micky_birthday=True, age=42)
+        assert "42" in p
+        lower = p.lower()
+        assert "micky" in lower
+        assert (
+            "birthday" in lower
+            or "cumpleaños" in lower
+            or "celebr" in lower
+            or "protagonist" in lower
+        )
+
+    def test_build_rich_prompt_micky_birthday_false_no_micky_clause(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(micky_birthday=False)
+        assert "micky" not in p.lower()
+        assert "MICKY" not in p
+
+    def test_build_rich_prompt_micky_birthday_augments_not_replaces(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt, RICH_EDIT_PROMPT
+        p = build_rich_prompt(micky_birthday=True, age=42)
+        assert p.startswith(RICH_EDIT_PROMPT)
+        assert "same face" in p.lower()
+
+    def test_build_rich_prompt_rich_birthday_flag_does_not_inject_micky(self):
+        """build_rich_prompt(birthday=True, micky_birthday=False) has rich clause, no Micky."""
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(birthday=True, age=42, micky_birthday=False)
+        assert "42" in p
+        assert "micky" not in p.lower()
+
+    # ── generate_rich_caption — micky_birthday parameter ─────────────────────
+
+    async def test_generate_rich_caption_micky_birthday_injects_felicitation_and_age(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("¡Feliz cumple Micky!")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            micky_birthday=True,
+            age=42,
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        all_text = ""
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                all_text += " " + content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        all_text += " " + part["text"]
+        assert "42" in all_text
+        lower = all_text.lower()
+        assert "micky" in lower
+        assert "felicit" in lower or "feliz" in lower or "cumpleaños" in lower
+
+    async def test_generate_rich_caption_no_micky_birthday_no_micky_instruction(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("normal caption")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=1,
+            micky_birthday=False,
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        all_text = ""
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                all_text += " " + content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        all_text += " " + part["text"]
+        assert "micky" not in all_text.lower()
+
+    # ── run_rich_iteration — July 10 end-to-end ───────────────────────────────
+
+    async def test_run_rich_iteration_micky_birthday_edit_gets_three_images(self, tmp_path):
+        """On July 10 with a pre-existing evolved image, edit receives 3 images."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (data_dir / "rich" / "micky.jpg").write_bytes(b"JPEG_MICKY")
+        # Pre-seed evolved image so base != original → 3-image path
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG_MICKY_RESULT").decode())
+        fake_cap = _fake_caption_client("¡Feliz Micky!")
+        micky_day = datetime(2026, 7, 10, 11, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=micky_day,
+        )
+
+        call_kwargs = fake_img.images.edit.call_args.kwargs
+        assert isinstance(call_kwargs["image"], list)
+        assert len(call_kwargs["image"]) == 3
+
+    async def test_run_rich_iteration_micky_birthday_prompt_has_micky_clause(self, tmp_path):
+        """On July 10, the image-edit prompt must contain Micky protagonist clause with age 42."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (data_dir / "rich" / "micky.jpg").write_bytes(b"JPEG_MICKY")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("¡Feliz Micky!")
+        micky_day = datetime(2026, 7, 10, 11, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=micky_day,
+        )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        assert "42" in img_prompt
+        lower = img_prompt.lower()
+        assert "micky" in lower
+        assert (
+            "birthday" in lower
+            or "cumpleaños" in lower
+            or "celebr" in lower
+            or "protagonist" in lower
+        )
+
+    async def test_run_rich_iteration_micky_birthday_output_is_separate_file(self, tmp_path):
+        """On July 10, output path is rich_micky_birthday.png, not rich_modified.png."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (data_dir / "rich" / "micky.jpg").write_bytes(b"JPEG_MICKY")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG_OUT").decode())
+        fake_cap = _fake_caption_client("¡Feliz Micky!")
+        micky_day = datetime(2026, 7, 10, 11, 0, 0, tzinfo=pytz.UTC)
+
+        out_path, level, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=micky_day,
+        )
+
+        assert os.path.basename(out_path) == "rich_micky_birthday.png"
+        assert Path(out_path).read_bytes() == b"PNG_OUT"
+
+    async def test_run_rich_iteration_micky_birthday_does_not_overwrite_rich_modified(self, tmp_path):
+        """On July 10, rich_modified.png is NOT overwritten (evolution chain stays clean)."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (data_dir / "rich" / "micky.jpg").write_bytes(b"JPEG_MICKY")
+        evolved_bytes = b"PNG_EVOLVED_UNTOUCHED"
+        (state_dir / "rich_modified.png").write_bytes(evolved_bytes)
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG_MICKY_NEW").decode())
+        fake_cap = _fake_caption_client("¡Feliz Micky!")
+        micky_day = datetime(2026, 7, 10, 11, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=micky_day,
+        )
+
+        assert (state_dir / "rich_modified.png").read_bytes() == evolved_bytes
+
+    async def test_run_rich_iteration_micky_birthday_level_not_bumped(self, tmp_path):
+        """On July 10, save_level is NOT called — level counter stays unchanged."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (data_dir / "rich" / "micky.jpg").write_bytes(b"JPEG_MICKY")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+        save_level(str(state_dir), 5)
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("¡Feliz Micky!")
+        micky_day = datetime(2026, 7, 10, 11, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=micky_day,
+        )
+
+        assert load_level(str(state_dir)) == 5
+
+    async def test_run_rich_iteration_micky_birthday_caption_has_micky_felicitation(self, tmp_path):
+        """On July 10, the caption messages sent to the chat model include Micky felicitation."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (data_dir / "rich" / "micky.jpg").write_bytes(b"JPEG_MICKY")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("¡Feliz cumpleaños Micky!")
+        micky_day = datetime(2026, 7, 10, 11, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=micky_day,
+        )
+
+        messages = fake_cap.chat.completions.create.call_args.kwargs["messages"]
+        all_text = ""
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                all_text += " " + content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        all_text += " " + part["text"]
+        assert "42" in all_text
+        lower = all_text.lower()
+        assert "micky" in lower
+        assert "felicit" in lower or "feliz" in lower or "cumpleaños" in lower
+
+    async def test_run_rich_iteration_micky_birthday_fallback_caption_when_no_chat(self, tmp_path):
+        """On July 10 with no chat model, fallback caption must be Micky birthday-aware."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (data_dir / "rich" / "micky.jpg").write_bytes(b"JPEG_MICKY")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(
+            tmp_path,
+            state_dir=str(state_dir),
+            openai_api_key="",
+            openai_base_url="",
+            openai_model="",
+        )
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        micky_day = datetime(2026, 7, 10, 11, 0, 0, tzinfo=pytz.UTC)
+
+        _, _, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _data_dir=str(data_dir),
+            _now=micky_day,
+        )
+
+        lower = caption.lower()
+        assert "micky" in lower
+        assert "42" in caption or "cumpleaños" in lower or "birthday" in lower
+
+    # ── run_rich_iteration — July 10, micky.jpg absent → graceful fallback ────
+
+    async def test_run_rich_iteration_micky_absent_falls_back_two_images(self, tmp_path):
+        """When micky.jpg is absent on July 10, falls back to normal 2-image path (no crash)."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        # Deliberately no micky.jpg
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG_FALLBACK").decode())
+        fake_cap = _fake_caption_client("normal")
+        micky_day = datetime(2026, 7, 10, 11, 0, 0, tzinfo=pytz.UTC)
+
+        out_path, level, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=micky_day,
+        )
+
+        call_kwargs = fake_img.images.edit.call_args.kwargs
+        assert isinstance(call_kwargs["image"], list)
+        assert len(call_kwargs["image"]) == 2
+
+    async def test_run_rich_iteration_micky_absent_output_is_rich_modified(self, tmp_path):
+        """When micky.jpg is absent on July 10, output falls back to rich_modified.png."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        # Deliberately no micky.jpg
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG_NORMAL").decode())
+        fake_cap = _fake_caption_client("normal")
+        micky_day = datetime(2026, 7, 10, 11, 0, 0, tzinfo=pytz.UTC)
+
+        out_path, level, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=micky_day,
+        )
+
+        assert os.path.basename(out_path) == "rich_modified.png"
+        assert Path(out_path).read_bytes() == b"PNG_NORMAL"
+
+    # ── REGRESSIONS ───────────────────────────────────────────────────────────
+
+    async def test_regression_rich_birthday_july_8_two_images_and_rich_modified(self, tmp_path):
+        """REGRESSION: July 8 (rich's birthday) still uses 2-image path and overwrites rich_modified.png."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_OLD")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG_BIRTHDAY").decode())
+        fake_cap = _fake_caption_client("¡Feliz cumple, rico!")
+        rich_birthday = datetime(2026, 7, 8, 11, 0, 0, tzinfo=pytz.UTC)
+
+        out_path, level, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=rich_birthday,
+        )
+
+        call_kwargs = fake_img.images.edit.call_args.kwargs
+        assert isinstance(call_kwargs["image"], list)
+        assert len(call_kwargs["image"]) == 2
+        assert os.path.basename(out_path) == "rich_modified.png"
+        assert Path(out_path).read_bytes() == b"PNG_BIRTHDAY"
+        img_prompt = call_kwargs["prompt"]
+        assert "42" in img_prompt
+        lower = img_prompt.lower()
+        assert (
+            "birthday" in lower
+            or "cumpleaños" in lower
+            or "cake" in lower
+            or "celebr" in lower
+        )
+
+    async def test_regression_normal_day_july_15_no_birthday_clause_rich_modified(self, tmp_path):
+        """REGRESSION: A normal non-birthday day (July 15) has no birthday clause."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_OLD")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG_NORMAL").decode())
+        fake_cap = _fake_caption_client("normal")
+        normal_day = datetime(2026, 7, 15, 11, 0, 0, tzinfo=pytz.UTC)
+
+        out_path, level, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=normal_day,
+        )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        lower = img_prompt.lower()
+        assert "birthday" not in lower
+        assert "cumpleaños" not in lower
+        assert "micky" not in lower
+        assert os.path.basename(out_path) == "rich_modified.png"
