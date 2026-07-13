@@ -1,3 +1,39 @@
+# Decisión: /perfil → teclado inline en lugar de lista de texto
+
+**Fecha:** 2026-07-13  
+**Autor:** Kanté  
+**Estado:** Implementado
+
+## Contexto
+
+El comando oculto `/perfil` mostraba en su rama sin-args un mensaje de texto plano con la lista de perfiles disponibles ("Uso: /perfil @usuario\n\nPerfiles disponibles: @pepe, @juan…"). Era funcional pero poco ergonómico: el usuario tenía que teclear el nombre manualmente.
+
+## Decisión
+
+Reemplazar la rama sin-args por un `InlineKeyboardMarkup` con un botón por perfil (`@{username}`, `callback_data="perfil:{username}"`), 2 por fila, en orden alfabético. Pulsar un botón edita el mismo mensaje con el perfil completo y elimina el teclado.
+
+## Diseño
+
+- **`_format_profile(profile: UserProfile) -> str`** (`handlers.py:1374`) — helper de módulo que centraliza el renderizado. Usado por `/perfil @usuario` (ruta directa) y por `cb_perfil_select` (callback).
+- **Teclado:** `InlineKeyboardMarkup` construido desde `sorted(profiles)`, filas de 2.
+- **`cb_perfil_select`** (`handlers.py:1481`) — `query.answer()` primero (ack spinner); carga perfiles vía `context.bot_data["picante_profiles_path"]`; si perfil existe → `edit_message_text(_format_profile(profile))` sin `reply_markup` (elimina el teclado en el mismo paso); si ya no existe → mensaje amistoso.
+- **Registro** (`__main__.py:2482`): `CallbackQueryHandler(cb_perfil_select, pattern=r"^perfil:")`.
+
+## Truco clave
+
+`await query.edit_message_text(text)` sin `reply_markup` elimina el teclado inline automáticamente — no se necesita una llamada separada a `edit_message_reply_markup`.
+
+## Compatibilidad
+
+`/perfil @usuario` (ruta con arg) funciona exactamente igual que antes. Sin args + sin perfiles → "No hay perfiles todavía…" (mismo texto que la ruta con arg cuando no hay perfiles).
+
+## Tests para Buffon
+
+Deben actualizarse:
+1. `TestCmdPerfil::test_no_args_empty_profiles_replies_simple_usage` — ahora espera "No hay perfiles todavía…" en lugar de "Uso: /perfil @usuario".
+2. `TestCmdPerfil::test_no_args_with_existing_profiles_lists_them` — ahora espera texto "Elige un perfil:" + `InlineKeyboardMarkup` con botones (no texto plano). Buffon debe añadir pruebas para `cb_perfil_select` (found, not_found, malformed_data, error_path).
+
+
 # Decision: /perfil hidden admin command
 
 **Date:** 2026-07-10  
@@ -2913,4 +2949,5 @@ This mirrors `_evolve_and_send_rich_image` / `rich_image_job` / `cmd_evil_sanche
 ## Test result
 
 2586 passed, 0 failures (full suite).
+
 

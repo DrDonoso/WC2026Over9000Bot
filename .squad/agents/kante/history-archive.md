@@ -13,3 +13,23 @@
 - **2026-07-01–2026-07-05:** /elecciones feature increments (MVP + image renderers + hourglass). Knockout matrix image (PIL, twemoji CDN flags). Phase-selector inline keyboard. CHOICES_TYPE env var. Cache with mtime+results hash. Multiple rejects (cache staleness, message split >4096) all fixed by Nesta on re-submission.
 
 - **2026-07-01–2026-07-03:** Podium image rendering feature. New src/worldcup_bot/bot/podium_image.py module. Circular crop + crown drawing + placeholder tiles. Album → text fallback chain. 45 edge-case tests.
+
+## Archived Sessions — 2026-07-10 Sessions
+
+### Micky Birthday Special (2026-07-10)
+
+- Added july-10 Micky birthday special image generation (separate pipeline, evolution chain isolation)
+- Implemented in ich_image.py with helpers: is_micky_birthday(), micky_birthday_age()
+- Generalized dit_rich_image with xtra_paths parameter
+- Tests: 251 existing green, 30 new tests added
+
+### Picante per-user profile system (2026-07-10)
+
+- Design: cost model analysis, 3-strategy evaluation (daily batch recommended)
+- Implementation: timeline_store.py, profiles.py, profile_updater.py
+- Feature: per-user profiles with rasgos, equipo, motes, temas, tono, piques_recientes
+- Picante prompt recalibration: balanced conditional context usage
+- Hidden commands: /perfil @usuario (inspector), /calcularperfiles (on-demand trigger)
+- Tests: 2586 passed (profiles feature OFF by default)
+
+_For complete details on these sessions, see the previous git history._
