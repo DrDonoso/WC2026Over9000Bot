@@ -1,9 +1,42 @@
 # Buffon — QA / Tester
 
 **Project:** WorldCup2026Over9000TelegramBot  
-**Current test count:** 2609 (as of 2026-07-10)
+**Current test count:** 2618 (as of 2026-07-13)
 
-## Current Session: 2026-07-10 — /calcularperfiles + _run_profile_update QA Gate (✅ APPROVE)
+## Current Session: 2026-07-13 — /perfil inline keyboard + cb_perfil_select QA Gate (✅ APPROVE)
+
+**Kanté's change:** `/perfil` no-args branch now shows an `InlineKeyboardMarkup` (one button per profile sorted alphabetically, 2 per row) with text `@{username}` and `callback_data="perfil:{username}"` instead of a plain text list. No-args + empty profiles now replies with the same "No hay perfiles todavía…" hint. New `cb_perfil_select` callback (pattern `r"^perfil:"`) answers the query, loads the selected profile, and edits the message with `_format_profile(profile)` (no `reply_markup` → keyboard removed); not-found → "Ese perfil (@{username}) ya no existe."; malformed/error → graceful with "💥" reply.
+
+**Tests updated (2 broken → green):**
+- `test_no_args_empty_profiles_replies_simple_usage` → renamed `test_no_args_empty_profiles_replies_no_profiles_hint`: asserts `"No hay perfiles todavía"` + `"PICANTE_PROFILES_ENABLED"` + `"04:00"` (was asserting `"Uso: /perfil @usuario"`).
+- `test_no_args_with_existing_profiles_lists_them`: now asserts `text == "Elige un perfil:"` + `isinstance(markup, InlineKeyboardMarkup)` + buttons contain `"@pepe"` / `"perfil:pepe"` (was asserting plain text list).
+
+**Tests added: 9 new tests in `tests/test_handlers.py` → new class `TestCbPerfilSelect`:**
+- `test_found_profile_answer_is_awaited`: `query.answer()` awaited on success.
+- `test_found_profile_edits_message_with_profile_text`: `edit_message_text` called with `"🕵️ Perfil de @pepe"` + key fields.
+- `test_found_profile_no_reply_markup_keyboard_removed`: `reply_markup` absent from `edit_message_text` kwargs (keyboard removed).
+- `test_not_found_edits_with_ya_no_existe`: ghost user → `"ya no existe"` + `"@ghost"` in text.
+- `test_malformed_data_empty_username_sends_hint`: `"perfil:"` → `"vacío"` in reply.
+- `test_malformed_data_no_colon_sends_hint`: `"perfil-bad"` → `"inesperados"` in reply.
+- `test_load_profiles_raises_no_exception_propagates`: RuntimeError → no exception escapes.
+- `test_load_profiles_raises_sends_error_edit`: RuntimeError → `"💥"` + `"Error mostrando el perfil"` in edit.
+- `test_uses_picante_profiles_path_from_bot_data`: `bot_data["picante_profiles_path"]` passed to `load_profiles`.
+
+**Imports added to `tests/test_handlers.py`:** `from telegram import InlineKeyboardMarkup`; `cb_perfil_select` added to handlers import block.
+
+**Outcome:** 2618 passed, 3 warnings, 0 regressions (+9 vs prior 2609). APPROVE ✅
+
+---
+
+## Learnings
+
+- `InlineKeyboardMarkup` instances are real objects (not MagicMock) even in handler tests — import from `telegram` and use `isinstance()` to assert type.
+- To assert keyboard is REMOVED after `edit_message_text(text)` (no kwargs): check `"reply_markup" not in call.kwargs`.
+- `call.kwargs["reply_markup"]` (not `call_args[1]["reply_markup"]`) is the idiomatic way to access keyword args via pytest-style call inspection.
+
+---
+
+
 
 **Kanté's change:** New hidden command `cmd_calcularperfiles` in `src/worldcup_bot/__main__.py` (~line 377), backed by the extracted shared helper `_run_profile_update` (~line 222). The helper is the core AI pipeline (load_since → AI pass → save_profiles → advance last_run); the job wraps it best-effort; the command exposes it on-demand with user feedback.
 
