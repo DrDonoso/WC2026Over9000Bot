@@ -83,7 +83,7 @@ from worldcup_bot.reddit.vergol_stats import load_stats as _vs_load_stats
 from worldcup_bot.reddit.vergol_stats import record_view as _vs_record_view
 from worldcup_bot.reddit.vergol_stats import save_stats as _vs_save_stats
 from worldcup_bot.reddit.video import VideoTooLargeError, compress_if_needed, probe_video
-from worldcup_bot.chat.profiles import get_profile, load_profiles
+from worldcup_bot.chat.profiles import UserProfile, get_profile, load_profiles
 from worldcup_bot.tve import load_tve_broadcasts, tve_channel_for
 
 log = logging.getLogger(__name__)
@@ -1370,6 +1370,42 @@ async def cmd_tongocheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # ── /perfil — hidden admin: inspect a user's picante auto-learned profile ──────
 
 
+def _format_profile(profile: UserProfile) -> str:
+    """Render a UserProfile as plain text for Telegram replies."""
+
+    def _val(v: str | None) -> str:
+        return v if v else "—"
+
+    def _list(items: list) -> str:
+        return ", ".join(str(i) for i in items) if items else "—"
+
+    lines = [
+        f"🕵️ Perfil de @{profile.username}",
+        "",
+        f"Rasgos:  {_val(profile.rasgos)}",
+        f"Equipo:  {_val(profile.equipo)}",
+        f"Motes:   {_list(profile.motes)}",
+        f"Temas:   {_list(profile.temas)}",
+        f"Tono:    {_val(profile.tono)}",
+    ]
+
+    if profile.pinned_fields:
+        lines.append(f"Fijados: {_list(profile.pinned_fields)}")
+
+    if profile.piques_recientes:
+        lines.append("")
+        lines.append("Piques recientes:")
+        for p in profile.piques_recientes:
+            ts = p.get("ts", "?")
+            texto = p.get("texto", "")
+            lines.append(f"  • [{ts}] {texto}")
+
+    lines.append("")
+    lines.append(f"Actualizado: {_val(profile.updated_at)}")
+
+    return "\n".join(lines)
+
+
 async def cmd_perfil(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Hidden admin: inspect a user's picante auto-learned profile. /perfil @usuario
 
@@ -1388,12 +1424,24 @@ async def cmd_perfil(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # ── Argument parsing ───────────────────────────────────────────────────
         if not context.args:
             if profiles:
-                available = ", ".join(f"@{u}" for u in sorted(profiles))
+                sorted_names = sorted(profiles)
+                rows = [
+                    [
+                        InlineKeyboardButton(f"@{u}", callback_data=f"perfil:{u}")
+                        for u in sorted_names[i : i + 2]
+                    ]
+                    for i in range(0, len(sorted_names), 2)
+                ]
                 await update.message.reply_text(
-                    f"Uso: /perfil @usuario\n\nPerfiles disponibles: {available}"
+                    "Elige un perfil:",
+                    reply_markup=InlineKeyboardMarkup(rows),
                 )
             else:
-                await update.message.reply_text("Uso: /perfil @usuario")
+                await update.message.reply_text(
+                    "No hay perfiles todavía. "
+                    "¿Está activada la feature (PICANTE_PROFILES_ENABLED=1) "
+                    "y ha corrido el job de las 04:00?"
+                )
             return
 
         raw = context.args[0].strip().lstrip("@").lower()
@@ -1420,43 +1468,53 @@ async def cmd_perfil(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
 
         # ── Format profile ─────────────────────────────────────────────────────
-        def _val(v: str | None) -> str:
-            return v if v else "—"
-
-        def _list(items: list) -> str:
-            return ", ".join(str(i) for i in items) if items else "—"
-
-        lines = [
-            f"🕵️ Perfil de @{profile.username}",
-            "",
-            f"Rasgos:  {_val(profile.rasgos)}",
-            f"Equipo:  {_val(profile.equipo)}",
-            f"Motes:   {_list(profile.motes)}",
-            f"Temas:   {_list(profile.temas)}",
-            f"Tono:    {_val(profile.tono)}",
-        ]
-
-        if profile.pinned_fields:
-            lines.append(f"Fijados: {_list(profile.pinned_fields)}")
-
-        if profile.piques_recientes:
-            lines.append("")
-            lines.append("Piques recientes:")
-            for p in profile.piques_recientes:
-                ts = p.get("ts", "?")
-                texto = p.get("texto", "")
-                lines.append(f"  • [{ts}] {texto}")
-
-        lines.append("")
-        lines.append(f"Actualizado: {_val(profile.updated_at)}")
-
-        await update.message.reply_text("\n".join(lines))
+        await update.message.reply_text(_format_profile(profile))
 
     except Exception:
         log.exception("cmd_perfil: error inesperado")
         await update.message.reply_text(
             "❌ Error inesperado inspeccionando el perfil. Revisa los logs."
         )
+
+
+async def cb_perfil_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback for /perfil inline keyboard: show selected profile and remove keyboard.
+
+    callback_data format: "perfil:{username}"
+    Edits the original message with the profile text (no reply_markup → keyboard removed).
+    """
+    query = update.callback_query
+    await query.answer()
+    try:
+        if not query.data or ":" not in query.data:
+            await query.edit_message_text("💥 Datos de callback inesperados.")
+            return
+
+        username = query.data.split(":", 1)[1].strip()
+        if not username:
+            await query.edit_message_text("💥 Nombre de usuario vacío en callback.")
+            return
+
+        settings: Settings = context.bot_data["settings"]
+        profiles_path: str = context.bot_data.get(
+            "picante_profiles_path",
+            f"{settings.state_dir}/picante_profiles.json",
+        )
+        profiles = load_profiles(profiles_path)
+        profile = get_profile(profiles, username)
+
+        if profile is None:
+            await query.edit_message_text(f"Ese perfil (@{username}) ya no existe.")
+            return
+
+        await query.edit_message_text(_format_profile(profile))
+
+    except Exception:
+        log.exception("cb_perfil_select: error inesperado")
+        try:
+            await query.edit_message_text("💥 Error mostrando el perfil, revisa los logs.")
+        except Exception:
+            pass
 
 
 # ── /recalcular — hidden admin: rebuild history with current scoring ──────────

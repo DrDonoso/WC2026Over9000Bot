@@ -59,6 +59,7 @@ from worldcup_bot.bot.handlers import (
     cmd_recalcular,
     cmd_tongocheck,
     cmd_perfil,
+    cb_perfil_select,
     cmd_ver_gol_callback,
     make_client,
 )
@@ -2478,6 +2479,7 @@ def build_app(settings: Settings) -> Application:
         CallbackQueryHandler(cmd_endirecto_goal_callback, pattern=r"^edgol\|"),
         CallbackQueryHandler(cmd_endirecto_callback, pattern=r"^ed\|"),
         CallbackQueryHandler(cmd_elecciones_callback, pattern=r"^elecciones\|"),
+        CallbackQueryHandler(cb_perfil_select, pattern=r"^perfil:"),
         # Test / utility
         CommandHandler("simulagol", cmd_simula_gol),
         CommandHandler("updatediario", cmd_update_diario),

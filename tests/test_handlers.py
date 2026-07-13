@@ -13,12 +13,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from telegram import InlineKeyboardMarkup
+
 from worldcup_bot.bot.handlers import (
     _MSG_NO_USERNAME,
     _MSG_USER_NOT_FOUND,
     _goal_token,
     _pick_random_goal,
     _send_ranking_with_top3_photos,
+    cb_perfil_select,
     cmd_actual,
     cmd_clasificacion,
     cmd_endirecto_callback,
@@ -3586,8 +3589,8 @@ class TestCmdPerfil:
         assert "No hay perfil para @nobody" in text
         assert "@pepe" in text  # listed in Perfiles disponibles
 
-    async def test_no_args_empty_profiles_replies_simple_usage(self, fake_settings):
-        """No args + empty profiles → simple 'Uso: /perfil @usuario' (no list)."""
+    async def test_no_args_empty_profiles_replies_no_profiles_hint(self, fake_settings):
+        """No args + empty profiles → 'No hay perfiles todavía' config hint (no 'Uso:' text)."""
         update = _make_update()
         context = _make_context(fake_settings, args=[])
 
@@ -3595,21 +3598,29 @@ class TestCmdPerfil:
             await cmd_perfil(update, context)
 
         text = update.message.reply_text.call_args[0][0]
-        assert "Uso: /perfil @usuario" in text
-        assert "Perfiles disponibles" not in text
+        assert "No hay perfiles todavía" in text
+        assert "PICANTE_PROFILES_ENABLED" in text
+        assert "04:00" in text
 
     async def test_no_args_with_existing_profiles_lists_them(self, fake_settings):
-        """No args + profiles exist → usage + 'Perfiles disponibles: @pepe'."""
+        """No args + profiles exist → 'Elige un perfil:' + InlineKeyboardMarkup with @pepe button."""
         update = _make_update()
         context = _make_context(fake_settings, args=[])
 
         with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
             await cmd_perfil(update, context)
 
-        text = update.message.reply_text.call_args[0][0]
-        assert "Uso: /perfil @usuario" in text
-        assert "Perfiles disponibles" in text
-        assert "@pepe" in text
+        call = update.message.reply_text.call_args
+        text = call[0][0]
+        assert text == "Elige un perfil:"
+        markup = call.kwargs["reply_markup"]
+        assert isinstance(markup, InlineKeyboardMarkup)
+        # Flatten all buttons across all rows
+        buttons = [btn for row in markup.inline_keyboard for btn in row]
+        button_texts = [b.text for b in buttons]
+        button_callbacks = [b.callback_data for b in buttons]
+        assert "@pepe" in button_texts
+        assert "perfil:pepe" in button_callbacks
 
     async def test_empty_profiles_with_arg_sends_config_hint(self, fake_settings):
         """Arg given but profiles empty → config hint with PICANTE_PROFILES_ENABLED + 04:00."""
@@ -3696,3 +3707,124 @@ class TestCmdPerfil:
             await cmd_perfil(update, context)
 
         mock_load.assert_called_once_with("custom/path/profiles.json")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# cb_perfil_select — /perfil inline keyboard callback
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_perfil_callback_update(data: str) -> MagicMock:
+    """Build a fake Update with a CallbackQuery for cb_perfil_select tests."""
+    update = MagicMock()
+    update.callback_query = MagicMock()
+    update.callback_query.data = data
+    update.callback_query.answer = AsyncMock()
+    update.callback_query.edit_message_text = AsyncMock()
+    return update
+
+
+class TestCbPerfilSelect:
+    """Tests for cb_perfil_select — inline keyboard callback that shows a picked profile."""
+
+    async def test_found_profile_answer_is_awaited(self, fake_settings):
+        """perfil:pepe → query.answer() is awaited."""
+        update = _make_perfil_callback_update("perfil:pepe")
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cb_perfil_select(update, context)
+
+        update.callback_query.answer.assert_awaited_once()
+
+    async def test_found_profile_edits_message_with_profile_text(self, fake_settings):
+        """perfil:pepe → edit_message_text called with formatted profile (key fields present)."""
+        update = _make_perfil_callback_update("perfil:pepe")
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cb_perfil_select(update, context)
+
+        update.callback_query.edit_message_text.assert_awaited_once()
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        assert "🕵️ Perfil de @pepe" in text
+        assert "Muy picante y provocador" in text
+        assert "Argentina" in text
+
+    async def test_found_profile_no_reply_markup_keyboard_removed(self, fake_settings):
+        """perfil:pepe → edit_message_text has no reply_markup (keyboard removed)."""
+        update = _make_perfil_callback_update("perfil:pepe")
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cb_perfil_select(update, context)
+
+        call = update.callback_query.edit_message_text.call_args
+        assert "reply_markup" not in call.kwargs or call.kwargs.get("reply_markup") is None
+
+    async def test_not_found_edits_with_ya_no_existe(self, fake_settings):
+        """perfil:ghost (absent) → edit_message_text contains 'ya no existe' and '@ghost'."""
+        update = _make_perfil_callback_update("perfil:ghost")
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()):
+            await cb_perfil_select(update, context)
+
+        update.callback_query.answer.assert_awaited_once()
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        assert "ya no existe" in text
+        assert "@ghost" in text
+
+    async def test_malformed_data_empty_username_sends_hint(self, fake_settings):
+        """'perfil:' (colon but empty username) → graceful; 'vacío' in reply."""
+        update = _make_perfil_callback_update("perfil:")
+        context = _make_context(fake_settings)
+
+        await cb_perfil_select(update, context)
+
+        update.callback_query.answer.assert_awaited_once()
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        assert "vacío" in text
+
+    async def test_malformed_data_no_colon_sends_hint(self, fake_settings):
+        """'perfil-bad' (no colon) → graceful; 'inesperados' in reply."""
+        update = _make_perfil_callback_update("perfil-bad")
+        context = _make_context(fake_settings)
+
+        await cb_perfil_select(update, context)
+
+        update.callback_query.answer.assert_awaited_once()
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        assert "inesperados" in text
+
+    async def test_load_profiles_raises_no_exception_propagates(self, fake_settings):
+        """load_profiles raises → no exception escapes cb_perfil_select."""
+        update = _make_perfil_callback_update("perfil:pepe")
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", side_effect=RuntimeError("disco lleno")):
+            await cb_perfil_select(update, context)  # must not raise
+
+    async def test_load_profiles_raises_sends_error_edit(self, fake_settings):
+        """load_profiles raises → edit_message_text called with '💥 Error mostrando el perfil'."""
+        update = _make_perfil_callback_update("perfil:pepe")
+        context = _make_context(fake_settings)
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", side_effect=RuntimeError("disk full")):
+            await cb_perfil_select(update, context)
+
+        text = update.callback_query.edit_message_text.call_args[0][0]
+        assert "💥" in text
+        assert "Error mostrando el perfil" in text
+
+    async def test_uses_picante_profiles_path_from_bot_data(self, fake_settings):
+        """cb_perfil_select reads picante_profiles_path from bot_data."""
+        update = _make_perfil_callback_update("perfil:pepe")
+        context = _make_context(fake_settings)
+        context.bot_data["picante_profiles_path"] = "custom/cb/profiles.json"
+
+        with patch("worldcup_bot.bot.handlers.load_profiles", return_value=_make_pepe_profile()) as mock_load:
+            await cb_perfil_select(update, context)
+
+        mock_load.assert_called_once_with("custom/cb/profiles.json")
+
