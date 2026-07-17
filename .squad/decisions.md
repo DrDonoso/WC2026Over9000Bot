@@ -1,3 +1,242 @@
+### 2026-07-17T15:13:00+02:00: Architecture & Correctness Review — feat/rich-apex-death
+
+**By:** Pirlo (Lead / Tech Lead)  
+**Branch:** `feat/rich-apex-death`  
+**Commits reviewed:** `a76e222`, `7680612`, `79a0253` (3 commits vs main)  
+**Author:** Kanté  
+**Requested by:** DrDonoso
+
+---
+
+## VERDICT: ✅ APPROVED
+
+The implementation is clean, correct, and follows the existing patterns precisely.
+
+---
+
+## Review by Focus Area
+
+### 1. Date detection ✅
+
+- `is_rich_apex`: `month==7 and day==20` — fires only on July 20.
+- `is_rich_death`: `month==7 and day==21` — fires only on July 21.
+- No collision: Rich birthday is 7/8, Micky birthday is 7/10. All four dates are mutually exclusive.
+- Precedence in `run_rich_iteration` is clean: `if micky_birthday → elif death → else (normal+apex)`. Output chain: `if micky_birthday: return → if death: return → normal/apex path`. Since the dates never overlap, precedence is academic but correctly ordered.
+
+### 2. Chain handling ✅ (critical)
+
+- **APEX (7/20)**: falls through to the normal promote path — writes `rich_modified.png`, calls `save_level()`, `append_history()`, `append_caption()`. Correct as the culmination of the daily escalation arc.
+- **DEATH (7/21)**: writes to `rich_death.png` (separate file), returns early BEFORE the normal path. Does NOT call `save_level` / `append_history` / `append_caption`. `rich_modified.png` is untouched — the evolution chain is preserved for any hypothetical next-day continuation. Mirrors the Micky birthday pattern exactly. Confirmed: death truly leaves the chain untouched.
+
+### 3. Winner/loser plumbing ✅
+
+- `apex_country = winners[0] if (apex and winners) else ""` — safe on empty/None lists (`and winners` short-circuits). ✓
+- `apex_loser = losers[0] if (apex and losers) else ""` — same pattern. ✓
+- `_fetch_yesterday_losers`: correctly inverts the winner logic (`home_name` when `AWAY_TEAM` wins, `away_name` when `HOME_TEAM` wins, skips draws/None). Mirrors `_fetch_yesterday_winners` structure. Best-effort (never raises). ✓
+- On July 20, `day_offset=-1` fetches July 19 matches (the Final day). The match will be FINISHED by 10:00 the next morning — no real risk.
+
+### 4. Graceful degradation ✅
+
+- Empty country → `RICH_APEX_CLAUSE.format(country="the champion nation")` — no dangling `{country}`.
+- Empty loser → trample sentence guarded by `if apex_loser:` — omitted entirely, no dangling `{loser}`.
+- Caption generation has `try/except` fallbacks for both apex (`"🌍 El ser más rico del universo. Todo es mío."`) and death (`"🕊️ Me marcho... os quiero a todos. Gracias por tanto. ❤️"`).
+- Failed AI caption never breaks the image send.
+- `generate_rich_caption` constructs `country_sentence`/`loser_sentence` as empty strings when inputs are empty — no dangling text.
+
+### 5. __main__ auto-behaviour ✅
+
+- `_evolve_and_send_rich_image` calls both `_fetch_yesterday_winners` and `_fetch_yesterday_losers`, passes both to `run_rich_iteration`. ✓
+- Sends `out_path` as-is: apex → `rich_modified.png`, death → `rich_death.png`. ✓
+- No new commands added. No interference with `rich_image_job`, `cmd_evil_sanchez`, or any other job/handler.
+- Seam is clean: Telegram layer (`__main__`) handles fetch + send; football client stays in `__main__` via `_fetch_yesterday_*`; rich-image logic stays in `rich_image.py`.
+
+### 6. Cost/behaviour ✅
+
+- `generate_wealth_themes` skipped on both apex and death (`and not apex and not death`). No redundant AI calls.
+- Single image generation + single caption generation per iteration. No double-generation.
+
+### 7. Production risk on 7/20–7/21 ✅
+
+- **Timezone**: `now` uses `pytz.timezone(settings.timezone)` — respects the configured group timezone. The 10:00 job will fire with the correct date.
+- **Match availability**: The Final (July 19 evening) will be FINISHED in the Football Data API well before 10:00 on July 20. No real risk.
+- **Death day (7/21)**: `_fetch_yesterday_losers` looks at July 20 (no matches) → returns `[]`. Death doesn't use winners/losers, so this is irrelevant.
+
+---
+
+## Non-blocking nits
+
+1. **`using_anchor or True` is always `True`** (line ~917 in the death prompt branch). The expression is redundant — `anchor=True` would be clearer. Not a bug, just noise. The comment already says "always try to anchor face for death", so intent is correct.
+
+---
+
+## Tests (skim)
+
+~985 lines added across `TestRichApexMode` and `TestRichDeathMode`. Coverage looks solid:
+- Date predicates (true/false, boundary days, month-transposition guards)
+- `build_rich_prompt` with all flag combinations (apex/death on/off, country/loser empty/present, clause ordering)
+- `generate_rich_caption` system prompt swap (death uses `RICH_DEATH_CAPTION_PROMPT`, apex keeps cocky default)
+- `run_rich_iteration` end-to-end: output file identity, level increment/no-increment, history/captions append/no-append, prompt content, theme skipping, fallback captions
+- Buffon owns test depth; from an architecture perspective, the test contracts match the code contracts.
+
+---
+
+### 2026-07-17T13:54:00+02:00: QA Verdict — feat/rich-apex-death (Apex & Death special days)
+
+**Reviewer:** Buffon (QA)  
+**Branch:** `feat/rich-apex-death`  
+**Date:** 2026-07-17  
+**Verdict:** ✅ **APPROVE** (with tests added by reviewer)
+
+---
+
+## Summary
+
+Kanté's implementation of the Apex (July 20) and Death (July 21) special days is
+solid and well-covered.  The code logic is correct: Apex uses the normal promote
+path; Death mirrors Micky (separate file, chain untouched).
+
+One gap was found and filled by QA (Buffon): `_fetch_yesterday_losers` in
+`__main__.py` had zero test coverage.  13 focused unit tests were added to
+`tests/test_main_calcularperfiles.py`.
+
+---
+
+## Coverage Audit
+
+### ✅ Covered by Kanté's tests (tests/test_rich_image.py)
+
+| Area | Tests | Status |
+|------|-------|--------|
+| `is_rich_apex` boundaries (true 7/20, false 7/19, 7/21, 7/8, 1/20) | 6 | ✅ |
+| `is_rich_death` boundaries (true 7/21, false 7/20, 7/22, 7/8, 1/21) | 6 | ✅ |
+| `build_rich_prompt(apex=True)` — language, country, loser, order, no-dangling-braces | 10 | ✅ |
+| `build_rich_prompt(death=True)` — language, non-gory, clause-before-anchor | 6 | ✅ |
+| `generate_rich_caption(apex=True)` — system prompt, country, loser, no-loser | 5 | ✅ |
+| `generate_rich_caption(death=True)` — system prompt swap, farewell instruction | 3 | ✅ |
+| `run_rich_iteration` Apex (July 20): promotes to `rich_modified.png`, level++, no themes, losers in prompt, no dangling braces, empty-winners/losers | 9 | ✅ |
+| `run_rich_iteration` Death (July 21): `rich_death.png`, NOT `rich_modified.png`, level unchanged, history/captions untouched, death system prompt, fallback caption, no themes | 8 | ✅ |
+| `RICH_DEATH_CAPTION_PROMPT` constant content checks | 4 | ✅ |
+
+### ❌ Gap found (filled by QA)
+
+| Area | Tests added | File |
+|------|-------------|------|
+| `_fetch_yesterday_losers` — home/away wins, draw excluded, None winner excluded, IN_PLAY excluded, SCHEDULED excluded, empty list, multiple matches, all-draws, API exception (never raises), unexpected exception, day_offset=-1, return type | 13 | `tests/test_main_calcularperfiles.py` |
+
+---
+
+## Test Counts
+
+| Point | Count |
+|-------|-------|
+| Before this feature (main) | 2684 |
+| After Kanté's tests (branch, before QA) | 2740 |
+| After QA additions | **2753** |
+
+All 2753 tests pass (`python -m pytest -q`: `2753 passed, 3 warnings`).
+
+---
+
+## No Code Defects Found
+
+The implementation is correct:
+- Apex uses normal promote path (level++, `rich_modified.png`, history/captions appended)
+- Death mirrors Micky exactly (separate `rich_death.png`, chain untouched)
+- `RICH_DEATH_CAPTION_PROMPT` is swapped in as system message for death captions
+- Apex clause correctly formats `{country}` / `{loser}` (no dangling braces on empty inputs)
+- `_fetch_yesterday_losers` is best-effort and never raises
+- `winners` and `losers` are correctly wired into `run_rich_iteration` in `__main__`
+
+No lockout required.  No DIFFERENT agent revision needed.
+
+---
+
+## Commit
+
+Tests committed on `feat/rich-apex-death` — see commit for SHA.
+
+---
+
+### 2026-07-17T14:27:00+02:00: Maldini — Deploy Decision: feat/rich-apex-death → main
+**Date:** 2026-07-17  
+**Status:** ✅ COMPLETE — rebased + pushed + CI triggered
+
+---
+
+## Merge Performed (local)
+
+- **Merge type:** `--ff-only` (fast-forward) — succeeded cleanly
+- **Pre-merge main HEAD:** `f268574`
+- **Post-merge main HEAD (local):** `3a58983` ← new tip
+- **Commits merged:** `a76e222`, `7680612`, `79a0253`, `3a58983`
+- **Files changed:** `src/worldcup_bot/__main__.py`, `src/worldcup_bot/ai/rich_image.py`, `tests/test_main_calcularperfiles.py`, `tests/test_rich_image.py` (+1435 / −14)
+
+---
+
+## Push Result: REJECTED
+
+```
+! [rejected]   main -> main (fetch first)
+error: failed to push some refs to 'https://github.com/DrDonoso/WC2026Over9000Bot.git'
+hint: Updates were rejected because the remote contains work that you do not have locally.
+```
+
+### Root cause
+
+After the local `f268574` bookkeeping commit was added, `github-actions[bot]` landed an automated changelog commit on `origin/main`:
+
+```
+159e65a  docs: update changelog for 20260717 [skip ci]
+         CHANGELOG.md  +10 lines, 1 file changed
+         Author: github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>
+         Date:   Fri Jul 17 11:13:31 2026 +0000
+```
+
+**Divergence diagram:**
+
+```
+origin/main:  a73f12e → 159e65a
+local  main:  a73f12e → f268574 → a76e222 → 7680612 → 79a0253 → 3a58983
+```
+
+---
+
+## Safe Options (no force-push)
+
+**Option A — `git pull --no-rebase origin main` then push**  
+Creates a merge commit absorbing `159e65a` into local main, then pushes normally.  
+Pros: Preserves full history. Cons: Adds a trivial merge commit for a bot changelog entry.
+
+**Option B — `git rebase origin/main` then push**  
+Rebases local commits (`f268574`..`3a58983`) on top of `159e65a`.  
+Pros: Linear history, no merge commit. Cons: rewrites local SHAs (safe since none were pushed yet).
+
+**Option C — Coordinate with David**  
+Pause and await explicit approval of Option A or B before proceeding.
+
+---
+
+## Auth / CI
+
+- **GitHub auth:** DrDonoso (active) ✓ — `gh auth status` confirmed before push attempt.
+- **Feature branch:** `feat/rich-apex-death` left intact per instructions.
+- **CI run:** None triggered yet (push was rejected before CI could fire).
+- **No force-push was attempted.** 
+
+---
+
+## Resolution (David approved Option B)
+
+- **Action:** `git rebase origin/main` — clean, no conflicts (bot only touched `CHANGELOG.md`)
+- **Rebased HEAD (new main tip):** `cba7fae` (rebased `3a58983`)
+- **Push range:** `159e65a..cba7fae  main -> main` — accepted, no force needed
+- **CI run:** `Build and Deploy Docker Image` — `in_progress` (run #29584668354)
+  - URL: https://github.com/DrDonoso/WC2026Over9000Bot/actions/runs/29584668354
+  - Triggered by `push` event on `main`, headSha `cba7fae`
+- **Feature branch `feat/rich-apex-death`:** left intact (not deleted).
+
+---
+
 ### 2026-07-17T13:11:00Z: Deploy — feat/final-weekend → main
 
 **By:** Maldini (DevOps)  

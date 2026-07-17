@@ -34,6 +34,26 @@ Three new REVIVE env vars: REVIVE_JITTER_SECONDS (±45 min randomization), REVIV
 
 
 
+### ✅ Merge feat/final-weekend → main (2026-07-17)
+- **Branch merged:** `feat/final-weekend` (5 commits: THIRD_PLACE scoring + Final ceremony + tests + docs)
+- **Merge type:** `--no-ff` merge commit (main had advanced 1 commit beyond branch point: `0435a2c` docs CHANGELOG)
+- **New main HEAD:** `a73f12e` — _Merge feat/final-weekend: 3.o/4.o puesto + ceremonia final_
+- **Push:** `git push origin main` — accepted, no force needed
+- **CI triggered:** Run #29576019606 "Build and Deploy Docker Image" — `in_progress` at push time
+  - URL: https://github.com/DrDonoso/WC2026Over9000Bot/actions/runs/29576019606
+- **Auth:** DrDonoso (active), `gh auth status` confirmed before push.
+- **Feature branch:** `feat/final-weekend` left intact (not deleted).
+
+### ✅ Merge feat/rich-apex-death → main (2026-07-17)
+- **Branch:** `feat/rich-apex-death` (4 commits: Apex July-20 + Death July-21 rich image; approved by Pirlo & Buffon; 2753 tests green)
+- **Merge type:** Fast-forward locally, then **rebase** (Option B, David approved) — origin/main had received `159e65a` (bot CHANGELOG commit) during the window; rebased cleanly, no conflicts.
+- **Push range:** `159e65a..cba7fae  main -> main` — accepted, no force needed.
+- **New origin/main HEAD:** `cba7fae` (rebased tip of `3a58983`)
+- **CI triggered:** Run #29584668354 "Build and Deploy Docker Image" — **in_progress**
+  - URL: https://github.com/DrDonoso/WC2026Over9000Bot/actions/runs/29584668354
+  - Awaiting completion; if successful, feature live in production
+- **Feature branch `feat/rich-apex-death`:** left intact (not deleted).
+
 Earlier sessions (2026-06-15 through 2026-06-26): Phase 1 scaffold, SSL remediation, ffmpeg, named-volume ownership, auto-changelog, tongo env wiring, TVE feature, clip disk investigation. See `history-archive.md`.
 
 

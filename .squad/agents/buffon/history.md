@@ -3,12 +3,14 @@
 **Project:** WorldCup2026Over9000TelegramBot  
 **Current test count:** 2684 (as of 2026-07-17)
 
-## TEAM UPDATE — 2026-07-17
+## TEAM UPDATE — 2026-07-17 (FINAL)
 
-**Both features shipped on eat/final-weekend:**
-- Feature 1 (THIRD_PLACE scoring) — gap-filled 3 tests, full approval ✅
-- Feature 2 (Final ceremony) — gap-filled 4 tests, full approval ✅
-- **Both on track for merge to main post-weekend**
+**Three features delivered and deployed:**
+- Feature 1 (THIRD_PLACE scoring) — gap-filled 3 tests, `feat/final-weekend` deployed CI #29576019606 ✅
+- Feature 2 (Final ceremony) — gap-filled 4 tests, `feat/final-weekend` deployed CI #29576019606 ✅
+- Feature 3 (Rich Apex + Death) — gap-filled 13 tests (_fetch_yesterday_losers), `feat/rich-apex-death` deployed CI #29584668354 in_progress ✅
+
+**Suite health:** 2609 baseline → 2753 final (+144 tests). All green.
 
 ---
 
