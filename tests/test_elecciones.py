@@ -94,6 +94,9 @@ class TestPhaseLabel:
     def test_semi_finals(self):
         assert phase_label("semi_finals") == "Semifinales"
 
+    def test_third_place(self):
+        assert phase_label("third_place") == "3.º y 4.º Puesto"
+
     def test_final(self):
         assert phase_label("final") == "La Final"
 
@@ -189,6 +192,33 @@ class TestActivePhases:
         order = ["grupos", "round_of_32", "round_of_16", "quarter_finals", "semi_finals", "final"]
         filtered = [p for p in order if p in result]
         assert result == filtered
+
+    def test_third_place_active_when_pick_present(self):
+        """third_place appears in active_phases when a participant has picks for it."""
+        ko = _make_knockout(third_place=["FRA"])
+        preds = _make_predictions({"u": {"display_name": "U", "groups": _make_groups(), "knockout": ko}})
+        result = active_phases(preds)
+        assert "third_place" in result
+
+    def test_third_place_absent_when_no_picks(self):
+        """third_place is NOT active when picks list is empty."""
+        ko = _make_knockout(third_place=[])
+        preds = _make_predictions({"u": {"display_name": "U", "groups": _make_groups(), "knockout": ko}})
+        result = active_phases(preds)
+        assert "third_place" not in result
+
+    def test_third_place_between_semi_finals_and_final(self):
+        """third_place appears between semi_finals and final in active_phases order."""
+        ko = _make_knockout(third_place=["FRA"])
+        preds = _make_predictions({"u": {"display_name": "U", "groups": _make_groups(), "knockout": ko}})
+        result = active_phases(preds)
+        assert "third_place" in result
+        assert "semi_finals" in result
+        assert "final" in result
+        semi_idx = result.index("semi_finals")
+        tp_idx = result.index("third_place")
+        final_idx = result.index("final")
+        assert semi_idx < tp_idx < final_idx
 
     def test_two_users_one_with_picks(self):
         """Phase appears if ANY user has picks, not all."""
@@ -320,6 +350,18 @@ class TestBuildKnockoutText:
         result = build_knockout_text(ties, users, "round_of_32", _flag)
         for msg in result:
             assert len(msg) <= 4096
+
+    def test_third_place_header_rendered(self):
+        """third_place uses the 🥉 header from _KNOCKOUT_HEADERS."""
+        participants = {
+            "user1": {
+                "display_name": "Alice",
+                "knockout": {"third_place": ["FRA"]},
+            }
+        }
+        result = build_knockout_text([("FRA", "ENG")], participants, "third_place", _flag)
+        assert "3.º Y 4.º PUESTO" in result[0]
+        assert "🥉" in result[0]
 
 
 # ── build_groups_text ─────────────────────────────────────────────────────────

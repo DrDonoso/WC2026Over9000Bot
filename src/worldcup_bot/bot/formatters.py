@@ -22,10 +22,9 @@ if TYPE_CHECKING:
     from worldcup_bot.porra.camps import MatchCamps
 
 # Knockout stage API names — matches in these stages can never end level.
-# THIRD_PLACE is not in KNOCKOUT_STAGES (no elecciones points) but is still
-# single-elimination, so we include it here explicitly.
-_KNOCKOUT_STAGE_NAMES: frozenset[str] = (
-    frozenset(api for api, _, _ in KNOCKOUT_STAGES) | {"THIRD_PLACE"}
+# THIRD_PLACE is now a scored knockout stage (included via KNOCKOUT_STAGES).
+_KNOCKOUT_STAGE_NAMES: frozenset[str] = frozenset(
+    api for api, _, _ in KNOCKOUT_STAGES
 )
 
 # ── person-name bolding ───────────────────────────────────────────────────────

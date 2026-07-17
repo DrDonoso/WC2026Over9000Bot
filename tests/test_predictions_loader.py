@@ -45,6 +45,7 @@ participants:
       round_of_16: [ESP, FRA, ARG, BRA, GER, ENG, POR, NED]
       quarter_finals: [ESP, FRA, ARG, BRA]
       semi_finals: [ESP, FRA]
+      third_place: [FRA]
       final: [ESP]
 """
 
@@ -72,6 +73,7 @@ participants:
       round_of_16: [GER, ESP, BRA, ARG, ENG, FRA, NED, POR]
       quarter_finals: [GER, ESP, BRA, ARG]
       semi_finals: [GER, ESP]
+      third_place: [GER]
       final: [GER]
 """
 
@@ -96,6 +98,7 @@ _KO_BLOCK = """\
       round_of_16: [ESP, FRA, ARG, BRA, GER, ENG, POR, NED]
       quarter_finals: [ESP, FRA, ARG, BRA]
       semi_finals: [ESP, FRA]
+      third_place: [FRA]
       final: [ESP]"""
 
 
@@ -167,8 +170,9 @@ class TestLoadValidYaml:
         p.write_text(VALID_YAML_1)
         result = load(str(p))
         ko = result["participants"]["user1"]["knockout"]
-        assert set(ko.keys()) == {"round_of_32", "round_of_16", "quarter_finals", "semi_finals", "final"}
+        assert set(ko.keys()) == {"round_of_32", "round_of_16", "quarter_finals", "semi_finals", "third_place", "final"}
         assert ko["final"] == ["ESP"]
+        assert ko["third_place"] == ["FRA"]
 
     def test_tlas_uppercased_on_load(self, tmp_path):
         yaml_with_lower = VALID_YAML_1.replace("A: [ESP, FRA, GER]", "A: [esp, fra, ger]")
@@ -235,6 +239,65 @@ class TestLoadInvalidCases:
         p.write_text("key: [unclosed bracket")
         result = load(str(p))
         assert result == {"participants": {}}
+
+
+class TestLoadKnockoutTolerantValidation:
+    """Tolerant-validation: missing knockout keys default to []; unknown keys skip user."""
+
+    def test_missing_third_place_key_user_loaded_not_skipped(self, tmp_path):
+        """A participant missing 'third_place' is loaded; the key is defaulted to []."""
+        ko_without_tp = """\
+      round_of_32: [ESP, FRA, ARG, BRA, GER, ENG, POR, NED, COL, MEX, USA, JPN, MAR, BEL, CRO, ITA]
+      round_of_16: [ESP, FRA, ARG, BRA, GER, ENG, POR, NED]
+      quarter_finals: [ESP, FRA, ARG, BRA]
+      semi_finals: [ESP, FRA]
+      final: [ESP]"""
+        p = tmp_path / "preds.yml"
+        p.write_text(_user_block("user1", _GROUPS_BLOCK, ko_without_tp))
+        result = load(str(p))
+        assert "user1" in result["participants"]
+        ko = result["participants"]["user1"]["knockout"]
+        assert ko["third_place"] == []
+
+    def test_missing_any_knockout_key_user_loaded(self, tmp_path):
+        """Missing 'semi_finals' is also tolerated and defaulted to []."""
+        ko_no_semi = """\
+      round_of_32: [ESP, FRA, ARG, BRA, GER, ENG, POR, NED, COL, MEX, USA, JPN, MAR, BEL, CRO, ITA]
+      round_of_16: [ESP, FRA, ARG, BRA, GER, ENG, POR, NED]
+      quarter_finals: [ESP, FRA, ARG, BRA]
+      third_place: [FRA]
+      final: [ESP]"""
+        p = tmp_path / "preds.yml"
+        p.write_text(_user_block("user1", _GROUPS_BLOCK, ko_no_semi))
+        result = load(str(p))
+        assert "user1" in result["participants"]
+        assert result["participants"]["user1"]["knockout"]["semi_finals"] == []
+
+    def test_missing_key_stored_knockout_has_all_yaml_keys(self, tmp_path):
+        """All KNOCKOUT_YAML_KEYS are present in the stored knockout regardless of input."""
+        from worldcup_bot.porra.predictions import _KNOCKOUT_YAML_KEYS
+
+        ko_empty = "      round_of_32: []"  # only one key present
+        p = tmp_path / "preds.yml"
+        p.write_text(_user_block("user1", _GROUPS_BLOCK, ko_empty))
+        result = load(str(p))
+        assert "user1" in result["participants"]
+        assert set(result["participants"]["user1"]["knockout"].keys()) == _KNOCKOUT_YAML_KEYS
+
+    def test_unknown_knockout_key_still_skips_user(self, tmp_path):
+        """A participant with an unrecognised knockout key IS still skipped (typo guard)."""
+        ko_with_typo = """\
+      round_of_32: []
+      round_of_16: []
+      quarter_finals: []
+      semi_finals: []
+      third_place: []
+      final: []
+      typo_key: []"""
+        p = tmp_path / "preds.yml"
+        p.write_text(_user_block("baduser", _GROUPS_BLOCK, ko_with_typo))
+        result = load(str(p))
+        assert "baduser" not in result["participants"]
 
 
 class TestLoadHotReload:

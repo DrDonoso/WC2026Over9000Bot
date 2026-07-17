@@ -156,12 +156,11 @@ def _validate(raw: dict) -> dict:
             log.error("User %r: 'knockout' must be a mapping — skipping.", uname)
             continue
 
-        if set(knockout_raw.keys()) != _KNOCKOUT_YAML_KEYS:
-            missing = _KNOCKOUT_YAML_KEYS - set(knockout_raw.keys())
-            extra = set(knockout_raw.keys()) - _KNOCKOUT_YAML_KEYS
+        extra_keys = set(knockout_raw.keys()) - _KNOCKOUT_YAML_KEYS
+        if extra_keys:
             log.error(
-                "User %r: knockout keys mismatch — missing=%s, extra=%s — skipping.",
-                uname, missing, extra,
+                "User %r: knockout has unknown keys %s — skipping.",
+                uname, extra_keys,
             )
             continue
 
@@ -184,11 +183,16 @@ def _validate(raw: dict) -> dict:
         if not knockout_valid:
             continue
 
+        stored_knockout = {k: [t.upper() for t in v] for k, v in knockout_raw.items()}
+        # Fill any missing keys with [] so downstream consumers never KeyError.
+        for key in _KNOCKOUT_YAML_KEYS:
+            stored_knockout.setdefault(key, [])
+
         valid_participants[uname] = {
             "display_name": udata.get("display_name") or None,
             "base_score": float(udata.get("base_score", 0)),
             "groups": {k: [t.upper() for t in v] for k, v in groups_raw.items()},
-            "knockout": {k: [t.upper() for t in v] for k, v in knockout_raw.items()},
+            "knockout": stored_knockout,
         }
 
     log.info("Loaded %d valid participants.", len(valid_participants))

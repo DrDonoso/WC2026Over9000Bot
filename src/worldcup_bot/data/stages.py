@@ -14,6 +14,7 @@ KNOCKOUT_STAGES: list[tuple[str, str, int]] = [
     ("LAST_16", "Octavos de Final", 2),
     ("QUARTER_FINALS", "Cuartos de Final", 3),
     ("SEMI_FINALS", "Semifinales", 5),
+    ("THIRD_PLACE", "3.º y 4.º Puesto", 5),
     ("FINAL", "Final", 8),
 ]
 
@@ -23,6 +24,7 @@ STAGE_YAML_KEYS: dict[str, str] = {
     "LAST_16": "round_of_16",
     "QUARTER_FINALS": "quarter_finals",
     "SEMI_FINALS": "semi_finals",
+    "THIRD_PLACE": "third_place",
     "FINAL": "final",
 }
 

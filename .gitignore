@@ -38,3 +38,5 @@ data/rich/*
 
 # Corporate CA bundle for SSL-inspection remediation — generated locally, never committed
 certs/
+
+elecciones_tiles/
