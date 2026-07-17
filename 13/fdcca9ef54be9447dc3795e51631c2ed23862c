@@ -1,0 +1,19 @@
+tests/test_final_ceremony.py
+  s_c74bf7aa88a2a8::t_2228c2edbafff8 660-756
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "13fdcca9ef54be9447dc3795e51631c2ed23862c",
+  "prompts": {},
+  "sessions": {
+    "s_c74bf7aa88a2a8": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "339a7916-5218-473f-bac7-fe9639b79b56",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
