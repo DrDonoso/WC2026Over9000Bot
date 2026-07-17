@@ -23,16 +23,28 @@ from worldcup_bot.ai.daily_update import generate_daily_update
 from worldcup_bot.ai.goal_extractor import extract_scorer
 from worldcup_bot.ai.rich_image import run_rich_iteration
 from worldcup_bot.api.client import FootballAPIError, match_is_schedule_live
+from worldcup_bot.bot.final_ceremony import (
+    COPY_PRE_FINAL_RANKING_TITLE,
+    COPY_PODIO_RANKING_TITLE,
+    build_campeon_text,
+    build_podium_participants,
+    build_pre_final_text,
+    load_ceremony_state,
+    save_ceremony_state,
+)
 from worldcup_bot.bot.formatters import (
     bold_person_names,
     format_final_result,
+    format_general_ranking,
     format_match_camps,
     format_match_start,
     format_provisional_result,
     format_var_correction,
     match_result_is_final,
     team_flag,
+    team_label,
 )
+from worldcup_bot.bot.podium_image import render_podium
 from worldcup_bot.bot.handlers import (
     cmd_actual,
     cmd_ayer,
@@ -373,6 +385,69 @@ async def cmd_evil_sanchez(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
     await update.message.reply_text("✅ Sánchez enviado al grupo.")
+
+
+async def cmd_granfinal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hidden manual trigger for the Final ceremony. /granfinal
+
+    Fires the appropriate ceremony piece(s) based on current Final status:
+    - Final not finished: sends the pre-final piece (hype + snapshot + face-off) to the group.
+    - Final finished: sends campeón + official ranking + podium to the group.
+    Not listed in /start or /help.
+    """
+    settings: Settings = context.bot_data["settings"]
+    if not settings.telegram_group_id:
+        await update.message.reply_text(
+            "⚠️ No hay TELEGRAM_GROUP_ID configurado; no sé a qué grupo enviar."
+        )
+        return
+
+    client = _football_client(context)
+    try:
+        all_matches = client.get_all_matches()
+    except FootballAPIError:
+        log.exception("cmd_granfinal: could not get matches")
+        await update.message.reply_text(
+            "❌ No se pudo obtener el partido de la Final. Revisa los logs."
+        )
+        return
+
+    final_match = next((m for m in all_matches if m.stage == "FINAL"), None)
+    if final_match is None:
+        await update.message.reply_text(
+            "⚠️ No se encontró el partido de la Final en la API."
+        )
+        return
+
+    state: dict = context.bot_data["final_ceremony_state"]
+    state_path = f"{settings.state_dir}/final_ceremony_state.json"
+
+    if final_match.status == "FINISHED" and final_match.winner:
+        await update.message.reply_text("🏆 Enviando campeón + podio al grupo…")
+        try:
+            await _send_campeon_and_podio(context, final_match)
+        except Exception:
+            log.exception("cmd_granfinal: error sending campeón+podio")
+            await update.message.reply_text(
+                "❌ Error enviando campeón+podio. Revisa los logs."
+            )
+            return
+        state["campeon_sent"] = True
+        save_ceremony_state(state_path, state)
+        await update.message.reply_text("✅ Campeón + podio enviados al grupo.")
+    else:
+        await update.message.reply_text("⚽ Enviando pre-final al grupo…")
+        try:
+            await _send_pre_final(context, final_match)
+        except Exception:
+            log.exception("cmd_granfinal: error sending pre-final")
+            await update.message.reply_text(
+                "❌ Error enviando pre-final. Revisa los logs."
+            )
+            return
+        state["pre_final_sent"] = True
+        save_ceremony_state(state_path, state)
+        await update.message.reply_text("✅ Pre-final enviado al grupo.")
 
 
 async def cmd_calcularperfiles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1822,6 +1897,148 @@ async def poll_kickoff_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log.exception("poll_kickoff_job: unexpected error: %s", exc)
 
 
+# ── Final ceremony helpers ────────────────────────────────────────────────────
+
+
+async def _send_pre_final(context: ContextTypes.DEFAULT_TYPE, final_match) -> None:
+    """Build and send the pre-final hype + ranking snapshot + face-off block."""
+    settings: Settings = context.bot_data["settings"]
+    predictions = pred_loader.load(settings.predictions_path)
+    client = _football_client(context)
+
+    rows = compute_general_ranking(predictions, client, official=False)
+    ranking_text = format_general_ranking(rows, title=COPY_PRE_FINAL_RANKING_TITLE)
+
+    camps_block = ""
+    try:
+        camps = compute_match_camps(
+            final_match.home_tla, final_match.away_tla,
+            final_match.stage, final_match.group,
+            predictions,
+            home_name=final_match.home_name,
+            away_name=final_match.away_name,
+        )
+        camps_block = format_match_camps(
+            camps, use_html=True, title="⚔️ ¿Con quién va la porra?"
+        )
+    except Exception as exc:
+        log.warning("_send_pre_final: camps block failed: %s", exc)
+
+    text = build_pre_final_text(ranking_text, camps_block)
+    await context.bot.send_message(
+        chat_id=settings.telegram_group_id,
+        text=text,
+        parse_mode="HTML",
+    )
+
+
+async def _send_campeon_and_podio(context: ContextTypes.DEFAULT_TYPE, final_match) -> None:
+    """Build and send the world champion announcement + official ranking + podium."""
+    settings: Settings = context.bot_data["settings"]
+
+    winner_tla = final_match.home_tla if final_match.winner == "HOME_TEAM" else final_match.away_tla
+    winner_name = final_match.home_name if final_match.winner == "HOME_TEAM" else final_match.away_name
+    flag = team_flag(winner_tla)
+    campeon_text = build_campeon_text(winner_tla, winner_name, flag)
+    await context.bot.send_message(
+        chat_id=settings.telegram_group_id,
+        text=campeon_text,
+        parse_mode="HTML",
+    )
+
+    predictions = pred_loader.load(settings.predictions_path)
+    client = _football_client(context)
+    rows = compute_general_ranking(predictions, client, official=True)
+    ranking_text = format_general_ranking(rows, title=COPY_PODIO_RANKING_TITLE)
+
+    podium_buf = None
+    if rows:
+        participants = build_podium_participants(rows)
+        try:
+            podium_buf = await asyncio.to_thread(render_podium, participants, settings)
+        except Exception as exc:
+            log.warning("_send_campeon_and_podio: render_podium failed: %s", exc)
+
+    if podium_buf is not None:
+        await context.bot.send_photo(
+            chat_id=settings.telegram_group_id,
+            photo=podium_buf,
+            caption=ranking_text,
+            parse_mode="HTML",
+        )
+    else:
+        await context.bot.send_message(
+            chat_id=settings.telegram_group_id,
+            text=ranking_text,
+            parse_mode="HTML",
+        )
+
+
+async def poll_final_ceremony_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Repeating job: fire the Final ceremony pieces exactly once each.
+
+    A) PRE-FINAL  — once when now >= final kickoff UTC OR final is IN_PLAY/PAUSED/FINISHED.
+    B) CAMPEÓN + PODIO — once when final status is FINISHED.
+
+    Each flag is persisted in final_ceremony_state.json (restart-safe).
+    """
+    try:
+        settings: Settings = context.bot_data["settings"]
+        state: dict = context.bot_data["final_ceremony_state"]
+        state_path = f"{settings.state_dir}/final_ceremony_state.json"
+
+        if state.get("pre_final_sent") and state.get("campeon_sent"):
+            return  # all ceremony pieces already sent
+
+        client = _football_client(context)
+        try:
+            all_matches = client.get_all_matches()
+        except FootballAPIError as exc:
+            log.warning("poll_final_ceremony_job: could not get matches: %s", exc)
+            return
+
+        final_match = next((m for m in all_matches if m.stage == "FINAL"), None)
+        if final_match is None:
+            return
+
+        now_utc = datetime.now(timezone.utc)
+
+        # ── PRE-FINAL ────────────────────────────────────────────────────────
+        if not state.get("pre_final_sent"):
+            kickoff_reached = False
+            try:
+                kickoff = datetime.strptime(
+                    final_match.utc_date, "%Y-%m-%dT%H:%M:%SZ"
+                ).replace(tzinfo=timezone.utc)
+                kickoff_reached = now_utc >= kickoff
+            except Exception:
+                pass
+            in_progress = final_match.status in ("IN_PLAY", "PAUSED", "FINISHED")
+            if kickoff_reached or in_progress:
+                try:
+                    await _send_pre_final(context, final_match)
+                    log.info("poll_final_ceremony_job: PRE-FINAL sent")
+                except Exception:
+                    log.exception("poll_final_ceremony_job: error sending pre-final")
+                    return  # don't mark as sent on failure — retry next tick
+                state["pre_final_sent"] = True
+                save_ceremony_state(state_path, state)
+
+        # ── CAMPEÓN + PODIO ──────────────────────────────────────────────────
+        if not state.get("campeon_sent") and final_match.status == "FINISHED" and final_match.winner:
+            try:
+                await _send_campeon_and_podio(context, final_match)
+                log.info("poll_final_ceremony_job: CAMPEÓN + PODIO sent")
+            except Exception:
+                log.exception("poll_final_ceremony_job: error sending campeón+podio")
+                return
+            state["campeon_sent"] = True
+            save_ceremony_state(state_path, state)
+
+    except Exception as exc:
+        log.warning("poll_final_ceremony_job: unexpected error: %s", exc)
+
+
 async def poll_finished_matches_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Repeating job: detect newly-finished matches, post stats card + porra commentary.
 
@@ -2390,6 +2607,9 @@ def build_app(settings: Settings) -> Application:
     app.bot_data["kickoff_announced"] = load_finished(kickoff_path)
     # False until first poll_kickoff_job run completes its seed pass.
     app.bot_data["kickoff_seeded"] = False
+    # Final ceremony state: persisted dict tracking which ceremony pieces have fired.
+    ceremony_state_path = f"{settings.state_dir}/final_ceremony_state.json"
+    app.bot_data["final_ceremony_state"] = load_ceremony_state(ceremony_state_path)
     # Post-final VAR-correction watch: persisted dict of recently-finalized match scores.
     # Entries are pruned after settings.final_correction_window_minutes.
     finished_scores_path = f"{settings.state_dir}/finished_scores.json"
@@ -2486,6 +2706,7 @@ def build_app(settings: Settings) -> Application:
         CommandHandler("recalcular", cmd_recalcular),
         CommandHandler("tongocheck", cmd_tongocheck),
         CommandHandler("evilsanchez", cmd_evil_sanchez),
+        CommandHandler("granfinal", cmd_granfinal),
         CommandHandler("perfil", cmd_perfil),
         CommandHandler("calcularperfiles", cmd_calcularperfiles),
     ]
@@ -2685,6 +2906,17 @@ def main() -> None:
         )
         log.info(
             "Kickoff-start notifier enabled — polling every 30s for group %s",
+            settings.telegram_group_id,
+        )
+
+        app.job_queue.run_repeating(
+            poll_final_ceremony_job,
+            interval=60,
+            first=20,
+            name="poll_final_ceremony",
+        )
+        log.info(
+            "Final ceremony job enabled — polling every 60s for group %s",
             settings.telegram_group_id,
         )
 
