@@ -1,0 +1,120 @@
+tests/test_predictions_loader.py
+  s_d63bcacb40abc7::t_d874000fac9f7e 48,101,268
+  s_d63bcacb40abc7::t_87b428dd1961fb 265-267
+  s_d63bcacb40abc7::t_4ba0b8d6b62b51 269-271
+  s_41ed32382d3f82::t_574e19f3d23d30 76,173,175,244-264,272-302
+.squad/health-report-2026-07-07T06_34_20Z-scribe.md
+  s_41ed32382d3f82::t_db0fc35e4253d3 1-135
+.squad/health-report-2026-07-07T08-54-27Z-scribe.md
+  s_41ed32382d3f82::t_ee917b5b206b5a 1-113
+.squad/health-report-2026-07-10T06-56-35Z-scribe.md
+  s_0cd84bdd06788e::t_f56212a719913a 1-82
+.squad/health-report-2026-07-10T07-45-19Z-scribe.md
+  s_0cd84bdd06788e::t_b0ca75e47361aa 1-44
+.squad/health-report-2026-07-10T12-57-29Z-scribe.md
+  s_0cd84bdd06788e::t_e74931ab12710e 1-50
+.squad/health-report-20260710T135521Z-scribe.md
+  s_0cd84bdd06788e::t_38bfbaff6489fa 1-97
+.squad/skills/two-source-score-reconciliation/SKILL.md
+  s_41ed32382d3f82::t_340b5942803e97 1-137
+data/predictions.template.yml
+  s_c74bf7aa88a2a8::t_d7abc853dc5524 28,62,86
+src/worldcup_bot/bot/formatters.py
+  s_c74bf7aa88a2a8::t_0685f7f2022d0d 25-27
+src/worldcup_bot/data/stages.py
+  s_c74bf7aa88a2a8::t_8dd68b2825ff07 17,27
+src/worldcup_bot/porra/elecciones.py
+  s_c74bf7aa88a2a8::t_a6c8893f375975 17,27,36
+src/worldcup_bot/porra/predictions.py
+  s_c74bf7aa88a2a8::t_a6b0b3db8d3ecc 159-160,162-163,186-190,195
+.squad/agents/cannavaro/history.md
+  s_41ed32382d3f82::t_fcc08d8dfd70f3 1-131
+.squad/health-report-2026-06-26T09-54-02Z.md
+  s_41ed32382d3f82::t_aae8fac7f5d84b 1-92
+.squad/health-report-2026-06-27T18-49-00Z.md
+  s_41ed32382d3f82::t_d6b95f77ea9b9e 1-95
+.squad/health-report-2026-06-30T11-13-18Z.md
+  s_41ed32382d3f82::t_18aaa48c05c6b7 1-79
+.squad/health-report-2026-07-02T08-42-51Z.md
+  s_41ed32382d3f82::t_c811f1da2d4902 1-101
+.squad/health-report-2026-07-05T00-15-00Z-scribe.md
+  s_41ed32382d3f82::t_01d718c8a56d77 1-133
+.squad/health-report-20260617.txt
+  s_41ed32382d3f82::t_7403ba865cb27b 1-55
+.squad/health-report-20260618.txt
+  s_41ed32382d3f82::t_bb031eb236affb 1-41
+.squad/scribe-health-report-2026-06-18.md
+  s_41ed32382d3f82::t_102aec9b80fbc9 1-121
+.squad/scribe-health-report-2026-06-19.md
+  s_41ed32382d3f82::t_08a494d1df2f8f 1-64
+.squad/scribe-health-report-2026-06-22T07-13-15Z.md
+  s_41ed32382d3f82::t_00b3bfe32d23fe 1-53
+.squad/scribe-health-report-2026-06-22T09-32-57Z.md
+  s_41ed32382d3f82::t_f44ab8e03c42af 1-51
+.squad/scribe-health-report-2026-06-22T11-32-30Z.md
+  s_41ed32382d3f82::t_26534c2f8cec7b 1-65
+.squad/scribe-health-report-2026-06-22T12-30-02Z.md
+  s_41ed32382d3f82::t_b948e7080e38d6 1-44
+.squad/scribe-health-report-2026-06-26.md
+  s_41ed32382d3f82::t_30394d77c9880e 1-90
+.squad/scribe-health-report-2026-06-30.md
+  s_41ed32382d3f82::t_bd9bdd0d1ae5fc 1-100
+.squad/scribe-health-report-2026-06-30T09-16-38Z.md
+  s_41ed32382d3f82::t_1627e3e1ad9dd1 1-179
+.squad/scribe-health-report-2026-06-30T18-38-48Z.md
+  s_41ed32382d3f82::t_dea8130c1b31c7 1-82
+.squad/scribe-health-report-2026-07-01T07-49-10Z.md
+  s_41ed32382d3f82::t_22300c30ad6ef0 1-146
+.squad/scribe-health-report-2026-07-01T08-09-22Z.md
+  s_41ed32382d3f82::t_ff0618d1bcd25a 1-63
+.squad/scribe-health-report-2026-07-01T17-55-29Z.md
+  s_41ed32382d3f82::t_979d0448743b7b 1-65
+.squad/scribe-health-report-2026-07-03T12-32-34Z.md
+  s_41ed32382d3f82::t_4eecca8c4956a8 1-53
+.squad/scribe-health-report-20260617.md
+  s_41ed32382d3f82::t_eed3cc6042709f 1-65
+tests/test_elecciones.py
+  s_41ed32382d3f82::t_22032ec1846f47 97-99,196-222,354-365
+tests/test_scoring.py
+  s_41ed32382d3f82::t_85b35e8e7cad29 513,531,541,578-632
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "d8bcfacd1a9344b0404ba4ddfe6414801212c945",
+  "prompts": {},
+  "sessions": {
+    "s_0cd84bdd06788e": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "23d538fe-4d94-4e03-ad30-b88db5a394f0",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_41ed32382d3f82": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "a8769457-c3a5-49d0-94c3-736f3eedc688",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_c74bf7aa88a2a8": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "339a7916-5218-473f-bac7-fe9639b79b56",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_d63bcacb40abc7": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01UNpNec1ufzTcHEFwK7ATVV",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
