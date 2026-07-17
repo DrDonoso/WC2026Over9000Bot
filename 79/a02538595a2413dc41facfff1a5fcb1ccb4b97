@@ -1,0 +1,19 @@
+src/worldcup_bot/ai/rich_image.py
+  s_0f7d9d9ec0cd67::t_5badd3a0adaeb8 236-238,697
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "79a02538595a2413dc41facfff1a5fcb1ccb4b97",
+  "prompts": {},
+  "sessions": {
+    "s_0f7d9d9ec0cd67": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "6798ebe4-bfdb-49fb-9653-0a23d59812f7",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
