@@ -1,0 +1,31 @@
+src/worldcup_bot/__main__.py
+  s_afa6aa825d453b::t_90cc105db60472 334-364,376-377
+src/worldcup_bot/ai/rich_image.py
+  s_0f7d9d9ec0cd67::t_2bd78a47448d75 189-192,194-195,199,203-208,256,272-273,302-303,601,622-623,682-685,691,787,804-805,815-816,842,844,931,1047
+tests/test_rich_image.py
+  s_0f7d9d9ec0cd67::t_608b9491f6133b 26,3845-3871,3958-4008,4198-4282
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "7680612d838bb7cce1dd233687aeb0df0d61a56c",
+  "prompts": {},
+  "sessions": {
+    "s_0f7d9d9ec0cd67": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "6798ebe4-bfdb-49fb-9653-0a23d59812f7",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_afa6aa825d453b": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01ShBXrEh3TQBee5TF1QHJb9",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
