@@ -657,3 +657,100 @@ def test_granfinal_absent_from_help_commands():
     """The /granfinal command must NOT appear in the public help listing."""
     from worldcup_bot.bot.handlers import _HELP_COMMANDS
     assert "granfinal" not in _HELP_COMMANDS
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Buffon-added tests: gaps identified during QA review
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestPollFinalCeremonyJobAPIErrorComplete:
+    """The existing test_api_error_is_handled_gracefully stub never calls the job.
+    These tests properly verify API error handling in poll_final_ceremony_job."""
+
+    @pytest.mark.asyncio
+    async def test_football_api_error_does_not_raise_and_sends_nothing(self, tmp_path):
+        """FootballAPIError during polling: job must not raise and must send nothing."""
+        from worldcup_bot.api.client import FootballAPIError
+
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.side_effect = FootballAPIError(503, "timeout")
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__._send_pre_final", new_callable=AsyncMock) as mock_pre,
+            patch("worldcup_bot.__main__._send_campeon_and_podio", new_callable=AsyncMock) as mock_camp,
+        ):
+            await poll_final_ceremony_job(ctx)  # must not raise
+
+        mock_pre.assert_not_awaited()
+        mock_camp.assert_not_awaited()
+        assert ctx.bot_data["final_ceremony_state"]["pre_final_sent"] is False
+        assert ctx.bot_data["final_ceremony_state"]["campeon_sent"] is False
+
+    @pytest.mark.asyncio
+    async def test_football_api_error_does_not_persist_state(self, tmp_path):
+        """FootballAPIError must not write any state to disk (no partial persistence)."""
+        from worldcup_bot.api.client import FootballAPIError
+
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.side_effect = FootballAPIError(503, "timeout")
+        state_path = tmp_path / "final_ceremony_state.json"
+
+        with patch("worldcup_bot.__main__.make_client", return_value=mock_client):
+            await poll_final_ceremony_job(ctx)
+
+        assert not state_path.exists()
+
+
+class TestCmdGranfinalSendFailures:
+    """Error paths when send operations fail inside cmd_granfinal (after API succeeds)."""
+
+    @pytest.mark.asyncio
+    async def test_send_pre_final_failure_reports_error_flag_not_set(self, tmp_path):
+        """_send_pre_final raises inside cmd_granfinal → error reply sent, pre_final_sent stays False."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings)
+        update = _make_update()
+        match = _make_final_match(status="SCHEDULED", utc_date=_FUTURE_STR)
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+
+        async def _fail(*a, **kw):
+            raise RuntimeError("network send failed")
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__._send_pre_final", side_effect=_fail),
+        ):
+            await cmd_granfinal(update, ctx)  # must not raise
+
+        reply_texts = [c.args[0] for c in update.message.reply_text.call_args_list]
+        assert any("❌" in t or "error" in t.lower() for t in reply_texts)
+        assert ctx.bot_data["final_ceremony_state"]["pre_final_sent"] is False
+
+    @pytest.mark.asyncio
+    async def test_send_campeon_failure_reports_error_flag_not_set(self, tmp_path):
+        """_send_campeon_and_podio raises inside cmd_granfinal → error reply sent, campeon_sent stays False."""
+        settings = _make_settings(tmp_path)
+        ctx = _make_context(settings)
+        update = _make_update()
+        match = _make_final_match(status="FINISHED", utc_date=_PAST_STR, winner="HOME_TEAM")
+        mock_client = MagicMock()
+        mock_client.get_all_matches.return_value = [match]
+
+        async def _fail(*a, **kw):
+            raise RuntimeError("network send failed")
+
+        with (
+            patch("worldcup_bot.__main__.make_client", return_value=mock_client),
+            patch("worldcup_bot.__main__._send_campeon_and_podio", side_effect=_fail),
+        ):
+            await cmd_granfinal(update, ctx)  # must not raise
+
+        reply_texts = [c.args[0] for c in update.message.reply_text.call_args_list]
+        assert any("❌" in t or "error" in t.lower() for t in reply_texts)
+        assert ctx.bot_data["final_ceremony_state"]["campeon_sent"] is False
