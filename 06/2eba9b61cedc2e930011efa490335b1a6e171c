@@ -1,0 +1,19 @@
+.squad/decisions.md
+  s_faaca36f9e641d::t_733203cf780f76 1-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "062eba9b61cedc2e930011efa490335b1a6e171c",
+  "prompts": {},
+  "sessions": {
+    "s_faaca36f9e641d": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_017YudECnfwowUtnp8tMFt3U",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
