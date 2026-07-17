@@ -1,0 +1,59 @@
+.squad/agents/buffon/history.md
+  s_5302ce45137ad9::t_af6bbb104b9340 4,6,8-11,15,17,19-21,23-25,27-31,35,37-40,44
+.squad/agents/kante/history.md
+  s_260327f8e9c6a1::t_9e9e50b098e03c 1,3,5-31,33-35,45-49
+  s_d63bcacb40abc7::t_c6640fd4e1446c 32
+  s_5302ce45137ad9::t_bad7b120074688 36-44
+  s_260327f8e9c6a1::t_3cb642da3278dd 56,59,64
+.squad/decisions.md
+  s_5302ce45137ad9::t_7f12881812bb8a 449-654
+  s_5302ce45137ad9::t_3d76391f95b8bb 1-448,655
+.squad/decisions-archive.md
+  s_5302ce45137ad9::t_7f12881812bb8a 1-2751
+  s_5302ce45137ad9::t_7e47f69602aa6a 4465
+.squad/agents/buffon/history-archive.md
+  s_5302ce45137ad9::t_af6bbb104b9340 1,3-4,6,8-11,13,15-276
+  s_5302ce45137ad9::t_dbe3329fb08bea 277-281
+.squad/log/2026-07-17T08-43-21Z-final-weekend.md
+  s_5302ce45137ad9::t_9259efbf85d2a2 1-27
+.squad/orchestration-log/2026-07-17T08-43-21Z-buffon.md
+  s_5302ce45137ad9::t_286fad90e289c1 1-28
+.squad/orchestration-log/2026-07-17T08-43-21Z-coordinator.md
+  s_5302ce45137ad9::t_b133a32da515b8 1-15
+.squad/orchestration-log/2026-07-17T08-43-21Z-kante.md
+  s_5302ce45137ad9::t_25064b75ad8e8a 1-26
+.squad/orchestration-log/2026-07-17T08-43-21Z-pirlo.md
+  s_5302ce45137ad9::t_19d74fb46e3bb6 1-30
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "421c71e43c930b78d69d7387500b436b7a2d1da0",
+  "prompts": {},
+  "sessions": {
+    "s_260327f8e9c6a1": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01NydxgJBxEvCvyfxMrz63z5",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_5302ce45137ad9": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01RQRx6jvRT2iahDpbywkmRD",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_d63bcacb40abc7": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01UNpNec1ufzTcHEFwK7ATVV",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
