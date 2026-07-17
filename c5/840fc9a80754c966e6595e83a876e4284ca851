@@ -1,0 +1,54 @@
+tests/test_predictions_loader.py
+  s_d63bcacb40abc7::t_87b428dd1961fb 265-267
+  s_41ed32382d3f82::t_574e19f3d23d30 76,173,175,244-264,272-302
+  s_d63bcacb40abc7::t_d874000fac9f7e 48,101,268
+  s_d63bcacb40abc7::t_4ba0b8d6b62b51 269-271
+src/worldcup_bot/porra/elecciones.py
+  s_c74bf7aa88a2a8::t_a6c8893f375975 17,27,36
+src/worldcup_bot/data/stages.py
+  s_c74bf7aa88a2a8::t_8dd68b2825ff07 17,27
+src/worldcup_bot/porra/predictions.py
+  s_c74bf7aa88a2a8::t_a6b0b3db8d3ecc 159-160,162-163,186-190,195
+tests/test_elecciones.py
+  s_41ed32382d3f82::t_22032ec1846f47 97-99,196-222,354-365
+tests/test_scoring.py
+  s_41ed32382d3f82::t_85b35e8e7cad29 513,531,541,578-632
+data/predictions.template.yml
+  s_c74bf7aa88a2a8::t_d7abc853dc5524 28,62,86
+src/worldcup_bot/bot/formatters.py
+  s_c74bf7aa88a2a8::t_0685f7f2022d0d 25-27
+.gitignore
+  s_d63bcacb40abc7::t_28d723996a86d3 41-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c5840fc9a80754c966e6595e83a876e4284ca851",
+  "prompts": {},
+  "sessions": {
+    "s_41ed32382d3f82": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "a8769457-c3a5-49d0-94c3-736f3eedc688",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_c74bf7aa88a2a8": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "339a7916-5218-473f-bac7-fe9639b79b56",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_d63bcacb40abc7": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01UNpNec1ufzTcHEFwK7ATVV",
+        "model": "unknown"
+      },
+      "human_author": null
+    }
+  }
+}
