@@ -913,7 +913,7 @@ async def run_rich_iteration(
         # Death: dignified farewell scene — no pose instruction needed.
         prompt = build_rich_prompt(
             history=image_history,
-            anchor=using_anchor or True,  # always try to anchor face for death
+            anchor=True,  # always try to anchor face for death
             death=True,
         )
     else:
