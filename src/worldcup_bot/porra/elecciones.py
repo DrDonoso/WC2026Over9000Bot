@@ -14,6 +14,7 @@ _PHASE_LABELS: dict[str, str] = {
     "round_of_16":    "Octavos de Final",
     "quarter_finals": "Cuartos de Final",
     "semi_finals":    "Semifinales",
+    "third_place":    "3.º y 4.º Puesto",
     "final":          "La Final",
 }
 
@@ -23,6 +24,7 @@ _PHASE_ORDER: list[str] = [
     "round_of_16",
     "quarter_finals",
     "semi_finals",
+    "third_place",
     "final",
 ]
 
@@ -31,6 +33,7 @@ _KNOCKOUT_HEADERS: dict[str, str] = {
     "round_of_16":    "🏆 OCTAVOS DE FINAL — ¿Quién pasa?",
     "quarter_finals": "🏆 CUARTOS DE FINAL — ¿Quién pasa?",
     "semi_finals":    "🏆 SEMIFINALES — ¿Quién pasa?",
+    "third_place":    "🥉 3.º Y 4.º PUESTO — ¿Quién gana?",
     "final":          "🏆 LA FINAL — ¿Quién gana?",
 }
 

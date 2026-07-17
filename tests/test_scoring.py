@@ -510,7 +510,7 @@ class TestScoreKnockoutEmptyInputs:
 
 
 class TestScoreKnockoutAllStagesIntegration:
-    """Test using the default KNOCKOUT_STAGES config (all 5 stages)."""
+    """Test using the default KNOCKOUT_STAGES config (all 6 stages)."""
 
     def test_all_stages_correct_sums_correctly(self):
         user = {
@@ -528,7 +528,7 @@ class TestScoreKnockoutAllStagesIntegration:
             "FINAL": ["ESP"],
         }
         pts, _ = score_knockout(user, actual)
-        # 1 + 2 + 3 + 5 + 8 = 19
+        # 1 + 2 + 3 + 5 + 8 = 19 (third_place missing from user → 0)
         assert pts == 19.0
 
     def test_knockout_stages_config_point_values(self):
@@ -538,6 +538,7 @@ class TestScoreKnockoutAllStagesIntegration:
             "LAST_16": 2,
             "QUARTER_FINALS": 3,
             "SEMI_FINALS": 5,
+            "THIRD_PLACE": 5,
             "FINAL": 8,
         }
         for api_name, _display, pts in KNOCKOUT_STAGES:
@@ -572,6 +573,91 @@ class TestScoreKnockoutAllStagesIntegration:
         stages_in_detail = {d["stage"] for d in detail}
         assert stages_in_detail == {"FINAL"}
         assert pts == 8.0
+
+    def test_all_six_stages_correct_sums_to_24(self):
+        """All 6 stages correct: 1+2+3+5+5+8=24 — no double-count, FINAL=8, SEMI=5, TP=5."""
+        user = {
+            "round_of_32": ["ESP"],
+            "round_of_16": ["ESP"],
+            "quarter_finals": ["ESP"],
+            "semi_finals": ["ESP"],
+            "third_place": ["FRA"],
+            "final": ["ESP"],
+        }
+        actual = {
+            "LAST_32": ["ESP"],
+            "LAST_16": ["ESP"],
+            "QUARTER_FINALS": ["ESP"],
+            "SEMI_FINALS": ["ESP"],
+            "THIRD_PLACE": ["FRA"],
+            "FINAL": ["ESP"],
+        }
+        pts, _ = score_knockout(user, actual)
+        # 1 + 2 + 3 + 5 + 5 + 8 = 24
+        assert pts == 24.0
+
+
+class TestScoreKnockoutThirdPlace:
+    """THIRD_PLACE awards 5 points for the correct match winner (same as SEMI_FINALS)."""
+
+    _STAGE = [("THIRD_PLACE", "3.º y 4.º Puesto", 5)]
+
+    def test_correct_winner_scores_5(self):
+        user = {"third_place": ["FRA"]}
+        actual = {"THIRD_PLACE": ["FRA"]}
+        pts, detail = score_knockout(user, actual, self._STAGE)
+        assert pts == 5.0
+        assert detail[0]["note"] == "acierto"
+        assert detail[0]["points"] == 5
+
+    def test_wrong_pick_scores_0(self):
+        user = {"third_place": ["ENG"]}
+        actual = {"THIRD_PLACE": ["FRA"]}
+        pts, detail = score_knockout(user, actual, self._STAGE)
+        assert pts == 0.0
+        assert detail[0]["note"] == "fallo"
+
+    def test_yaml_key_mapping(self):
+        assert STAGE_YAML_KEYS["THIRD_PLACE"] == "third_place"
+
+    def test_point_value_is_5(self):
+        match = next(
+            (api, pts) for api, _, pts in KNOCKOUT_STAGES if api == "THIRD_PLACE"
+        )
+        assert match[1] == 5
+
+    def test_pending_semantics(self):
+        """A not-yet-played third-place pick is pending, not fallo."""
+        user = {"third_place": ["ENG"]}
+        actual = {"THIRD_PLACE": ["FRA"]}
+        decided = {"THIRD_PLACE": {"FRA", "ENG"}}  # ENG decided but lost
+        pts, detail = score_knockout(user, actual, self._STAGE, decided_teams=decided)
+        assert detail[0]["note"] == "fallo"
+        assert pts == 0.0
+
+    def test_pending_when_match_not_finished(self):
+        user = {"third_place": ["ENG"]}
+        actual = {"THIRD_PLACE": []}  # match not played
+        decided = {"THIRD_PLACE": set()}  # neither team decided
+        pts, detail = score_knockout(user, actual, self._STAGE, decided_teams=decided)
+        assert detail[0]["note"] == "pending"
+        assert pts == 0.0
+
+    def test_third_place_in_knockout_stages_between_semi_and_final(self):
+        """THIRD_PLACE appears between SEMI_FINALS and FINAL in KNOCKOUT_STAGES."""
+        names = [api for api, _, _ in KNOCKOUT_STAGES]
+        semi_idx = names.index("SEMI_FINALS")
+        tp_idx = names.index("THIRD_PLACE")
+        final_idx = names.index("FINAL")
+        assert semi_idx < tp_idx < final_idx
+
+    def test_empty_third_place_pick_no_crash_and_zero_pts(self):
+        """third_place: [] produces 0 pts and empty detail — no crash on stored default."""
+        user = {"third_place": []}
+        actual = {"THIRD_PLACE": ["FRA"]}
+        pts, detail = score_knockout(user, actual, self._STAGE)
+        assert pts == 0.0
+        assert detail == []
 
 
 # ══════════════════════════════════════════════════════════════════════════════

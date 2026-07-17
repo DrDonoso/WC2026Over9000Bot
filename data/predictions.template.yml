@@ -25,6 +25,7 @@
 #         round_of_16: []        # 8 equipos que pasan de 16vos
 #         quarter_finals: []     # 4 equipos que pasan de cuartos
 #         semi_finals: []        # 2 equipos que pasan de semis
+#         third_place: []        # ganador del 3.º y 4.º puesto (1 equipo)
 #         final: []              # campeón (1 equipo)
 #
 # NOTAS:
@@ -58,6 +59,7 @@ participants:
       round_of_16: []
       quarter_finals: []
       semi_finals: []
+      third_place: []
       final: []
 
   otro_usuario:
@@ -81,4 +83,5 @@ participants:
       round_of_16: []
       quarter_finals: []
       semi_finals: []
+      third_place: []
       final: []
