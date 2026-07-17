@@ -5,6 +5,11 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260717.03] - 2026-07-17
+
+- refactor: simplify death-branch anchor to anchor=True (review nit)
+
+
 ## [20260717.02] - 2026-07-17
 
 - HOME_TEAM winner -> away_name is the loser
