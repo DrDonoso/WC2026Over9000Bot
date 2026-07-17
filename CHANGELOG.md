@@ -5,6 +5,16 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260717] - 2026-07-17
+
+- test_football_api_error_does_not_raise_and_sends_nothing: asserts no send functions called, flags stay False. - test_football_api_error_does_not_persist_state: asserts state file not created on API error.
+- feat: ceremonia final del Mundial 2026 (pre-final, campeón, podio)
+- test_empty_third_place_pick_no_crash_and_zero_pts: third_place: [] yields 0 pts and empty detail (no crash on stored default []).
+- test_all_six_stages_correct_sums_to_24: all 6 stages correct = 24 pts (1+2+3+5+5+8) — confirms FINAL=8, SEMI=5, THIRD_PLACE=5 with no double-count in the integration path.
+- test_missing_and_unknown_key_user_skipped: missing valid key + unknown key in knockout → participant SKIPPED (unknown dominates, per design spec in squad-final-weekend-design.md).
+- feat: puntuar el 3.º y 4.º puesto (THIRD_PLACE, 5 pts)
+
+
 ## [20260713] - 2026-07-13
 
 - feat(picante): /perfil shows an inline keyboard picker
