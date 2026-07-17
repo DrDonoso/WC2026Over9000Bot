@@ -1,0 +1,19 @@
+tests/test_main_calcularperfiles.py
+  s_0cd84bdd06788e::t_fc30bf086effd4 448-647
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "3a58983ba989fe20bbaff8c4daee91587767dfd0",
+  "prompts": {},
+  "sessions": {
+    "s_0cd84bdd06788e": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "23d538fe-4d94-4e03-ad30-b88db5a394f0",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
