@@ -1,0 +1,36 @@
+src/worldcup_bot/bot/final_ceremony.py
+  s_d63bcacb40abc7::t_5bc540189936f2 1-112
+tests/test_final_ceremony.py
+  s_d63bcacb40abc7::t_1b6628d91176ea 517
+  s_d63bcacb40abc7::t_06cfc3ccdc9cec 135-136,141-144
+  s_d63bcacb40abc7::t_601fa2d255a740 1-134,137-140,145-516,518-641,643,647-659
+  s_d63bcacb40abc7::t_6dbfb0a7cc292b 642
+  s_d63bcacb40abc7::t_a0d2c54ebce8e7 644-646
+src/worldcup_bot/__main__.py
+  s_d63bcacb40abc7::t_1e6730f35e4b18 26-34,38,45,47
+  s_0c412a0ce56b83::t_514c0d2ed0deb1 390-452,1900-2041,2610-2612,2709,2912-2922
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "00520cd15afc09665fe0f05795d728bfd5fb3be3",
+  "prompts": {},
+  "sessions": {
+    "s_0c412a0ce56b83": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "0cb28098-767f-4211-ad32-dc452e94275d",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_d63bcacb40abc7": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01UNpNec1ufzTcHEFwK7ATVV",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
