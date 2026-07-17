@@ -574,6 +574,28 @@ class TestScoreKnockoutAllStagesIntegration:
         assert stages_in_detail == {"FINAL"}
         assert pts == 8.0
 
+    def test_all_six_stages_correct_sums_to_24(self):
+        """All 6 stages correct: 1+2+3+5+5+8=24 — no double-count, FINAL=8, SEMI=5, TP=5."""
+        user = {
+            "round_of_32": ["ESP"],
+            "round_of_16": ["ESP"],
+            "quarter_finals": ["ESP"],
+            "semi_finals": ["ESP"],
+            "third_place": ["FRA"],
+            "final": ["ESP"],
+        }
+        actual = {
+            "LAST_32": ["ESP"],
+            "LAST_16": ["ESP"],
+            "QUARTER_FINALS": ["ESP"],
+            "SEMI_FINALS": ["ESP"],
+            "THIRD_PLACE": ["FRA"],
+            "FINAL": ["ESP"],
+        }
+        pts, _ = score_knockout(user, actual)
+        # 1 + 2 + 3 + 5 + 5 + 8 = 24
+        assert pts == 24.0
+
 
 class TestScoreKnockoutThirdPlace:
     """THIRD_PLACE awards 5 points for the correct match winner (same as SEMI_FINALS)."""
@@ -628,6 +650,14 @@ class TestScoreKnockoutThirdPlace:
         tp_idx = names.index("THIRD_PLACE")
         final_idx = names.index("FINAL")
         assert semi_idx < tp_idx < final_idx
+
+    def test_empty_third_place_pick_no_crash_and_zero_pts(self):
+        """third_place: [] produces 0 pts and empty detail — no crash on stored default."""
+        user = {"third_place": []}
+        actual = {"THIRD_PLACE": ["FRA"]}
+        pts, detail = score_knockout(user, actual, self._STAGE)
+        assert pts == 0.0
+        assert detail == []
 
 
 # ══════════════════════════════════════════════════════════════════════════════

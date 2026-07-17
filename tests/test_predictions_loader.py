@@ -299,6 +299,21 @@ class TestLoadKnockoutTolerantValidation:
         result = load(str(p))
         assert "baduser" not in result["participants"]
 
+    def test_missing_and_unknown_key_user_skipped(self, tmp_path):
+        """Missing valid key + unknown key → SKIPPED (unknown dominates, per spec)."""
+        ko_missing_ro16_and_typo = """\
+      round_of_32: []
+      quarter_finals: []
+      semi_finals: []
+      third_place: []
+      final: []
+      typo_key: []"""
+        # round_of_16 is absent (missing) AND typo_key is unknown
+        p = tmp_path / "preds.yml"
+        p.write_text(_user_block("baduser", _GROUPS_BLOCK, ko_missing_ro16_and_typo))
+        result = load(str(p))
+        assert "baduser" not in result["participants"]
+
 
 class TestLoadHotReload:
     def test_same_mtime_returns_cached_object(self, tmp_path):
