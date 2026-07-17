@@ -445,3 +445,203 @@ class TestProfileUpdateJobRegression:
             await main_mod.profile_update_job(ctx)
 
         mock_helper.assert_awaited_once()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# _fetch_yesterday_losers — unit tests (no network)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_minimal_settings() -> Settings:
+    return Settings(
+        telegram_bot_token="tok",
+        football_data_api_key="key",
+    )
+
+
+def _make_loser_match(
+    status: str = "FINISHED",
+    home_name: str = "Spain",
+    away_name: str = "France",
+    winner: str | None = "HOME_TEAM",
+    uid: int = 1,
+):
+    """Build a minimal Match dataclass for _fetch_yesterday_losers tests."""
+    from worldcup_bot.api.models import Match
+
+    return Match(
+        id=uid,
+        utc_date="2026-07-19T20:00:00Z",
+        status=status,
+        stage="FINAL",
+        group=None,
+        home_tla="ESP",
+        away_tla="FRA",
+        home_name=home_name,
+        away_name=away_name,
+        home_score=1,
+        away_score=0,
+        winner=winner,
+    )
+
+
+def _ctx_with_football_client(matches) -> MagicMock:
+    """Context whose football_client.get_football_day_matches returns *matches*."""
+    mock_client = MagicMock()
+    mock_client.get_football_day_matches.return_value = matches
+    ctx = MagicMock()
+    ctx.bot_data = {
+        "settings": _make_minimal_settings(),
+        "football_client": mock_client,
+    }
+    return ctx
+
+
+class TestFetchYesterdayLosers:
+    """Unit tests for _fetch_yesterday_losers in worldcup_bot.__main__.
+
+    Contract:
+    - winner == "AWAY_TEAM" → home team is the loser (home_name returned)
+    - winner == "HOME_TEAM" → away team is the loser (away_name returned)
+    - winner == "DRAW" or None → excluded entirely
+    - status != "FINISHED" → excluded entirely
+    - Exception in API call → best-effort, never raises, returns []
+    - Uses day_offset=-1 to query yesterday's matches
+    """
+
+    def test_home_wins_returns_away_as_loser(self):
+        """HOME_TEAM winner → away team is the loser."""
+        import worldcup_bot.__main__ as main_mod
+
+        m = _make_loser_match(winner="HOME_TEAM", home_name="Spain", away_name="France")
+        ctx = _ctx_with_football_client([m])
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert result == ["France"]
+
+    def test_away_wins_returns_home_as_loser(self):
+        """AWAY_TEAM winner → home team is the loser."""
+        import worldcup_bot.__main__ as main_mod
+
+        m = _make_loser_match(winner="AWAY_TEAM", home_name="Germany", away_name="Argentina")
+        ctx = _ctx_with_football_client([m])
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert result == ["Germany"]
+
+    def test_draw_excluded(self):
+        """DRAW result → no loser returned."""
+        import worldcup_bot.__main__ as main_mod
+
+        m = _make_loser_match(winner="DRAW", home_name="Brazil", away_name="England")
+        ctx = _ctx_with_football_client([m])
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert result == []
+
+    def test_none_winner_excluded(self):
+        """winner=None (no result) → no loser returned."""
+        import worldcup_bot.__main__ as main_mod
+
+        m = _make_loser_match(winner=None, home_name="Portugal", away_name="Belgium")
+        ctx = _ctx_with_football_client([m])
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert result == []
+
+    def test_non_finished_match_excluded(self):
+        """IN_PLAY matches are not included even if winner is set."""
+        import worldcup_bot.__main__ as main_mod
+
+        m = _make_loser_match(status="IN_PLAY", winner="HOME_TEAM", home_name="Italy", away_name="Croatia")
+        ctx = _ctx_with_football_client([m])
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert result == []
+
+    def test_scheduled_match_excluded(self):
+        """SCHEDULED status is excluded regardless of winner value."""
+        import worldcup_bot.__main__ as main_mod
+
+        m = _make_loser_match(status="SCHEDULED", winner="HOME_TEAM", home_name="Netherlands", away_name="Morocco")
+        ctx = _ctx_with_football_client([m])
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert result == []
+
+    def test_empty_matches_returns_empty_list(self):
+        """No matches at all → empty list."""
+        import worldcup_bot.__main__ as main_mod
+
+        ctx = _ctx_with_football_client([])
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert result == []
+
+    def test_multiple_matches_returns_all_losers(self):
+        """Multiple decisive FINISHED matches → all losing sides returned."""
+        import worldcup_bot.__main__ as main_mod
+
+        matches = [
+            _make_loser_match(winner="HOME_TEAM", home_name="Spain", away_name="France", uid=1),
+            _make_loser_match(winner="AWAY_TEAM", home_name="Germany", away_name="Argentina", uid=2),
+            _make_loser_match(winner="DRAW", home_name="Brazil", away_name="England", uid=3),
+        ]
+        ctx = _ctx_with_football_client(matches)
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        # Spain won → France loses; Argentina won → Germany loses; draw → nobody
+        assert "France" in result
+        assert "Germany" in result
+        assert "Brazil" not in result
+        assert "England" not in result
+        assert len(result) == 2
+
+    def test_all_draws_returns_empty_list(self):
+        """All matches are draws → no losers."""
+        import worldcup_bot.__main__ as main_mod
+
+        matches = [
+            _make_loser_match(winner="DRAW", home_name="Brazil", away_name="England", uid=1),
+            _make_loser_match(winner="DRAW", home_name="Spain", away_name="France", uid=2),
+        ]
+        ctx = _ctx_with_football_client(matches)
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert result == []
+
+    def test_exception_in_api_never_raises(self):
+        """API exception → function returns [] and never propagates (best-effort)."""
+        import worldcup_bot.__main__ as main_mod
+        from worldcup_bot.api.client import FootballAPIError
+
+        mock_client = MagicMock()
+        mock_client.get_football_day_matches.side_effect = FootballAPIError(503, "unavailable")
+        ctx = MagicMock()
+        ctx.bot_data = {"settings": _make_minimal_settings(), "football_client": mock_client}
+
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert result == []
+
+    def test_unexpected_exception_never_raises(self):
+        """Unexpected RuntimeError → function returns [] without propagating."""
+        import worldcup_bot.__main__ as main_mod
+
+        mock_client = MagicMock()
+        mock_client.get_football_day_matches.side_effect = RuntimeError("unexpected failure")
+        ctx = MagicMock()
+        ctx.bot_data = {"settings": _make_minimal_settings(), "football_client": mock_client}
+
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert result == []
+
+    def test_uses_day_offset_minus_one(self):
+        """get_football_day_matches is called with day_offset=-1 (yesterday)."""
+        import worldcup_bot.__main__ as main_mod
+
+        ctx = _ctx_with_football_client([])
+        settings = _make_minimal_settings()
+        main_mod._fetch_yesterday_losers(ctx, settings)
+        ctx.bot_data["football_client"].get_football_day_matches.assert_called_once()
+        call_args = ctx.bot_data["football_client"].get_football_day_matches.call_args
+        # day_offset is passed as a keyword argument
+        assert call_args.kwargs.get("day_offset") == -1
+
+    def test_returns_list_type(self):
+        """Return value is always a list (never None)."""
+        import worldcup_bot.__main__ as main_mod
+
+        ctx = _ctx_with_football_client([])
+        result = main_mod._fetch_yesterday_losers(ctx, _make_minimal_settings())
+        assert isinstance(result, list)
