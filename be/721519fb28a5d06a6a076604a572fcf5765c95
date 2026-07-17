@@ -1,0 +1,21 @@
+tests/test_predictions_loader.py
+  s_c74bf7aa88a2a8::t_8b6f4843679046 301-315
+tests/test_scoring.py
+  s_c74bf7aa88a2a8::t_8ee9a6d570b53f 577-598,654-661
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "be721519fb28a5d06a6a076604a572fcf5765c95",
+  "prompts": {},
+  "sessions": {
+    "s_c74bf7aa88a2a8": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "339a7916-5218-473f-bac7-fe9639b79b56",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
