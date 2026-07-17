@@ -233,10 +233,9 @@ RICH_DEATH_CLAUSE = (
 )
 
 RICH_DEATH_CAPTION_PROMPT = (
-    "Eres la persona de la imagen y acabas de fallecer. Este es tu último mensaje desde el más"
-    " allá — el más sincero y emotivo de toda tu vida."
-    " Escribe en PRIMERA PERSONA unas 4-6 líneas de despedida:"
-    " llenas de AMOR y GRATITUD hacia todos los del grupo,"
+    "Eres la persona de la imagen. Escribe en PRIMERA PERSONA una despedida emotiva y sincera"
+    " para el grupo — como si fuera la más importante que escribirás:"
+    " llena de AMOR y GRATITUD hacia todos los del grupo,"
     " pidiendo perdón con cariño por haberte enriquecido a su costa todos estos días,"
     " agradeciéndoles de corazón los años de porra y amistad compartida,"
     " despidiéndote de cada miembro del grupo con afecto y ternura,"
@@ -695,8 +694,7 @@ async def generate_rich_caption(
             user_parts.append({
                 "type": "text",
                 "text": (
-                    "Esta es tu despedida final desde el más allá."
-                    " Escribe tu último mensaje de amor, gratitud y paz para todos del grupo."
+                    "Despídete del grupo con un mensaje sincero, emotivo y lleno de amor y gratitud."
                 ),
             })
         user_parts.append({
