@@ -1,0 +1,52 @@
+.squad/orchestration-log/2026-07-17T13_41_48Z-buffon.md
+  s_9e78cbc79c0a32::t_edc39db07de635 1-65
+.squad/orchestration-log/2026-07-17T13_41_48Z-kante.md
+  s_9e78cbc79c0a32::t_323e5da59ab8b3 1-50
+.squad/agents/buffon/history.md
+  s_9e78cbc79c0a32::t_7c023cc1f1d897 6
+  s_afa6aa825d453b::t_d40f39cb468f52 8-13
+.squad/log/2026-07-17T13_41_48Z-rich-apex-death.md
+  s_9e78cbc79c0a32::t_e08bb7a0fbdd16 1-46
+.squad/orchestration-log/2026-07-17T13_41_48Z-pirlo.md
+  s_9e78cbc79c0a32::t_e06dbec50d3cb7 1-53
+.squad/orchestration-log/2026-07-17T13_41_48Z-maldini.md
+  s_9e78cbc79c0a32::t_71d204cd1c1161 1-56
+.squad/decisions.md
+  s_9e78cbc79c0a32::t_4e661f6f382853 1-239
+.squad/agents/kante/history.md
+  s_2f775a0f9d1747::t_fdce7d27bc2781 40-45,66-87
+.squad/agents/maldini/history.md
+  s_2f775a0f9d1747::t_0a60dfa0c1b198 37-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4f04669fde48872b7ac06389841f28683bb75d64",
+  "prompts": {},
+  "sessions": {
+    "s_2f775a0f9d1747": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_014eijX4tN5QwK9zYsW9aAyd",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_9e78cbc79c0a32": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01QYjvfG6DpUHPzW2wY6Gn5z",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_afa6aa825d453b": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01ShBXrEh3TQBee5TF1QHJb9",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
