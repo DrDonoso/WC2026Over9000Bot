@@ -22,6 +22,7 @@ from worldcup_bot.ai.rich_image import (
     RICH_FACE_ANCHOR_CLAUSE,
     RICH_HISTORY_MAX_LINES,
     RICH_THEME_PROMPT,
+    RICH_DEATH_CAPTION_PROMPT,
     POSE_ACTIVITIES,
     _normalize_caption,
     append_caption,
@@ -33,6 +34,8 @@ from worldcup_bot.ai.rich_image import (
     format_history_for_prompt,
     generate_rich_caption,
     generate_wealth_themes,
+    is_rich_apex,
+    is_rich_death,
     load_captions,
     load_history_lines,
     load_level,
@@ -3728,3 +3731,821 @@ class TestMickyBirthdayMode:
         assert "cumpleaños" not in lower
         assert "micky" not in lower
         assert os.path.basename(out_path) == "rich_modified.png"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Apex mode (July 20 — day after the World Cup Final)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichApexMode:
+    """Tests for the Apex special day (July 20 every year).
+
+    Contract under test:
+    - RICH_APEX_MONTH=7, RICH_APEX_DAY=20
+    - is_rich_apex(now) → True iff month==7 and day==20
+    - build_rich_prompt(apex=True, apex_country="Spain") → apex clause with "Spain"
+    - build_rich_prompt(apex=True, apex_country="") → no dangling "{}" in output
+    - build_rich_prompt(apex=True) → apex clause BEFORE anchor clause
+    - generate_rich_caption(apex=True, apex_country="Spain") → apex instruction in user parts
+    - run_rich_iteration(_now=July 20, winners=["Spain"]) → normal promote (rich_modified.png),
+      level incremented, prompt has apex language + "Spain"
+    - run_rich_iteration(_now=July 20, winners=[]) → no crash, no dangling braces
+    """
+
+    # ── is_rich_apex ──────────────────────────────────────────────────────────
+
+    def test_is_rich_apex_true_on_july_20_2026(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_apex
+        import pytz
+        assert is_rich_apex(datetime(2026, 7, 20, 10, 0, 0, tzinfo=pytz.UTC)) is True
+
+    def test_is_rich_apex_true_another_year_july_20(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_apex
+        import pytz
+        assert is_rich_apex(datetime(2030, 7, 20, 12, 0, 0, tzinfo=pytz.UTC)) is True
+
+    def test_is_rich_apex_false_july_19(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_apex
+        import pytz
+        assert is_rich_apex(datetime(2026, 7, 19, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_rich_apex_false_july_21_death_day(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_apex
+        import pytz
+        assert is_rich_apex(datetime(2026, 7, 21, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_rich_apex_false_july_8_rich_birthday(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_apex
+        import pytz
+        assert is_rich_apex(datetime(2026, 7, 8, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_rich_apex_false_jan_20_guards_month_day_transposition(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_apex
+        import pytz
+        assert is_rich_apex(datetime(2026, 1, 20, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    # ── build_rich_prompt — apex parameter ───────────────────────────────────
+
+    def test_build_rich_prompt_apex_true_contains_apex_language(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(apex=True, apex_country="Spain")
+        lower = p.lower()
+        assert "richest" in lower or "pinnacle" in lower or "apex" in lower or "universe" in lower
+
+    def test_build_rich_prompt_apex_true_with_country_contains_country(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(apex=True, apex_country="Spain")
+        assert "Spain" in p
+
+    def test_build_rich_prompt_apex_empty_country_no_dangling_braces(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(apex=True, apex_country="")
+        assert "{country}" not in p
+        assert "{}" not in p
+        # Should fall back to generic champion-nation wording
+        lower = p.lower()
+        assert "champion" in lower or "nation" in lower or "pinnacle" in lower
+
+    def test_build_rich_prompt_apex_false_no_apex_clause(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(apex=False)
+        lower = p.lower()
+        assert "apex mode" not in lower
+        assert "pinnacle" not in lower
+
+    def test_build_rich_prompt_apex_augments_base_not_replaces(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt, RICH_EDIT_PROMPT
+        p = build_rich_prompt(apex=True, apex_country="France")
+        assert p.startswith(RICH_EDIT_PROMPT)
+        assert "same face" in p.lower()
+
+    def test_build_rich_prompt_apex_clause_before_anchor(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt, RICH_FACE_ANCHOR_CLAUSE, RICH_APEX_CLAUSE
+        p = build_rich_prompt(anchor=True, apex=True, apex_country="Brazil")
+        # Apex content appears before the anchor clause
+        apex_snippet = "APEX MODE"
+        apex_pos = p.find(apex_snippet)
+        anchor_pos = p.find(RICH_FACE_ANCHOR_CLAUSE)
+        assert apex_pos != -1 and anchor_pos != -1
+        assert apex_pos < anchor_pos
+
+    def test_build_rich_prompt_apex_with_argentina(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(apex=True, apex_country="Argentina")
+        assert "Argentina" in p
+
+    # ── generate_rich_caption — apex parameter ────────────────────────────────
+
+    async def test_generate_rich_caption_apex_injects_apex_instruction_with_country(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("¡Soy el dueño del universo!")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=5,
+            apex=True,
+            apex_country="Spain",
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        all_text = ""
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                all_text += " " + content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        all_text += " " + part["text"]
+        lower = all_text.lower()
+        assert "cima" in lower or "rico" in lower or "universo" in lower or "poderoso" in lower
+        assert "spain" in lower or "Spain" in all_text
+
+    async def test_generate_rich_caption_apex_empty_country_no_country_sentence(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("¡El dueño del universo!")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=5,
+            apex=True,
+            apex_country="",
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        all_text = ""
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                all_text += " " + content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        all_text += " " + part["text"]
+        # No dangling country reference
+        assert "ha ganado el Mundial" not in all_text or "apex_country" not in all_text
+
+    async def test_generate_rich_caption_apex_uses_standard_system_prompt(self, tmp_path):
+        """Apex mode still uses the cocky RICH_CAPTION_PROMPT as system message."""
+        from worldcup_bot.ai.rich_image import RICH_CAPTION_PROMPT
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("caption")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=5,
+            apex=True,
+            apex_country="France",
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        system_content = messages[0]["content"]
+        assert system_content == RICH_CAPTION_PROMPT
+
+    # ── run_rich_iteration — July 20 end-to-end ───────────────────────────────
+
+    async def test_run_rich_iteration_apex_promotes_to_rich_modified(self, tmp_path):
+        """On July 20 (apex), output IS rich_modified.png — normal promotion path."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG_APEX").decode())
+        fake_cap = _fake_caption_client("¡El más rico del universo!")
+        apex_day = datetime(2026, 7, 20, 10, 0, 0, tzinfo=pytz.UTC)
+
+        out_path, level, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=apex_day,
+            winners=["Spain"],
+        )
+
+        assert os.path.basename(out_path) == "rich_modified.png"
+        assert Path(out_path).read_bytes() == b"PNG_APEX"
+
+    async def test_run_rich_iteration_apex_level_incremented(self, tmp_path):
+        """On July 20, level is incremented and persisted (normal promotion)."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        save_level(str(state_dir), 3)
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("apex caption")
+        apex_day = datetime(2026, 7, 20, 10, 0, 0, tzinfo=pytz.UTC)
+
+        _, level, _ = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=apex_day,
+            winners=["Spain"],
+        )
+
+        assert level == 4
+        assert load_level(str(state_dir)) == 4
+
+    async def test_run_rich_iteration_apex_prompt_has_apex_and_country(self, tmp_path):
+        """On July 20, image prompt contains apex language and the winning country."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("caption")
+        apex_day = datetime(2026, 7, 20, 10, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=apex_day,
+            winners=["Spain"],
+        )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        lower = img_prompt.lower()
+        assert "richest" in lower or "pinnacle" in lower or "apex" in lower or "universe" in lower
+        assert "Spain" in img_prompt or "spain" in lower
+
+    async def test_run_rich_iteration_apex_empty_winners_no_crash_no_dangling_braces(self, tmp_path):
+        """On July 20 with no winners, no crash and no '{country}' in the image prompt."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("fallback apex")
+        apex_day = datetime(2026, 7, 20, 10, 0, 0, tzinfo=pytz.UTC)
+
+        out_path, level, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=apex_day,
+            winners=[],
+        )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        assert "{country}" not in img_prompt
+        assert "{}" not in img_prompt
+        assert Path(out_path).exists()
+
+    async def test_run_rich_iteration_apex_no_themes_generated(self, tmp_path):
+        """On July 20, generate_wealth_themes is NOT called (apex clause handles country)."""
+        from datetime import datetime
+        import pytz
+        from unittest.mock import patch, AsyncMock
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        apex_day = datetime(2026, 7, 20, 10, 0, 0, tzinfo=pytz.UTC)
+
+        with patch(
+            "worldcup_bot.ai.rich_image.generate_wealth_themes",
+        ) as mock_themes:
+            await run_rich_iteration(
+                settings,
+                _client=fake_img,
+                _data_dir=str(data_dir),
+                _now=apex_day,
+                winners=["Spain"],
+            )
+        mock_themes.assert_not_called()
+
+    async def test_run_rich_iteration_apex_caption_uses_apex_instruction(self, tmp_path):
+        """On July 20, the caption messages include the apex instruction with the country."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("apex caption")
+        apex_day = datetime(2026, 7, 20, 10, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=apex_day,
+            winners=["Argentina"],
+        )
+
+        messages = fake_cap.chat.completions.create.call_args.kwargs["messages"]
+        all_text = ""
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                all_text += " " + content
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        all_text += " " + part["text"]
+        lower = all_text.lower()
+        assert "cima" in lower or "rico" in lower or "universo" in lower or "poderoso" in lower
+        assert "argentina" in lower or "Argentina" in all_text
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Death mode (July 21 — two days after the World Cup Final)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRichDeathMode:
+    """Tests for the Death special day (July 21 every year).
+
+    Contract under test:
+    - RICH_DEATH_MONTH=7, RICH_DEATH_DAY=21
+    - is_rich_death(now) → True iff month==7 and day==21
+    - build_rich_prompt(death=True) → death/farewell clause appended
+    - build_rich_prompt(death=True) → death clause BEFORE anchor clause
+    - generate_rich_caption(death=True) → uses RICH_DEATH_CAPTION_PROMPT as system
+    - run_rich_iteration(_now=July 21) → writes rich_death.png, does NOT touch
+      rich_modified.png / level / history / captions (separate-file path, mirrors Micky)
+    """
+
+    # ── is_rich_death ─────────────────────────────────────────────────────────
+
+    def test_is_rich_death_true_on_july_21_2026(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_death
+        import pytz
+        assert is_rich_death(datetime(2026, 7, 21, 10, 0, 0, tzinfo=pytz.UTC)) is True
+
+    def test_is_rich_death_true_another_year_july_21(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_death
+        import pytz
+        assert is_rich_death(datetime(2030, 7, 21, 12, 0, 0, tzinfo=pytz.UTC)) is True
+
+    def test_is_rich_death_false_july_20_apex_day(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_death
+        import pytz
+        assert is_rich_death(datetime(2026, 7, 20, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_rich_death_false_july_22(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_death
+        import pytz
+        assert is_rich_death(datetime(2026, 7, 22, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_rich_death_false_july_8_rich_birthday(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_death
+        import pytz
+        assert is_rich_death(datetime(2026, 7, 8, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    def test_is_rich_death_false_jan_21_guards_month_day_transposition(self):
+        from datetime import datetime
+        from worldcup_bot.ai.rich_image import is_rich_death
+        import pytz
+        assert is_rich_death(datetime(2026, 1, 21, 10, 0, 0, tzinfo=pytz.UTC)) is False
+
+    # ── RICH_DEATH_CAPTION_PROMPT — content checks ────────────────────────────
+
+    def test_rich_death_caption_prompt_exists(self):
+        from worldcup_bot.ai.rich_image import RICH_DEATH_CAPTION_PROMPT
+        assert isinstance(RICH_DEATH_CAPTION_PROMPT, str)
+        assert len(RICH_DEATH_CAPTION_PROMPT) > 50
+
+    def test_rich_death_caption_prompt_mentions_love_or_gratitude(self):
+        from worldcup_bot.ai.rich_image import RICH_DEATH_CAPTION_PROMPT
+        lower = RICH_DEATH_CAPTION_PROMPT.lower()
+        assert "amor" in lower or "gratitud" in lower or "love" in lower or "gracias" in lower
+
+    def test_rich_death_caption_prompt_forbids_slash_separator(self):
+        from worldcup_bot.ai.rich_image import RICH_DEATH_CAPTION_PROMPT
+        assert "/" in RICH_DEATH_CAPTION_PROMPT  # mentions "/" as forbidden
+        lower = RICH_DEATH_CAPTION_PROMPT.lower()
+        assert "nunca" in lower or "never" in lower
+
+    def test_rich_death_caption_prompt_differs_from_rich_caption_prompt(self):
+        from worldcup_bot.ai.rich_image import RICH_DEATH_CAPTION_PROMPT, RICH_CAPTION_PROMPT
+        assert RICH_DEATH_CAPTION_PROMPT != RICH_CAPTION_PROMPT
+
+    # ── build_rich_prompt — death parameter ──────────────────────────────────
+
+    def test_build_rich_prompt_death_true_contains_farewell_language(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(death=True)
+        lower = p.lower()
+        assert (
+            "farewell" in lower
+            or "died" in lower
+            or "passing" in lower
+            or "peaceful" in lower
+            or "state" in lower
+        )
+
+    def test_build_rich_prompt_death_true_is_non_gory(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(death=True)
+        lower = p.lower()
+        assert "non-gory" in lower or "non-violent" in lower or "no blood" in lower
+
+    def test_build_rich_prompt_death_false_no_death_clause(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(death=False)
+        lower = p.lower()
+        assert "farewell" not in lower
+        assert "non-gory" not in lower
+        assert "non-violent" not in lower
+
+    def test_build_rich_prompt_death_augments_base_not_replaces(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt, RICH_EDIT_PROMPT
+        p = build_rich_prompt(death=True)
+        assert p.startswith(RICH_EDIT_PROMPT)
+        assert "same face" in p.lower()
+
+    def test_build_rich_prompt_death_clause_before_anchor(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt, RICH_FACE_ANCHOR_CLAUSE, RICH_DEATH_CLAUSE
+        p = build_rich_prompt(anchor=True, death=True)
+        death_snippet = "FAREWELL"
+        death_pos = p.find(death_snippet)
+        anchor_pos = p.find(RICH_FACE_ANCHOR_CLAUSE)
+        assert death_pos != -1 and anchor_pos != -1
+        assert death_pos < anchor_pos
+
+    # ── generate_rich_caption — death parameter ───────────────────────────────
+
+    async def test_generate_rich_caption_death_uses_death_system_prompt(self, tmp_path):
+        """When death=True, the system message content is RICH_DEATH_CAPTION_PROMPT."""
+        from worldcup_bot.ai.rich_image import RICH_DEATH_CAPTION_PROMPT
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("Adiós a todos... ❤️")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=10,
+            death=True,
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        system_content = messages[0]["content"]
+        assert system_content == RICH_DEATH_CAPTION_PROMPT
+
+    async def test_generate_rich_caption_death_uses_different_system_from_normal(self, tmp_path):
+        """death=False uses RICH_CAPTION_PROMPT; death=True uses RICH_DEATH_CAPTION_PROMPT."""
+        from worldcup_bot.ai.rich_image import RICH_CAPTION_PROMPT, RICH_DEATH_CAPTION_PROMPT
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+
+        fake_normal = _fake_caption_client("normal caption")
+        await generate_rich_caption(
+            api_key="k", base_url="http://x", model="gpt-4",
+            old_image_path=str(old_img), new_image_path=str(new_img), level=1,
+            death=False, _client=fake_normal,
+        )
+        normal_system = fake_normal.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        assert normal_system == RICH_CAPTION_PROMPT
+
+        fake_death = _fake_caption_client("farewell caption")
+        await generate_rich_caption(
+            api_key="k", base_url="http://x", model="gpt-4",
+            old_image_path=str(old_img), new_image_path=str(new_img), level=1,
+            death=True, _client=fake_death,
+        )
+        death_system = fake_death.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+        assert death_system == RICH_DEATH_CAPTION_PROMPT
+        assert death_system != normal_system
+
+    async def test_generate_rich_caption_death_injects_farewell_instruction(self, tmp_path):
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("Adiós... ❤️")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=10,
+            death=True,
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        lower = combined.lower()
+        assert "despedida" in lower or "farewell" in lower or "último" in lower or "amor" in lower
+
+    # ── run_rich_iteration — July 21 end-to-end ───────────────────────────────
+
+    async def test_run_rich_iteration_death_writes_rich_death_png(self, tmp_path):
+        """On July 21, output path is rich_death.png (separate file)."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG_DEATH").decode())
+        fake_cap = _fake_caption_client("Adiós...")
+        death_day = datetime(2026, 7, 21, 10, 0, 0, tzinfo=pytz.UTC)
+
+        out_path, level, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=death_day,
+        )
+
+        assert os.path.basename(out_path) == "rich_death.png"
+        assert Path(out_path).read_bytes() == b"PNG_DEATH"
+
+    async def test_run_rich_iteration_death_does_not_touch_rich_modified(self, tmp_path):
+        """On July 21, rich_modified.png is NOT overwritten (chain stays clean)."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        evolved_bytes = b"PNG_EVOLVED_UNTOUCHED"
+        (state_dir / "rich_modified.png").write_bytes(evolved_bytes)
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG_DEATH_NEW").decode())
+        fake_cap = _fake_caption_client("Adiós...")
+        death_day = datetime(2026, 7, 21, 10, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=death_day,
+        )
+
+        assert (state_dir / "rich_modified.png").read_bytes() == evolved_bytes
+
+    async def test_run_rich_iteration_death_level_not_bumped(self, tmp_path):
+        """On July 21, level counter is NOT incremented (no save_level call)."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+        save_level(str(state_dir), 7)
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("Adiós...")
+        death_day = datetime(2026, 7, 21, 10, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=death_day,
+        )
+
+        assert load_level(str(state_dir)) == 7
+
+    async def test_run_rich_iteration_death_history_not_appended(self, tmp_path):
+        """On July 21, rich_history.txt and rich_captions.txt are NOT appended."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        payload = json.dumps({"caption": "Adiós grupo", "memo": "some death memo"}, ensure_ascii=False)
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client(payload)
+        death_day = datetime(2026, 7, 21, 10, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=death_day,
+        )
+
+        assert load_history_lines(str(state_dir)) == []
+        assert load_captions(str(state_dir)) == []
+
+    async def test_run_rich_iteration_death_caption_uses_death_system_prompt(self, tmp_path):
+        """On July 21, the caption API call uses RICH_DEATH_CAPTION_PROMPT as system message."""
+        from datetime import datetime
+        import pytz
+        from worldcup_bot.ai.rich_image import RICH_DEATH_CAPTION_PROMPT
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("Adiós...")
+        death_day = datetime(2026, 7, 21, 10, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=death_day,
+        )
+
+        messages = fake_cap.chat.completions.create.call_args.kwargs["messages"]
+        assert messages[0]["content"] == RICH_DEATH_CAPTION_PROMPT
+
+    async def test_run_rich_iteration_death_prompt_has_farewell_language(self, tmp_path):
+        """On July 21, the image-edit prompt contains the death/farewell clause."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("Adiós...")
+        death_day = datetime(2026, 7, 21, 10, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=death_day,
+        )
+
+        img_prompt = fake_img.images.edit.call_args.kwargs["prompt"]
+        lower = img_prompt.lower()
+        assert (
+            "farewell" in lower
+            or "died" in lower
+            or "passing" in lower
+            or "peaceful" in lower
+        )
+        assert "non-gory" in lower or "non-violent" in lower or "no blood" in lower
+
+    async def test_run_rich_iteration_death_fallback_caption_when_no_chat(self, tmp_path):
+        """On July 21 with no chat model, fallback caption is the death farewell."""
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+        (state_dir / "rich_modified.png").write_bytes(b"PNG_EVOLVED")
+
+        settings = _make_settings(
+            tmp_path,
+            state_dir=str(state_dir),
+            openai_api_key="",
+            openai_base_url="",
+            openai_model="",
+        )
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        death_day = datetime(2026, 7, 21, 10, 0, 0, tzinfo=pytz.UTC)
+
+        _, _, caption = await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _data_dir=str(data_dir),
+            _now=death_day,
+        )
+
+        lower = caption.lower()
+        assert "marcho" in lower or "quiero" in lower or "gracias" in lower or "❤️" in caption or "🕊️" in caption
+
+    async def test_run_rich_iteration_death_no_themes_generated(self, tmp_path):
+        """On July 21, generate_wealth_themes is NOT called."""
+        from datetime import datetime
+        import pytz
+        from unittest.mock import patch
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        death_day = datetime(2026, 7, 21, 10, 0, 0, tzinfo=pytz.UTC)
+
+        with patch("worldcup_bot.ai.rich_image.generate_wealth_themes") as mock_themes:
+            await run_rich_iteration(
+                settings,
+                _client=fake_img,
+                _data_dir=str(data_dir),
+                _now=death_day,
+                winners=["Spain"],
+            )
+        mock_themes.assert_not_called()
+

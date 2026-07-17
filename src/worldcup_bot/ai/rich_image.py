@@ -179,7 +179,75 @@ def micky_birthday_age(now: datetime) -> int:
     return now.year - MICKY_BIRTH_YEAR
 
 
-def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "", pose: str = "", birthday: bool = False, age: int | None = None, micky_birthday: bool = False) -> str:
+# ── Apex constants (July 20 — day after the World Cup Final) ──────────────────
+
+RICH_APEX_MONTH = 7
+RICH_APEX_DAY = 20
+
+RICH_APEX_CLAUSE = (
+    " APEX MODE — THE ABSOLUTE PINNACLE OF WEALTH AND POWER: Today this person has achieved the"
+    " single richest, most all-powerful status of any being in the entire planet and universe —"
+    " utterly over-the-top, ridiculous, omnipotent ruler of everything that exists."
+    " Transform the scene into a jaw-dropping, cosmic, god-tier spectacle of supreme wealth and"
+    " omnipotence: an ocean of gold and diamonds stretching to every horizon, a colossal ornate"
+    " throne towering above entire cities, a galactic/cosmic backdrop with nebulae and stars,"
+    " whole crowds and civilisations bowing in worship, monumental statues and landmarks built in"
+    " his honour radiating absolute power — wealth and dominion that defy all comprehension."
+    " PROMINENTLY incorporate national symbols of {country}: the flag of {country} draped"
+    " everywhere in the scene, the national colours of {country} dominant throughout the"
+    " composition, iconic landmarks and cultural icons of {country} reimagined at colossal scale"
+    " — as if {country}'s World Cup Final victory has crowned him absolute ruler of the world."
+    " Keep EXACT same face/identity, tasteful, fully clothed, photorealistic, epic scale."
+)
+
+
+def is_rich_apex(now: datetime) -> bool:
+    """True when *now* is Apex day — July 20, the day after the World Cup Final."""
+    return now.month == RICH_APEX_MONTH and now.day == RICH_APEX_DAY
+
+
+# ── Death constants (July 21 — two days after the World Cup Final) ────────────
+
+RICH_DEATH_MONTH = 7
+RICH_DEATH_DAY = 21
+
+RICH_DEATH_CLAUSE = (
+    " FAREWELL — A DIGNIFIED, PEACEFUL PASSING: The person appears to have died."
+    " Generate a DIGNIFIED, TASTEFUL, PEACEFUL farewell scene — absolutely NON-GORY,"
+    " NON-VIOLENT, no blood, no wounds whatsoever."
+    " Show the person lying SERENELY IN STATE in an opulent grand memorial chamber:"
+    " surrounded by sumptuous flower arrangements, softly burning candles,"
+    " silent respectful mourners bowing their heads in grief,"
+    " extraordinary wealth and grandeur all around."
+    " Soft celestial light filters through the scene, bathing everything in a warm peaceful glow."
+    " The person's face is completely serene and at peace, eyes gently closed."
+    " The overall mood is one of profound dignity, grace, tenderness, and love —"
+    " a beautiful, opulent, deeply moving farewell."
+    " Keep EXACT same face/identity, photorealistic."
+)
+
+RICH_DEATH_CAPTION_PROMPT = (
+    "Eres la persona de la imagen y acabas de fallecer. Este es tu último mensaje desde el más"
+    " allá — el más sincero y emotivo de toda tu vida."
+    " Escribe en PRIMERA PERSONA unas 4-6 líneas de despedida:"
+    " llenas de AMOR y GRATITUD hacia todos los del grupo,"
+    " pidiendo perdón con cariño por haberte enriquecido a su costa todos estos días,"
+    " agradeciéndoles de corazón los años de porra y amistad compartida,"
+    " despidiéndote de cada miembro del grupo con afecto y ternura,"
+    " y enviando un mensaje de amor, paz y esperanza para todos."
+    " Tono: completamente opuesto al chulesco habitual — sincero, emotivo, sereno y lleno de amor."
+    " Unas 4-6 líneas. Emojis sobrios y cálidos: 🕊️ ❤️ 🙏."
+    " Separa las frases con SALTOS DE LÍNEA, NUNCA con barras '/' ni con ' / '."
+    " Sin hashtags, sin markdown. Menos de 600 caracteres."
+)
+
+
+def is_rich_death(now: datetime) -> bool:
+    """True when *now* is Death day — July 21, two days after the World Cup Final."""
+    return now.month == RICH_DEATH_MONTH and now.day == RICH_DEATH_DAY
+
+
+def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "", pose: str = "", birthday: bool = False, age: int | None = None, micky_birthday: bool = False, apex: bool = False, apex_country: str = "", death: bool = False) -> str:
     """Return the full editing prompt for one wealth-escalation iteration.
 
     Richness escalation is implicit: each run takes the previous output as input,
@@ -193,8 +261,12 @@ def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "",
     When ``birthday`` is True, appends :data:`RICH_BIRTHDAY_CLAUSE` (rich's own birthday party theme).
     When ``micky_birthday`` is True, appends :data:`MICKY_BIRTHDAY_CLAUSE` describing the third
     reference image and instructing the model to make Micky the protagonist.
+    When ``apex`` is True, appends :data:`RICH_APEX_CLAUSE` with the god-tier richest-being
+    scene incorporating ``apex_country``'s national symbols (or "the champion nation" if empty).
+    When ``death`` is True, appends :data:`RICH_DEATH_CLAUSE` for the dignified farewell scene.
     When ``anchor`` is True, appends :data:`RICH_FACE_ANCHOR_CLAUSE` instructing the
     model that a second reference image (the original) is provided to lock the face.
+    Apex and death clauses are placed BEFORE the anchor clause.
     """
     base = RICH_EDIT_PROMPT
     if history:
@@ -217,6 +289,10 @@ def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "",
         base += RICH_BIRTHDAY_CLAUSE.format(age=age)
     if micky_birthday and age is not None:
         base += MICKY_BIRTHDAY_CLAUSE.format(age=age)
+    if apex:
+        base += RICH_APEX_CLAUSE.format(country=apex_country or "the champion nation")
+    if death:
+        base += RICH_DEATH_CLAUSE
     if anchor:
         base += RICH_FACE_ANCHOR_CLAUSE
     return base
@@ -510,9 +586,12 @@ async def generate_rich_caption(
     birthday: bool = False,
     age: int | None = None,
     micky_birthday: bool = False,
+    apex: bool = False,
+    apex_country: str = "",
+    death: bool = False,
     _client: object | None = None,
 ) -> tuple[str, str]:
-    """Generate a cocky first-person caption comparing BEFORE and AFTER images.
+    """Generate a first-person caption comparing BEFORE and AFTER images.
 
     Uses the main chat model (multimodal) — NOT the image model key.
     Both images are base64-encoded and sent as inline data URLs.
@@ -528,9 +607,16 @@ async def generate_rich_caption(
     When ``micky_birthday`` is True, an explicit instruction to congratulate Micky
     by name is injected so the caption greets him first.
 
+    When ``apex`` is True, uses the cocky :data:`RICH_CAPTION_PROMPT` with an added
+    megalomaniac apex instruction referencing ``apex_country`` when provided.
+
+    When ``death`` is True, uses :data:`RICH_DEATH_CAPTION_PROMPT` as the system prompt
+    (full tone shift — sincere farewell) instead of the cocky default.
+
     Raises RuntimeError only on transport/API errors; the caller decides the fallback.
     """
     client = _client or AsyncOpenAI(api_key=api_key, base_url=base_url)
+    system_prompt = RICH_DEATH_CAPTION_PROMPT if death else RICH_CAPTION_PROMPT
     try:
         old_ext = os.path.splitext(old_image_path)[1].lower()
         old_mime = "image/jpeg" if old_ext in (".jpg", ".jpeg") else "image/png"
@@ -576,6 +662,27 @@ async def generate_rich_caption(
                     " y celebradlo a lo grande. El saludo a Micky es OBLIGATORIO."
                 ),
             })
+        if apex:
+            country_sentence = (
+                f" {apex_country} ha ganado el Mundial y te ha coronado amo del mundo."
+                if apex_country else ""
+            )
+            user_parts.append({
+                "type": "text",
+                "text": (
+                    "HOY HAS ALCANZADO LA CIMA: eres LA PERSONA MÁS RICA DEL UNIVERSO y el ser"
+                    " más poderoso jamás visto. Presume de forma desmesurada y ridícula de que lo"
+                    f" posees TODO.{country_sentence}"
+                ),
+            })
+        if death:
+            user_parts.append({
+                "type": "text",
+                "text": (
+                    "Esta es tu despedida final desde el más allá."
+                    " Escribe tu último mensaje de amor, gratitud y paz para todos del grupo."
+                ),
+            })
         user_parts.append({
             "type": "text",
             "text": (
@@ -586,7 +693,7 @@ async def generate_rich_caption(
         })
 
         messages = [
-            {"role": "system", "content": RICH_CAPTION_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_parts},
         ]
         resp = await client.chat.completions.create(
@@ -683,6 +790,14 @@ async def run_rich_iteration(
     the level counter are left untouched so the daily wealth escalation continues
     cleanly from the previous day's output the next morning.  The output is written
     to ``rich_micky_birthday.png`` in the state directory and that path is returned.
+
+    **Apex (July 20 — day after the Final):** uses the normal promote path with the
+    apex clause prominent in the image prompt.  The winning country (``winners[0]``
+    when available) is woven into the scene as national symbols.
+
+    **Death (July 21):** writes to a separate ``rich_death.png`` and does NOT
+    promote into the evolution chain, mirroring the Micky birthday behaviour.
+    Caption uses :data:`RICH_DEATH_CAPTION_PROMPT` (sincere farewell tone).
     """
     api_key = _effective_image_api_key(settings)
     base_url = _effective_image_base_url(settings)
@@ -700,6 +815,14 @@ async def run_rich_iteration(
     micky_age = micky_birthday_age(now)
     if micky_birthday:
         log.info("run_rich_iteration: MICKY BIRTHDAY MODE active — age=%d", micky_age)
+
+    apex = is_rich_apex(now)
+    death = is_rich_death(now)
+    apex_country = winners[0] if (apex and winners) else ""
+    if apex:
+        log.info("run_rich_iteration: APEX MODE active — country=%r", apex_country)
+    if death:
+        log.info("run_rich_iteration: DEATH MODE active")
 
     # Read state BEFORE editing
     image_history = format_history_for_prompt(settings.state_dir, max_items=12)
@@ -730,9 +853,18 @@ async def run_rich_iteration(
             )
             micky_birthday = False
 
-    # Compute country-themed opulent props from yesterday's winners — best-effort
+    # Compute country-themed opulent props from yesterday's winners — best-effort.
+    # Skip for apex (the apex clause handles the winning country directly) and for
+    # death (a lying-in-state scene needs no party props).
     themes = ""
-    if winners and settings.openai_api_key and settings.openai_base_url and settings.openai_model:
+    if (
+        winners
+        and settings.openai_api_key
+        and settings.openai_base_url
+        and settings.openai_model
+        and not apex
+        and not death
+    ):
         themes = await generate_wealth_themes(
             settings.openai_api_key,
             settings.openai_base_url,
@@ -741,8 +873,8 @@ async def run_rich_iteration(
             _client=_caption_client,
         )
     log.info(
-        "run_rich_iteration: iter=%d, base=%s, anchor=%s, micky_birthday=%s, winners=%s, themes=%r",
-        level, base_image, using_anchor, micky_birthday, winners, themes,
+        "run_rich_iteration: iter=%d, base=%s, anchor=%s, micky_birthday=%s, apex=%s, death=%s, winners=%s, themes=%r",
+        level, base_image, using_anchor, micky_birthday, apex, death, winners, themes,
     )
 
     pose = random.choice(POSE_ACTIVITIES)
@@ -758,19 +890,28 @@ async def run_rich_iteration(
             age=micky_age,
             micky_birthday=True,
         )
+    elif death:
+        # Death: dignified farewell scene — no pose instruction needed.
+        prompt = build_rich_prompt(
+            history=image_history,
+            anchor=using_anchor or True,  # always try to anchor face for death
+            death=True,
+        )
     else:
         prompt = build_rich_prompt(
             history=image_history,
-            anchor=using_anchor,
+            anchor=using_anchor or apex,  # force anchor for apex
             themes=themes,
             pose=pose,
             birthday=birthday,
             age=age,
+            apex=apex,
+            apex_country=apex_country,
         )
 
     extra_paths = [micky_path] if micky_birthday and micky_path else None
-    # On Micky's birthday ensure anchor (rich_original.jpg) is always included
-    anchor_arg = original if (using_anchor or micky_birthday) else None
+    # Force anchor (original face reference) for Micky, apex, and death
+    anchor_arg = original if (using_anchor or micky_birthday or apex or death) else None
 
     png_bytes = await edit_rich_image(
         api_key=api_key,
@@ -820,12 +961,52 @@ async def run_rich_iteration(
         # Do NOT call save_level / append_history / append_caption — chain stays clean
         return final_path, level, caption
 
-    # ── Normal (non-Micky) path ───────────────────────────────────────────────
+    if death:
+        # Death: write to a separate file, do NOT touch the evolution chain —
+        # mirroring the Micky birthday pattern exactly.
+        tmp_path = os.path.join(settings.state_dir, "rich_death.new.png")
+        final_path = os.path.join(settings.state_dir, "rich_death.png")
+        Path(tmp_path).write_bytes(png_bytes)
+
+        caption = "🕊️ Me marcho... os quiero a todos. Gracias por tanto. ❤️"
+        if settings.openai_api_key and settings.openai_base_url and settings.openai_model:
+            try:
+                caption, _memo = await generate_rich_caption(
+                    api_key=settings.openai_api_key,
+                    base_url=settings.openai_base_url,
+                    model=settings.openai_model,
+                    old_image_path=base_image,
+                    new_image_path=tmp_path,
+                    level=level,
+                    history=full_history,
+                    recent_captions=recent_captions,
+                    death=True,
+                    _client=_caption_client,
+                )
+            except Exception as exc:
+                log.warning("run_rich_iteration: death caption failed: %s", exc)
+                caption = "🕊️ Me marcho... os quiero a todos. Gracias por tanto. ❤️"
+
+        if os.path.exists(final_path):
+            os.remove(final_path)
+        os.replace(tmp_path, final_path)
+        log.info("run_rich_iteration: death image written %s (%d bytes)", final_path, len(png_bytes))
+        # Do NOT call save_level / append_history / append_caption — chain stays clean
+        return final_path, level, caption
+
+    # ── Normal path (includes Apex on July 20 as flags) ──────────────────────
     tmp_path = os.path.join(settings.state_dir, "rich_modified.new.png")
     Path(tmp_path).write_bytes(png_bytes)
 
     # Generate caption via main chat model — best-effort, never fatal
-    caption = f"🎂 ¡Hoy cumplo {age} y me lo monto a lo grande a vuestra costa!" if birthday else "🤑 Cada día más rico a vuestra costa"
+    if apex:
+        default_caption = "🌍 El ser más rico del universo. Todo es mío."
+    elif birthday:
+        default_caption = f"🎂 ¡Hoy cumplo {age} y me lo monto a lo grande a vuestra costa!"
+    else:
+        default_caption = "🤑 Cada día más rico a vuestra costa"
+    caption = default_caption
+
     if settings.openai_api_key and settings.openai_base_url and settings.openai_model:
         try:
             caption, memo = await generate_rich_caption(
@@ -839,13 +1020,15 @@ async def run_rich_iteration(
                 recent_captions=recent_captions,
                 birthday=birthday,
                 age=age,
+                apex=apex,
+                apex_country=apex_country,
                 _client=_caption_client,
             )
             append_history(settings.state_dir, date_str, level, memo)
             append_caption(settings.state_dir, caption)
         except Exception as exc:
             log.warning("run_rich_iteration: caption generation failed: %s", exc)
-            caption = f"🎂 ¡Hoy cumplo {age} y me lo monto a lo grande a vuestra costa!" if birthday else "🤑 Cada día más rico a vuestra costa"
+            caption = default_caption
 
     # Atomic rename: remove stale final if present, then promote temp
     final_path = os.path.join(settings.state_dir, "rich_modified.png")
