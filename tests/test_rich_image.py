@@ -23,6 +23,7 @@ from worldcup_bot.ai.rich_image import (
     RICH_HISTORY_MAX_LINES,
     RICH_THEME_PROMPT,
     RICH_DEATH_CAPTION_PROMPT,
+    RICH_APEX_TRAMPLE_SENTENCE,
     POSE_ACTIVITIES,
     _normalize_caption,
     append_caption,
@@ -3841,6 +3842,33 @@ class TestRichApexMode:
         p = build_rich_prompt(apex=True, apex_country="Argentina")
         assert "Argentina" in p
 
+    def test_build_rich_prompt_apex_loser_adds_trample_sentence(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(apex=True, apex_country="Spain", apex_loser="France")
+        assert "France" in p
+        lower = p.lower()
+        assert "beneath" in lower or "feet" in lower or "defeated" in lower or "trophy" in lower
+
+    def test_build_rich_prompt_apex_empty_loser_no_trample_sentence(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt, RICH_APEX_TRAMPLE_SENTENCE
+        p = build_rich_prompt(apex=True, apex_country="Spain", apex_loser="")
+        assert "{loser}" not in p
+        # Trample snippet must be absent — key words from the sentence
+        lower = p.lower()
+        assert "trophy" not in lower or "beneath his feet" not in p
+
+    def test_build_rich_prompt_apex_loser_no_dangling_braces(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(apex=True, apex_country="Spain", apex_loser="Argentina")
+        assert "{loser}" not in p
+        assert "{}" not in p
+
+    def test_build_rich_prompt_apex_loser_and_country_both_in_prompt(self):
+        from worldcup_bot.ai.rich_image import build_rich_prompt
+        p = build_rich_prompt(apex=True, apex_country="France", apex_loser="Germany")
+        assert "France" in p
+        assert "Germany" in p
+
     # ── generate_rich_caption — apex parameter ────────────────────────────────
 
     async def test_generate_rich_caption_apex_injects_apex_instruction_with_country(self, tmp_path):
@@ -3926,6 +3954,57 @@ class TestRichApexMode:
         messages = fake.chat.completions.create.call_args.kwargs["messages"]
         system_content = messages[0]["content"]
         assert system_content == RICH_CAPTION_PROMPT
+
+    async def test_generate_rich_caption_apex_loser_in_user_instruction(self, tmp_path):
+        """When apex=True and apex_loser is set, the loser name appears in the user instruction."""
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("caption")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=5,
+            apex=True,
+            apex_country="Spain",
+            apex_loser="France",
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        assert "France" in combined or "france" in combined.lower()
+
+    async def test_generate_rich_caption_apex_no_loser_no_loser_mention(self, tmp_path):
+        """When apex_loser is empty, no loser mention in the user instruction."""
+        old_img = tmp_path / "before.jpg"
+        new_img = tmp_path / "after.png"
+        old_img.write_bytes(b"DATA")
+        new_img.write_bytes(b"DATA")
+        fake = _fake_caption_client("caption")
+        await generate_rich_caption(
+            api_key="k",
+            base_url="http://x",
+            model="gpt-4",
+            old_image_path=str(old_img),
+            new_image_path=str(new_img),
+            level=5,
+            apex=True,
+            apex_country="Spain",
+            apex_loser="",
+            _client=fake,
+        )
+        messages = fake.chat.completions.create.call_args.kwargs["messages"]
+        user_content = messages[1]["content"]
+        text_parts = [p["text"] for p in user_content if p.get("type") == "text"]
+        combined = "\n".join(text_parts)
+        assert "aplastado" not in combined.lower()
+        assert "{loser}" not in combined
 
     # ── run_rich_iteration — July 20 end-to-end ───────────────────────────────
 
@@ -4115,6 +4194,91 @@ class TestRichApexMode:
         lower = all_text.lower()
         assert "cima" in lower or "rico" in lower or "universo" in lower or "poderoso" in lower
         assert "argentina" in lower or "Argentina" in all_text
+
+    async def test_run_rich_iteration_apex_losers_in_image_prompt(self, tmp_path):
+        """On July 20 with losers=['France'], the image prompt contains trample language and 'France'."""
+        import base64
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("apex caption")
+        apex_day = datetime(2026, 7, 20, 10, 0, 0, tzinfo=pytz.UTC)
+
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=apex_day,
+            winners=["Spain"],
+            losers=["France"],
+        )
+
+        call_kwargs = fake_img.images.edit.call_args.kwargs
+        prompt_used = call_kwargs.get("prompt", "")
+        assert "France" in prompt_used
+        lower = prompt_used.lower()
+        assert "beneath" in lower or "feet" in lower or "defeated" in lower or "trophy" in lower
+
+    async def test_run_rich_iteration_apex_no_losers_no_crash(self, tmp_path):
+        """July 20 with losers=[] (or None) — no crash, no dangling {loser} in prompt."""
+        import base64
+        from datetime import datetime
+        import pytz
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        data_dir = tmp_path / "data"
+        (data_dir / "rich").mkdir(parents=True)
+        (data_dir / "rich" / "rich_original.jpg").write_bytes(b"JPEG_ORIG")
+
+        settings = _make_settings(tmp_path, state_dir=str(state_dir))
+        fake_img = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap = _fake_caption_client("apex caption")
+        apex_day = datetime(2026, 7, 20, 10, 0, 0, tzinfo=pytz.UTC)
+
+        # empty losers list
+        await run_rich_iteration(
+            settings,
+            _client=fake_img,
+            _caption_client=fake_cap,
+            _data_dir=str(data_dir),
+            _now=apex_day,
+            winners=["Spain"],
+            losers=[],
+        )
+        call_kwargs = fake_img.images.edit.call_args.kwargs
+        prompt_used = call_kwargs.get("prompt", "")
+        assert "{loser}" not in prompt_used
+        assert "{}" not in prompt_used
+
+        # None losers
+        state_dir2 = tmp_path / "state2"
+        state_dir2.mkdir()
+        settings2 = _make_settings(tmp_path, state_dir=str(state_dir2))
+        fake_img2 = _fake_client(base64.b64encode(b"PNG").decode())
+        fake_cap2 = _fake_caption_client("apex caption")
+
+        await run_rich_iteration(
+            settings2,
+            _client=fake_img2,
+            _caption_client=fake_cap2,
+            _data_dir=str(data_dir),
+            _now=apex_day,
+            winners=["Spain"],
+            losers=None,
+        )
+        call_kwargs2 = fake_img2.images.edit.call_args.kwargs
+        prompt_used2 = call_kwargs2.get("prompt", "")
+        assert "{loser}" not in prompt_used2
 
 
 # ══════════════════════════════════════════════════════════════════════════════

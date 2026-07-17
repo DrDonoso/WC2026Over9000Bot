@@ -331,6 +331,37 @@ def _fetch_yesterday_winners(
         return []
 
 
+def _fetch_yesterday_losers(
+    context: ContextTypes.DEFAULT_TYPE, settings: Settings
+) -> list[str]:
+    """Losing-country names from yesterday's finished matches (best-effort, never raises).
+
+    Returns the losing side of each FINISHED match that had a decisive result
+    (i.e. no draws).  On July 20 this will include the World Cup Final loser.
+    """
+    try:
+        client = _football_client(context)
+        matches = client.get_football_day_matches(
+            settings.timezone, day_offset=-1, anchor_hour=settings.football_day_start_hour
+        )
+        losers = [
+            name
+            for m in matches
+            if m.status == "FINISHED"
+            for name in [
+                m.home_name if m.winner == "AWAY_TEAM"
+                else m.away_name if m.winner == "HOME_TEAM"
+                else None
+            ]
+            if name
+        ]
+        log.info("rich image: yesterday's losers=%s", losers)
+        return losers
+    except Exception:
+        log.exception("rich image: could not fetch yesterday's losers (non-fatal)")
+        return []
+
+
 async def _evolve_and_send_rich_image(context: ContextTypes.DEFAULT_TYPE) -> str | None:
     """Evolve the 'rich' image one wealth level and send it to the configured group.
 
@@ -342,7 +373,8 @@ async def _evolve_and_send_rich_image(context: ContextTypes.DEFAULT_TYPE) -> str
     """
     settings: Settings = context.bot_data["settings"]
     winners = _fetch_yesterday_winners(context, settings)
-    out_path, level, caption = await run_rich_iteration(settings, winners=winners)
+    losers = _fetch_yesterday_losers(context, settings)
+    out_path, level, caption = await run_rich_iteration(settings, winners=winners, losers=losers)
     log.info("rich image iteration %d -> %s", level, out_path)
     if settings.telegram_group_id:
         with open(out_path, "rb") as photo_fh:

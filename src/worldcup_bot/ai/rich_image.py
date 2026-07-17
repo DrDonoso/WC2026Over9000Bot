@@ -186,18 +186,24 @@ RICH_APEX_DAY = 20
 
 RICH_APEX_CLAUSE = (
     " APEX MODE — THE ABSOLUTE PINNACLE OF WEALTH AND POWER: Today this person has achieved the"
-    " single richest, most all-powerful status of any being in the entire planet and universe —"
-    " utterly over-the-top, ridiculous, omnipotent ruler of everything that exists."
-    " Transform the scene into a jaw-dropping, cosmic, god-tier spectacle of supreme wealth and"
-    " omnipotence: an ocean of gold and diamonds stretching to every horizon, a colossal ornate"
+    " single richest, most powerful status of any being in the entire planet and universe —"
+    " utterly over-the-top, ridiculous, the supreme ruler of everything that exists."
+    " Transform the scene into a jaw-dropping, cosmic, god-tier spectacle of supreme wealth:"
+    " an ocean of gold and diamonds stretching to every horizon, a colossal ornate"
     " throne towering above entire cities, a galactic/cosmic backdrop with nebulae and stars,"
-    " whole crowds and civilisations bowing in worship, monumental statues and landmarks built in"
-    " his honour radiating absolute power — wealth and dominion that defy all comprehension."
+    " vast cheering crowds celebrating him, monumental statues and landmarks built in"
+    " his honour radiating absolute power — wealth and grandeur that defy all comprehension."
     " PROMINENTLY incorporate national symbols of {country}: the flag of {country} draped"
     " everywhere in the scene, the national colours of {country} dominant throughout the"
     " composition, iconic landmarks and cultural icons of {country} reimagined at colossal scale"
-    " — as if {country}'s World Cup Final victory has crowned him absolute ruler of the world."
+    " — celebrating {country}'s World Cup Final victory as the event that made him ruler of the world."
     " Keep EXACT same face/identity, tasteful, fully clothed, photorealistic, epic scale."
+)
+
+RICH_APEX_TRAMPLE_SENTENCE = (
+    " The defeated {loser} national flag lies discarded beneath his feet as a trophy,"
+    " a symbol of {loser}'s World Cup Final loss — he stands above it in total dominance,"
+    " indifferent, victorious, untouchable."
 )
 
 
@@ -247,7 +253,7 @@ def is_rich_death(now: datetime) -> bool:
     return now.month == RICH_DEATH_MONTH and now.day == RICH_DEATH_DAY
 
 
-def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "", pose: str = "", birthday: bool = False, age: int | None = None, micky_birthday: bool = False, apex: bool = False, apex_country: str = "", death: bool = False) -> str:
+def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "", pose: str = "", birthday: bool = False, age: int | None = None, micky_birthday: bool = False, apex: bool = False, apex_country: str = "", apex_loser: str = "", death: bool = False) -> str:
     """Return the full editing prompt for one wealth-escalation iteration.
 
     Richness escalation is implicit: each run takes the previous output as input,
@@ -263,6 +269,8 @@ def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "",
     reference image and instructing the model to make Micky the protagonist.
     When ``apex`` is True, appends :data:`RICH_APEX_CLAUSE` with the god-tier richest-being
     scene incorporating ``apex_country``'s national symbols (or "the champion nation" if empty).
+    When ``apex_loser`` is also non-empty, appends :data:`RICH_APEX_TRAMPLE_SENTENCE` so the
+    character also tramples the loser's flag — omitted entirely when ``apex_loser`` is empty.
     When ``death`` is True, appends :data:`RICH_DEATH_CLAUSE` for the dignified farewell scene.
     When ``anchor`` is True, appends :data:`RICH_FACE_ANCHOR_CLAUSE` instructing the
     model that a second reference image (the original) is provided to lock the face.
@@ -291,6 +299,8 @@ def build_rich_prompt(history: str = "", anchor: bool = False, themes: str = "",
         base += MICKY_BIRTHDAY_CLAUSE.format(age=age)
     if apex:
         base += RICH_APEX_CLAUSE.format(country=apex_country or "the champion nation")
+        if apex_loser:
+            base += RICH_APEX_TRAMPLE_SENTENCE.format(loser=apex_loser)
     if death:
         base += RICH_DEATH_CLAUSE
     if anchor:
@@ -588,6 +598,7 @@ async def generate_rich_caption(
     micky_birthday: bool = False,
     apex: bool = False,
     apex_country: str = "",
+    apex_loser: str = "",
     death: bool = False,
     _client: object | None = None,
 ) -> tuple[str, str]:
@@ -608,7 +619,8 @@ async def generate_rich_caption(
     by name is injected so the caption greets him first.
 
     When ``apex`` is True, uses the cocky :data:`RICH_CAPTION_PROMPT` with an added
-    megalomaniac apex instruction referencing ``apex_country`` when provided.
+    megalomaniac apex instruction referencing ``apex_country`` and, when ``apex_loser``
+    is non-empty, a gloat about crushing the loser.
 
     When ``death`` is True, uses :data:`RICH_DEATH_CAPTION_PROMPT` as the system prompt
     (full tone shift — sincere farewell) instead of the cocky default.
@@ -667,12 +679,16 @@ async def generate_rich_caption(
                 f" {apex_country} ha ganado el Mundial y te ha coronado amo del mundo."
                 if apex_country else ""
             )
+            loser_sentence = (
+                f" Has aplastado a {apex_loser} bajo tus pies en la derrota más humillante de la historia."
+                if apex_loser else ""
+            )
             user_parts.append({
                 "type": "text",
                 "text": (
                     "HOY HAS ALCANZADO LA CIMA: eres LA PERSONA MÁS RICA DEL UNIVERSO y el ser"
                     " más poderoso jamás visto. Presume de forma desmesurada y ridícula de que lo"
-                    f" posees TODO.{country_sentence}"
+                    f" posees TODO.{country_sentence}{loser_sentence}"
                 ),
             })
         if death:
@@ -768,6 +784,7 @@ async def run_rich_iteration(
     _data_dir: str = "/app/data",
     _now: datetime | None = None,
     winners: list[str] | None = None,
+    losers: list[str] | None = None,
 ) -> tuple[str, int, str]:
     """Run one wealth-escalation iteration and return (output_path, iteration, caption).
 
@@ -784,6 +801,8 @@ async def run_rich_iteration(
     ``_now`` overrides the current datetime (for tests).
     ``winners`` (optional): list of winning country names from yesterday's matches;
     used to generate opulent country-themed props that are woven into the scene.
+    ``losers`` (optional): list of losing country names from yesterday's matches;
+    used on the Apex day to add the trampled-loser-flag element to the scene.
 
     **Micky birthday (July 10):** generates a special 3-image celebration scene but
     does NOT promote the result into the evolution chain — ``rich_modified.png`` and
@@ -793,7 +812,8 @@ async def run_rich_iteration(
 
     **Apex (July 20 — day after the Final):** uses the normal promote path with the
     apex clause prominent in the image prompt.  The winning country (``winners[0]``
-    when available) is woven into the scene as national symbols.
+    when available) is woven into the scene as national symbols; ``losers[0]``
+    (when available) is trampled underfoot in humiliating defeat.
 
     **Death (July 21):** writes to a separate ``rich_death.png`` and does NOT
     promote into the evolution chain, mirroring the Micky birthday behaviour.
@@ -819,8 +839,9 @@ async def run_rich_iteration(
     apex = is_rich_apex(now)
     death = is_rich_death(now)
     apex_country = winners[0] if (apex and winners) else ""
+    apex_loser = losers[0] if (apex and losers) else ""
     if apex:
-        log.info("run_rich_iteration: APEX MODE active — country=%r", apex_country)
+        log.info("run_rich_iteration: APEX MODE active — country=%r, loser=%r", apex_country, apex_loser)
     if death:
         log.info("run_rich_iteration: DEATH MODE active")
 
@@ -907,6 +928,7 @@ async def run_rich_iteration(
             age=age,
             apex=apex,
             apex_country=apex_country,
+            apex_loser=apex_loser,
         )
 
     extra_paths = [micky_path] if micky_birthday and micky_path else None
@@ -1022,6 +1044,7 @@ async def run_rich_iteration(
                 age=age,
                 apex=apex,
                 apex_country=apex_country,
+                apex_loser=apex_loser,
                 _client=_caption_client,
             )
             append_history(settings.state_dir, date_str, level, memo)
