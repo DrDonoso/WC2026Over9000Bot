@@ -5,6 +5,35 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260717.02] - 2026-07-17
+
+- HOME_TEAM winner -> away_name is the loser
+- AWAY_TEAM winner -> home_name is the loser
+- DRAW excluded (no loser)
+- winner=None excluded
+- IN_PLAY / SCHEDULED matches excluded (only FINISHED counted)
+- empty match list -> []
+- multiple decisive matches -> all losers returned
+- all-draws -> []
+- FootballAPIError -> best-effort, never raises, returns []
+- unexpected RuntimeError -> same
+- day_offset=-1 is passed to get_football_day_matches (yesterday)
+- return value is always a list
+- fix: reword death caption prompt to avoid Azure moderation filter
+- RICH_APEX_TRAMPLE_SENTENCE constant with {loser} placeholder; appended in build_rich_prompt only when apex_loser is non-empty (graceful degradation)
+- apex_loser param added to build_rich_prompt, generate_rich_caption, and run_rich_iteration (losers: list[str] | None = None)
+- _fetch_yesterday_losers added to __main__.py (mirrors _fetch_yesterday_winners)
+- _evolve_and_send_rich_image now passes losers=losers to run_rich_iteration
+- 8 new tests: trample text in prompt, loser name present, empty loser no crash, no dangling {loser} braces, caption loser mention when set
+- APEX (July 20, day after WC Final): character reaches the absolute pinnacle of wealth — richest being in the universe, all-powerful. Incorporates the Final winner's national symbols (flag, colours, landmarks) via {country} placeholder in RICH_APEX_CLAUSE. Uses the NORMAL promote path (rich_modified.png, save_level, append_history, append_caption).
+- DEATH (July 21): dignified, peaceful, non-gory farewell scene (lying in state, flowers, candles, celestial light). Uses a SEPARATE FILE (rich_death.png) and does NOT promote into the evolution chain — mirrors the Micky birthday pattern exactly. Caption uses RICH_DEATH_CAPTION_PROMPT (sincere farewell tone, full emotional tone-shift from the usual cocky persona).
+- RICH_APEX_MONTH/DAY, RICH_APEX_CLAUSE, is_rich_apex()
+- RICH_DEATH_MONTH/DAY, RICH_DEATH_CLAUSE, RICH_DEATH_CAPTION_PROMPT, is_rich_death()
+- build_rich_prompt(): apex + death params appended before anchor clause
+- generate_rich_caption(): death swaps system prompt; apex injects megalomaniac user instruction with optional country sentence
+- run_rich_iteration(): apex/death detection; themes skipped for both; apex uses normal promotion with forced anchor; death uses separate- file path with no chain promotion
+
+
 ## [20260717] - 2026-07-17
 
 - test_football_api_error_does_not_raise_and_sends_nothing: asserts no send functions called, flags stay False. - test_football_api_error_does_not_persist_state: asserts state file not created on API error.
