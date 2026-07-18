@@ -20,7 +20,9 @@ from worldcup_bot.porra.elecciones import (
     active_phases,
     build_groups_text,
     build_knockout_text,
+    build_nudge_text,
     phase_label,
+    pickers_missing_all,
 )
 
 # ── Shared fixtures / helpers ─────────────────────────────────────────────────
@@ -1540,4 +1542,291 @@ class TestTileCacheEviction:
         from worldcup_bot.bot.elecciones_image import _evict_tile_cache
         # Should not raise even if the directory doesn't exist
         _evict_tile_cache(str(tmp_path / "nonexistent"), max_files=10)
+
+
+# ── pickers_missing_all ───────────────────────────────────────────────────────
+
+
+class TestPickersMissingAll:
+    _TIES = [("ESP", "FRA"), ("GER", "BRA")]
+    _YAML_KEY = "round_of_16"
+
+    def _udata(self, picks):
+        return {"knockout": {self._YAML_KEY: picks}}
+
+    def test_empty_ties_returns_empty(self):
+        participants = {"user1": self._udata([])}
+        assert pickers_missing_all([], participants, self._YAML_KEY) == []
+
+    def test_no_picks_is_missing(self):
+        """Participant with empty knockout list → missing (nothing picked)."""
+        participants = {"user1": self._udata([])}
+        result = pickers_missing_all(self._TIES, participants, self._YAML_KEY)
+        assert result == ["user1"]
+
+    def test_valid_pick_in_tie_not_missing(self):
+        """Participant who picked a valid team in at least one tie → NOT missing."""
+        participants = {"user1": self._udata(["ESP"])}
+        result = pickers_missing_all(self._TIES, participants, self._YAML_KEY)
+        assert result == []
+
+    def test_picks_only_eliminated_teams_is_missing(self):
+        """Picks only teams not in any tie → missing (nothing_picked)."""
+        participants = {"user1": self._udata(["ARG", "POR"])}
+        result = pickers_missing_all(self._TIES, participants, self._YAML_KEY)
+        assert result == ["user1"]
+
+    def test_partial_pick_but_at_least_one_valid_not_missing(self):
+        """Missing SOME ties but ≥1 valid pick → NOT missing (nothing_picked semantics)."""
+        # ESP is valid for tie 1; no pick for tie 2 (GER vs BRA)
+        participants = {"user1": self._udata(["ESP"])}
+        result = pickers_missing_all(self._TIES, participants, self._YAML_KEY)
+        assert result == []
+
+    def test_insertion_order_preserved(self):
+        """Missing participants returned in their insertion order."""
+        participants = {
+            "alpha": self._udata([]),
+            "beta": self._udata(["ESP"]),
+            "gamma": self._udata([]),
+        }
+        result = pickers_missing_all(self._TIES, participants, self._YAML_KEY)
+        assert result == ["alpha", "gamma"]
+
+    def test_all_have_picks_returns_empty(self):
+        participants = {
+            "user1": self._udata(["ESP"]),
+            "user2": self._udata(["GER"]),
+        }
+        assert pickers_missing_all(self._TIES, participants, self._YAML_KEY) == []
+
+    def test_missing_key_altogether_is_missing(self):
+        """Participant with no knockout dict at all → missing."""
+        participants = {"user1": {}}
+        result = pickers_missing_all(self._TIES, participants, self._YAML_KEY)
+        assert result == ["user1"]
+
+
+# ── build_nudge_text ──────────────────────────────────────────────────────────
+
+
+class TestBuildNudgeText:
+    def test_contains_at_mentions_for_each_username(self):
+        result = build_nudge_text(["alice", "bob"], {}, "round_of_16")
+        assert "@alice" in result
+        assert "@bob" in result
+
+    def test_uses_pasa_for_round_of_32(self):
+        result = build_nudge_text(["user1"], {}, "round_of_32")
+        assert "pasa" in result
+        assert "gana" not in result
+
+    def test_uses_pasa_for_round_of_16(self):
+        result = build_nudge_text(["user1"], {}, "round_of_16")
+        assert "pasa" in result
+
+    def test_uses_pasa_for_quarter_finals(self):
+        result = build_nudge_text(["user1"], {}, "quarter_finals")
+        assert "pasa" in result
+        assert "gana" not in result
+
+    def test_uses_pasa_for_semi_finals(self):
+        result = build_nudge_text(["user1"], {}, "semi_finals")
+        assert "pasa" in result
+
+    def test_uses_gana_for_final(self):
+        result = build_nudge_text(["user1"], {}, "final")
+        assert "gana" in result
+        assert "pasa" not in result
+
+    def test_uses_gana_for_third_place(self):
+        result = build_nudge_text(["user1"], {}, "third_place")
+        assert "gana" in result
+        assert "pasa" not in result
+
+    def test_includes_phase_label_round_of_16(self):
+        result = build_nudge_text(["user1"], {}, "round_of_16")
+        assert phase_label("round_of_16") in result
+
+    def test_includes_phase_label_final(self):
+        result = build_nudge_text(["user1"], {}, "final")
+        assert phase_label("final") in result
+
+    def test_includes_phase_label_third_place(self):
+        result = build_nudge_text(["user1"], {}, "third_place")
+        assert phase_label("third_place") in result
+
+
+# ── _generate_elecciones_artifact nudge integration ──────────────────────────
+
+
+class TestGenerateEleccionesArtifactNudge:
+    """Integration tests for the nudge branch in _generate_elecciones_artifact."""
+
+    from datetime import datetime, timezone as _tz
+    FIXED_NOW = datetime(2026, 7, 1, 12, 0, 0, tzinfo=_tz.utc)
+    # 3.5 hours after FIXED_NOW → well above the 2h threshold
+    FIRST_MATCH_FAR   = "2026-07-01T15:30:00Z"
+    # 1.5 hours after FIXED_NOW → below the 2h threshold
+    FIRST_MATCH_NEAR  = "2026-07-01T13:30:00Z"
+    # 1 hour before FIXED_NOW → already in the past
+    FIRST_MATCH_PAST  = "2026-07-01T11:00:00Z"
+
+    def _api_match(self, home, away, utc_date, stage="LAST_16", status="TIMED"):
+        m = MagicMock()
+        m.stage = stage
+        m.home_tla = home
+        m.away_tla = away
+        m.utc_date = utc_date
+        m.status = status
+        m.winner = None
+        return m
+
+    def _participants_no_picks(self, yaml_key="round_of_16"):
+        return {
+            "alice": {"display_name": "Alice", "knockout": {yaml_key: []}},
+            "bob":   {"display_name": "Bob",   "knockout": {yaml_key: []}},
+        }
+
+    def _participants_all_picked(self):
+        return {
+            "alice": {"display_name": "Alice", "knockout": {"round_of_16": ["ESP"]}},
+            "bob":   {"display_name": "Bob",   "knockout": {"round_of_16": ["GER"]}},
+        }
+
+    def _settings(self):
+        from worldcup_bot.config import Settings
+        return Settings(telegram_bot_token="t", football_data_api_key="k")
+
+    @patch("worldcup_bot.bot.handlers._utcnow")
+    @patch("worldcup_bot.bot.handlers._football_client")
+    async def test_missing_and_far_enough_returns_nudge(self, mock_fc, mock_utcnow):
+        """missing + >2h → nudge with @mentions; cacheable=False; no ❓; no matrix header."""
+        mock_utcnow.return_value = self.FIXED_NOW
+        client = MagicMock()
+        client.get_all_matches.return_value = [
+            self._api_match("ESP", "FRA", self.FIRST_MATCH_FAR),
+            self._api_match("GER", "BRA", "2026-07-01T16:00:00Z"),
+        ]
+        mock_fc.return_value = client
+
+        from worldcup_bot.bot.handlers import _generate_elecciones_artifact
+        result = await _generate_elecciones_artifact(
+            "round_of_16", self._participants_no_picks(), self._settings(), _make_context()
+        )
+
+        assert result is not None
+        assert result.get("cacheable") is False
+        messages = result.get("messages", [])
+        assert len(messages) == 1
+        text = messages[0]
+        assert "@alice" in text
+        assert "@bob" in text
+        assert "❓" not in text
+        # Matrix header uses ¿Quién pasa? — nudge does not
+        assert "¿Quién pasa?" not in text
+        assert "👤" not in text
+
+    @patch("worldcup_bot.bot.handlers._utcnow")
+    @patch("worldcup_bot.bot.handlers._football_client")
+    async def test_everyone_picked_returns_normal_matrix(self, mock_fc, mock_utcnow):
+        """Everyone has valid picks → normal matrix artifact, no nudge."""
+        mock_utcnow.return_value = self.FIXED_NOW
+        client = MagicMock()
+        client.get_all_matches.return_value = [
+            self._api_match("ESP", "FRA", self.FIRST_MATCH_FAR),
+            self._api_match("GER", "BRA", "2026-07-01T16:00:00Z"),
+        ]
+        mock_fc.return_value = client
+
+        from worldcup_bot.bot.handlers import _generate_elecciones_artifact
+        result = await _generate_elecciones_artifact(
+            "round_of_16", self._participants_all_picked(), self._settings(), _make_context()
+        )
+
+        assert result is not None
+        full = "\n\n".join(result.get("messages", []))
+        assert "faltan elecciones" not in full
+        assert "OCTAVOS" in full.upper()
+
+    @patch("worldcup_bot.bot.handlers._utcnow")
+    @patch("worldcup_bot.bot.handlers._football_client")
+    async def test_missing_near_deadline_returns_normal_matrix(self, mock_fc, mock_utcnow):
+        """missing + ≤2h → normal matrix with ❓, NOT a nudge."""
+        mock_utcnow.return_value = self.FIXED_NOW
+        client = MagicMock()
+        client.get_all_matches.return_value = [
+            self._api_match("ESP", "FRA", self.FIRST_MATCH_NEAR),
+        ]
+        mock_fc.return_value = client
+
+        from worldcup_bot.bot.handlers import _generate_elecciones_artifact
+        result = await _generate_elecciones_artifact(
+            "round_of_16", self._participants_no_picks(), self._settings(), _make_context()
+        )
+
+        assert result is not None
+        full = "\n\n".join(result.get("messages", []))
+        assert "faltan elecciones" not in full
+        assert "❓" in full
+
+    @patch("worldcup_bot.bot.handlers._utcnow")
+    @patch("worldcup_bot.bot.handlers._football_client")
+    async def test_first_match_in_past_returns_normal_matrix(self, mock_fc, mock_utcnow):
+        """First match already past → normal matrix, NOT a nudge."""
+        mock_utcnow.return_value = self.FIXED_NOW
+        client = MagicMock()
+        client.get_all_matches.return_value = [
+            self._api_match("ESP", "FRA", self.FIRST_MATCH_PAST),
+        ]
+        mock_fc.return_value = client
+
+        from worldcup_bot.bot.handlers import _generate_elecciones_artifact
+        result = await _generate_elecciones_artifact(
+            "round_of_16", self._participants_no_picks(), self._settings(), _make_context()
+        )
+
+        assert result is not None
+        full = "\n\n".join(result.get("messages", []))
+        assert "faltan elecciones" not in full
+
+    @patch("worldcup_bot.bot.handlers._utcnow")
+    @patch("worldcup_bot.bot.handlers._football_client")
+    async def test_unparseable_utc_date_no_crash_returns_matrix(self, mock_fc, mock_utcnow):
+        """Unparseable utc_date → normal matrix (no crash, no nudge)."""
+        mock_utcnow.return_value = self.FIXED_NOW
+        client = MagicMock()
+        client.get_all_matches.return_value = [
+            self._api_match("ESP", "FRA", "NOT_A_VALID_DATE"),
+        ]
+        mock_fc.return_value = client
+
+        from worldcup_bot.bot.handlers import _generate_elecciones_artifact
+        result = await _generate_elecciones_artifact(
+            "round_of_16", self._participants_no_picks(), self._settings(), _make_context()
+        )
+
+        assert result is not None
+        full = "\n\n".join(result.get("messages", []))
+        assert "faltan elecciones" not in full
+
+    @patch("worldcup_bot.bot.handlers._utcnow")
+    @patch("worldcup_bot.bot.handlers._football_client")
+    async def test_grupos_never_nudges(self, mock_fc, mock_utcnow):
+        """Grupos phase is excluded from nudge logic entirely (not a knockout phase)."""
+        mock_utcnow.return_value = self.FIXED_NOW
+        mock_fc.return_value = MagicMock()
+
+        participants = {
+            "alice": {"display_name": "Alice", "groups": _make_groups(), "knockout": {}},
+        }
+
+        from worldcup_bot.bot.handlers import _generate_elecciones_artifact
+        result = await _generate_elecciones_artifact(
+            "grupos", participants, self._settings(), _make_context()
+        )
+
+        assert result is not None
+        full = "\n\n".join(result.get("messages", []))
+        assert "faltan elecciones" not in full
 

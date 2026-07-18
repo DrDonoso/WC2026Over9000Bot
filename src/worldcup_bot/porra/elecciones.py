@@ -49,6 +49,8 @@ _HARD_LIMIT = 4090
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+NUDGE_THRESHOLD_HOURS = 2.0
+
 
 def phase_label(yaml_key: str) -> str:
     """Return the Spanish display label for a phase yaml_key."""
@@ -100,6 +102,42 @@ def _pick_for_tie(udata: dict, home_tla: str, away_tla: str, yaml_key: str) -> s
     if away_tla.upper() in picks:
         return away_tla.upper()
     return None
+
+
+def pickers_missing_all(
+    ties: list[tuple[str, str]],
+    participants: dict,
+    yaml_key: str,
+) -> list[str]:
+    """Return participant keys (usernames) in insertion order who have NO valid pick for any tie.
+
+    A participant is considered "missing" only if `_pick_for_tie` returns None for
+    every tie in the round (nothing_picked semantics).  If `ties` is empty, returns [].
+    """
+    if not ties:
+        return []
+    missing: list[str] = []
+    for uname, udata in participants.items():
+        if all(_pick_for_tie(udata, h, a, yaml_key) is None for h, a in ties):
+            missing.append(uname)
+    return missing
+
+
+def build_nudge_text(usernames: list[str], participants: dict, yaml_key: str) -> str:
+    """Build a plain-text nudge message mentioning participants who haven't chosen.
+
+    Uses "gana" for final/third_place, "pasa" for all other rounds.
+    parse_mode must be None when sending — plain @username notifies correctly.
+    """
+    label = phase_label(yaml_key)
+    verbo = "gana" if yaml_key in ("third_place", "final") else "pasa"
+    mentions = " ".join(f"@{uname}" for uname in usernames)
+    return (
+        f"🗳️ {label} — ¡faltan elecciones!\n\n"
+        f"Aún no han elegido quién {verbo}:\n"
+        f"{mentions}\n\n"
+        f"Porfa, elegid cuanto antes ⏰🙏"
+    )
 
 
 def build_group_compositions(standings: list) -> dict[str, list[str]]:

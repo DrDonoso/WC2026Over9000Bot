@@ -16,6 +16,7 @@ import os
 import random
 import time
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests as _requests
@@ -1607,6 +1608,18 @@ _YAML_TO_API_KEY: dict[str, str] = {v: k for k, v in STAGE_YAML_KEYS.items()}
 _MAX_ELECCIONES_CACHE = 6
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_match_utc(s: str) -> datetime | None:
+    """Parse an ISO utc_date string (from Match.utc_date) into an aware UTC datetime."""
+    try:
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError):
+        return None
+
+
 def _elecciones_results_version(context: ContextTypes.DEFAULT_TYPE, yaml_key: str) -> str:
     """Return a short hash identifying the current bracket state for a phase.
 
@@ -1673,7 +1686,10 @@ async def _generate_elecciones_artifact(
     from worldcup_bot.porra.elecciones import (
         build_groups_text,
         build_knockout_text,
+        build_nudge_text,
+        NUDGE_THRESHOLD_HOURS,
         phase_label,
+        pickers_missing_all,
     )
 
     choices_type = getattr(settings, "choices_type", "text")
@@ -1722,11 +1738,11 @@ async def _generate_elecciones_artifact(
         log.exception("_generate_elecciones_artifact: unexpected API error: %s", exc)
         return {"messages": ["❌ Error de API. Intenta más tarde."], "cacheable": False}
 
-    ties = [
-        (m.home_tla, m.away_tla)
-        for m in sorted(all_matches, key=lambda m: m.utc_date)
-        if api_key and m.stage == api_key and m.home_tla and m.away_tla
-    ]
+    round_matches = sorted(
+        (m for m in all_matches if api_key and m.stage == api_key and m.home_tla and m.away_tla),
+        key=lambda m: m.utc_date,
+    )
+    ties = [(m.home_tla, m.away_tla) for m in round_matches]
 
     if not ties:
         # No bracket yet — transient state, must NOT be cached, otherwise it
@@ -1737,6 +1753,13 @@ async def _generate_elecciones_artifact(
             ],
             "cacheable": False,
         }
+
+    first_utc = _parse_match_utc(round_matches[0].utc_date)
+    missing = pickers_missing_all(ties, participants, yaml_key)
+    if missing and first_utc is not None:
+        hours_until = (first_utc - _utcnow()).total_seconds() / 3600.0
+        if hours_until > NUDGE_THRESHOLD_HOURS:
+            return {"messages": [build_nudge_text(missing, participants, yaml_key)], "cacheable": False}
 
     if choices_type == "image":
         results_by_tie: dict[tuple[str, str], str | None] = {}
