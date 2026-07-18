@@ -1,0 +1,35 @@
+tests/test_elecciones.py
+  s_ba23dd295b47ac::t_b2a483fd991f90 23,25
+  s_afa6aa825d453b::t_3bbbf4269d3d31 1546-1832
+src/worldcup_bot/bot/handlers.py
+  s_ba23dd295b47ac::t_0a4e6c9fa1fb26 1741-1745,1756-1762
+  s_ba23dd295b47ac::t_0fccad59faaf41 1611-1622
+  s_ba23dd295b47ac::t_7b13a0f6fe99a6 19
+  s_ba23dd295b47ac::t_6d3b94ce9a424f 1689-1690,1692
+src/worldcup_bot/porra/elecciones.py
+  s_afa6aa825d453b::t_355ad8f6b3d557 52-53,107-142
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "7c1a8def4cf7820b13e75af0f1b9a1882241c97e",
+  "prompts": {},
+  "sessions": {
+    "s_afa6aa825d453b": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01ShBXrEh3TQBee5TF1QHJb9",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    },
+    "s_ba23dd295b47ac": {
+      "agent_id": {
+        "tool": "github-copilot-cli",
+        "id": "toolu_01Ho3ovP1yHJ5BUGGNrxZy86",
+        "model": "unknown"
+      },
+      "human_author": "drdonoso <davidrodriguezdonoso95@gmail.com>"
+    }
+  }
+}
