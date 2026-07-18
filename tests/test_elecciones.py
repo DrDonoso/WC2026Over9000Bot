@@ -1748,6 +1748,8 @@ class TestGenerateEleccionesArtifactNudge:
         full = "\n\n".join(result.get("messages", []))
         assert "faltan elecciones" not in full
         assert "OCTAVOS" in full.upper()
+        # Normal path must NOT set cacheable: False (stays cacheable for the cache layer).
+        assert result.get("cacheable") is not False
 
     @patch("worldcup_bot.bot.handlers._utcnow")
     @patch("worldcup_bot.bot.handlers._football_client")
@@ -1829,4 +1831,57 @@ class TestGenerateEleccionesArtifactNudge:
         assert result is not None
         full = "\n\n".join(result.get("messages", []))
         assert "faltan elecciones" not in full
+
+    @patch("worldcup_bot.bot.handlers._utcnow")
+    @patch("worldcup_bot.bot.handlers._football_client")
+    async def test_exactly_2h_returns_normal_matrix(self, mock_fc, mock_utcnow):
+        """Exactly 2 hours before first match → NO nudge (threshold is strict >, not >=)."""
+        mock_utcnow.return_value = self.FIXED_NOW
+        client = MagicMock()
+        # FIXED_NOW=12:00:00Z + exactly 2h = 14:00:00Z → hours_until=2.0, 2.0>2.0 is False
+        exactly_2h = "2026-07-01T14:00:00Z"
+        client.get_all_matches.return_value = [
+            self._api_match("ESP", "FRA", exactly_2h),
+            self._api_match("GER", "BRA", "2026-07-01T15:00:00Z"),
+        ]
+        mock_fc.return_value = client
+
+        from worldcup_bot.bot.handlers import _generate_elecciones_artifact
+        result = await _generate_elecciones_artifact(
+            "round_of_16", self._participants_no_picks(), self._settings(), _make_context()
+        )
+
+        assert result is not None
+        full = "\n\n".join(result.get("messages", []))
+        assert "faltan elecciones" not in full
+        assert "❓" in full  # normal matrix with unpicked slots rendered
+
+    @patch("worldcup_bot.bot.handlers._utcnow")
+    @patch("worldcup_bot.bot.handlers._football_client")
+    async def test_just_over_2h_returns_nudge(self, mock_fc, mock_utcnow):
+        """2h + 1 second before first match → nudge (strict > boundary confirmed)."""
+        mock_utcnow.return_value = self.FIXED_NOW
+        client = MagicMock()
+        # FIXED_NOW=12:00:00Z + 2h + 1s = 14:00:01Z → hours_until≈2.000278, >2.0 is True
+        just_over_2h = "2026-07-01T14:00:01Z"
+        client.get_all_matches.return_value = [
+            self._api_match("ESP", "FRA", just_over_2h),
+            self._api_match("GER", "BRA", "2026-07-01T15:00:00Z"),
+        ]
+        mock_fc.return_value = client
+
+        from worldcup_bot.bot.handlers import _generate_elecciones_artifact
+        result = await _generate_elecciones_artifact(
+            "round_of_16", self._participants_no_picks(), self._settings(), _make_context()
+        )
+
+        assert result is not None
+        assert result.get("cacheable") is False
+        messages = result.get("messages", [])
+        assert len(messages) == 1
+        text = messages[0]
+        assert "@alice" in text
+        assert "@bob" in text
+        assert "❓" not in text
+        assert "👤" not in text
 
