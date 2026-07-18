@@ -1612,48 +1612,48 @@ class TestPickersMissingAll:
 
 class TestBuildNudgeText:
     def test_contains_at_mentions_for_each_username(self):
-        result = build_nudge_text(["alice", "bob"], {}, "round_of_16")
+        result = build_nudge_text(["alice", "bob"], "round_of_16")
         assert "@alice" in result
         assert "@bob" in result
 
     def test_uses_pasa_for_round_of_32(self):
-        result = build_nudge_text(["user1"], {}, "round_of_32")
+        result = build_nudge_text(["user1"], "round_of_32")
         assert "pasa" in result
         assert "gana" not in result
 
     def test_uses_pasa_for_round_of_16(self):
-        result = build_nudge_text(["user1"], {}, "round_of_16")
+        result = build_nudge_text(["user1"], "round_of_16")
         assert "pasa" in result
 
     def test_uses_pasa_for_quarter_finals(self):
-        result = build_nudge_text(["user1"], {}, "quarter_finals")
+        result = build_nudge_text(["user1"], "quarter_finals")
         assert "pasa" in result
         assert "gana" not in result
 
     def test_uses_pasa_for_semi_finals(self):
-        result = build_nudge_text(["user1"], {}, "semi_finals")
+        result = build_nudge_text(["user1"], "semi_finals")
         assert "pasa" in result
 
     def test_uses_gana_for_final(self):
-        result = build_nudge_text(["user1"], {}, "final")
+        result = build_nudge_text(["user1"], "final")
         assert "gana" in result
         assert "pasa" not in result
 
     def test_uses_gana_for_third_place(self):
-        result = build_nudge_text(["user1"], {}, "third_place")
+        result = build_nudge_text(["user1"], "third_place")
         assert "gana" in result
         assert "pasa" not in result
 
     def test_includes_phase_label_round_of_16(self):
-        result = build_nudge_text(["user1"], {}, "round_of_16")
+        result = build_nudge_text(["user1"], "round_of_16")
         assert phase_label("round_of_16") in result
 
     def test_includes_phase_label_final(self):
-        result = build_nudge_text(["user1"], {}, "final")
+        result = build_nudge_text(["user1"], "final")
         assert phase_label("final") in result
 
     def test_includes_phase_label_third_place(self):
-        result = build_nudge_text(["user1"], {}, "third_place")
+        result = build_nudge_text(["user1"], "third_place")
         assert phase_label("third_place") in result
 
 

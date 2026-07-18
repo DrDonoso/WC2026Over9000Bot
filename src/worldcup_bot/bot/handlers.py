@@ -1759,7 +1759,7 @@ async def _generate_elecciones_artifact(
     if missing and first_utc is not None:
         hours_until = (first_utc - _utcnow()).total_seconds() / 3600.0
         if hours_until > NUDGE_THRESHOLD_HOURS:
-            return {"messages": [build_nudge_text(missing, participants, yaml_key)], "cacheable": False}
+            return {"messages": [build_nudge_text(missing, yaml_key)], "cacheable": False}
 
     if choices_type == "image":
         results_by_tie: dict[tuple[str, str], str | None] = {}

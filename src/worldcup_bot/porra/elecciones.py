@@ -123,7 +123,7 @@ def pickers_missing_all(
     return missing
 
 
-def build_nudge_text(usernames: list[str], participants: dict, yaml_key: str) -> str:
+def build_nudge_text(usernames: list[str], yaml_key: str) -> str:
     """Build a plain-text nudge message mentioning participants who haven't chosen.
 
     Uses "gana" for final/third_place, "pasa" for all other rounds.
