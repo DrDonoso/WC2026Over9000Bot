@@ -85,3 +85,13 @@ See .squad/agents/kante/history-archive.md for detailed Micky Birthday Special, 
 - `apex_loser` flows through `build_rich_prompt`, `generate_rich_caption`, and `run_rich_iteration(losers=)`. Derived as `losers[0] if (apex and losers) else ""`.
 - `_fetch_yesterday_losers` in `__main__.py` mirrors `_fetch_yesterday_winners` (home_name when winner==AWAY_TEAM, away_name when winner==HOME_TEAM, skips draws/None).
 - Azure content moderation blocks violent language like "TRAMPLING and STOMPING … grinding into the ground". Softer phrasing ("lies discarded beneath his feet as a trophy") passes the filter successfully.
+
+## Learnings (appended 2026-07-18)
+
+**[/elecciones nudge feature]**
+- **Nudge design**: knockout-only, triggered when ≥1 participant has NO valid pick for ANY tie (nothing_picked semantics) AND first match is >2h away. Use `pickers_missing_all()` (elecciones.py pure helper) + `_parse_match_utc()` / `_utcnow()` in handlers.py.
+- **`Match.utc_date` is a STRING**, not a datetime (models.py: `utc_date: str`). Always parse with `datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)`; wrap in try/except (ValueError, AttributeError) → return None on failure.
+- **`_utcnow()` patch point**: add `def _utcnow() -> datetime: return datetime.now(timezone.utc)` at module level in handlers.py so tests can patch `worldcup_bot.bot.handlers._utcnow` without touching `datetime.now` globally.
+- **Nudge verb**: "gana" for final/third_place, "pasa" for all other knockout rounds.
+- **cacheable=False** for nudge: time-sensitive — must regenerate on every tap while in the nudge window.
+- **Phase label in nudge text**: the nudge includes the Spanish phase label (e.g. "Octavos de Final"). Test assertions checking for matrix-only strings should use `"¿Quién pasa?"` or `"👤"` (user blocks), NOT "OCTAVOS" which appears in both.

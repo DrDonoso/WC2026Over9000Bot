@@ -56,5 +56,13 @@ Three new REVIVE env vars: REVIVE_JITTER_SECONDS (±45 min randomization), REVIV
 
 Earlier sessions (2026-06-15 through 2026-06-26): Phase 1 scaffold, SSL remediation, ffmpeg, named-volume ownership, auto-changelog, tongo env wiring, TVE feature, clip disk investigation. See `history-archive.md`.
 
+### ✅ Merge feat/elecciones-nudge → main (2026-07-17)
+- **Branch merged:** `feat/elecciones-nudge` (3 commits: elecciones.py + handlers.py + test_elecciones.py; approved by Pirlo & Buffon)
+- **Rebase needed:** origin/main had one bot CHANGELOG commit (`367cb4e`) ahead of branch — rebased cleanly; unstaged `.squad/agents/kante/history.md` required `git stash`/`pop` to clear the working tree before rebase.
+- **Merge type:** Fast-forward (`367cb4e..7f444b6 main -> main`); no force, no conflicts.
+- **New origin/main HEAD:** `7f444b6` — _refactor(elecciones): drop unused participants param from build_nudge_text_
+- **CI triggered:** Run #29652587787 "Build and Deploy Docker Image" — `in_progress` at push time
+  - URL: https://github.com/DrDonoso/WC2026Over9000Bot/actions/runs/29652587787
+
 
 
