@@ -906,3 +906,237 @@ only when `_now=datetime(year, 7, 10)` — Buffon will add those tests separatel
 
 
 
+---
+
+### 2026-07-18T16:48:00Z: Decision — feat/elecciones-nudge (Knockout pre-display nudge)
+
+**Date:** 2026-07-18
+**Author:** Kanté (Backend Dev)  
+**Feature:** Pre-display nudge for missing picks in knockout phases
+
+## Decisions
+
+### 1. "Has not chosen" = nothing_picked semantics
+A participant is nudged ONLY if they have NO valid pick for ANY tie in the round
+(`_pick_for_tie` returns None for every tie). Picking at least one valid team for
+any tie means they are NOT nudged. This is the "nothing_picked" threshold — not
+"has any missing tie".
+
+### 2. Time reference = first match of the round (round-wide deadline)
+We sort the round's matches by `utc_date` and use `round_matches[0].utc_date`.
+For single-match rounds (third_place, final) this is naturally the only match.
+
+### 3. Threshold = 2.0 hours (NUDGE_THRESHOLD_HOURS)
+Named constant in `elecciones.py`; compared as `hours_until > 2.0`.
+Strict greater-than (not ≥), so exactly 2h remaining shows the matrix.
+
+### 4. Nudge is cacheable=False
+Time-sensitive: the nudge window changes as kickoff approaches. Must regenerate
+on every tap within the nudge window.
+
+### 5. _utcnow() as testable hook
+Module-level `def _utcnow() -> datetime` in handlers.py so tests can patch
+`worldcup_bot.bot.handlers._utcnow` without patching `datetime.now` globally.
+
+### 6. Grupos excluded
+The nudge logic sits inside the knockout branch of `_generate_elecciones_artifact`,
+after the `if yaml_key == "grupos": ... return` early-exit. Grupos is structurally
+excluded.
+
+### 7. parse_mode=None for nudge messages
+Plain-text `@username` notifies correctly in PTB with parse_mode=None (default).
+Consistent with revive.py pattern.
+
+---
+
+### 2026-07-18T18:23:32+02:00: QA Review — feat/elecciones-nudge (commit 7c1a8de → 1104873)
+
+**By:** Buffon (Tester / QA)
+**Branch:** `feat/elecciones-nudge`
+**Requested by:** DrDonoso
+
+---
+
+## ✅ APPROVED
+
+The nudge feature is correctly implemented and the test suite adequately covers
+all required edge cases after two gap-fill additions.
+
+---
+
+## Baseline
+
+- **Before:** 2777 passing (144 in test_elecciones.py)
+- **After:**  2779 passing (146 in test_elecciones.py) — all green, no regressions
+
+---
+
+## Audit by coverage area
+
+### `pickers_missing_all` (TestPickersMissingAll) ✅
+All required semantics covered:
+- Empty ties → `[]` ✓
+- Zero-valid-pick participant IS missing ✓
+- Participant with ≥1 valid pick is NOT missing (partial-pick semantics) ✓
+- Picks for eliminated teams (not in any tie) → missing ✓
+- Insertion order preserved ✓
+- Missing `knockout` key altogether → missing ✓
+
+### `build_nudge_text` (TestBuildNudgeText) ✅
+- `@mention` for each username ✓
+- `pasa` verb for all non-final knockout rounds ✓
+- `gana` verb for `final` and `third_place` ✓
+- Phase label present in all tested rounds ✓
+- Matrix content (❓, 👤, "¿Quién pasa?") is absent — verified by integration
+  tests in TestGenerateEleccionesArtifactNudge ✓
+
+### `_generate_elecciones_artifact` nudge branch (TestGenerateEleccionesArtifactNudge) ✅
+
+| Scenario | Before QA | After QA |
+|---|---|---|
+| missing + >2h → nudge + cacheable=False | ✓ (3.5h) | ✓ |
+| everyone picked → matrix | ✓ | ✓ + cacheability asserted |
+| missing + ≤2h → matrix | ✓ (1.5h) | ✓ |
+| past match (negative hours) → matrix | ✓ | ✓ |
+| unparseable utc_date → matrix, no crash | ✓ | ✓ |
+| grupos phase → never nudges | ✓ | ✓ |
+| **exactly 2h → matrix (strict >, not >=)** | ❌ MISSING | ✅ ADDED |
+| **2h + 1s → nudge (strict > boundary)** | ❌ MISSING | ✅ ADDED |
+| normal path does NOT set cacheable=False | ❌ WEAK | ✅ STRENGTHENED |
+
+---
+
+## Changes committed
+
+**Commit:** `1104873` on `feat/elecciones-nudge`
+**File:** `tests/test_elecciones.py` (+55 lines, 0 removals)
+
+1. **`test_exactly_2h_returns_normal_matrix`** — pins the strict `>` semantics:
+   `hours_until = 2.0`, `2.0 > 2.0 == False` → normal matrix returned, no nudge.
+   Also asserts `❓` present (confirming matrix, not empty).
+
+2. **`test_just_over_2h_returns_nudge`** — at 2h+1s (`hours_until ≈ 2.000278`),
+   the condition fires: nudge returned with `cacheable=False`, `@alice`/`@bob`
+   present, `❓` and `👤` absent.
+
+3. **`test_everyone_picked_returns_normal_matrix` (strengthened)** — added
+   `assert result.get("cacheable") is not False` to guard the contract that the
+   normal (everyone-picked) path does not disable caching.
+
+---
+
+## Non-blocking observations
+
+- The `FIRST_MATCH_FAR = "2026-07-01T15:30:00Z"` constant (3.5h) covers ">2h →
+  nudge" but is not "just over 2h"; the new `test_just_over_2h_returns_nudge` now
+  pins the exact boundary.
+- All existing tests were correct; no false positives or incorrect assertions
+  found.
+- The feature implementation itself is clean: `_parse_match_utc` returns `None`
+  on bad input, guarding the `if missing and first_utc is not None:` check; the
+  nudge path only fires when `first_utc` is valid **and** `hours_until > 2.0`.
+
+---
+
+### 2026-07-18T16:48:00Z: Review — feat/elecciones-nudge (commit 7c1a8de)
+
+**Reviewer:** Pirlo (Lead / Tech Lead)
+**Date:** 2026-07-18
+**Branch:** `feat/elecciones-nudge` on top of `main` @ `04fbac0`
+
+---
+
+## Focus-area findings
+
+### 1. Correctness of the time branch ✅
+
+`hours_until = (first_utc - _utcnow()).total_seconds() / 3600.0`
+
+- Both operands are tz-aware UTC (`_utcnow()` returns `datetime.now(timezone.utc)`; `_parse_match_utc` does `.replace(tzinfo=timezone.utc)`). Subtraction is safe — no naive-vs-aware mismatch.
+- Boundary: uses `>` (strict), so exactly 2.0 h falls through to the matrix. Correct per spec.
+- Past match → `hours_until` is negative → `> 2.0` is `False` → falls through to the normal matrix. Correct.
+
+### 2. Caching ✅
+
+Nudge returns `{"cacheable": False}`. The caller in `cmd_elecciones_callback` (line 1941) checks `artifact.get("cacheable", True)` before storing — `False` prevents caching. Time-sensitive artifact will never be stashed and re-served after the window flips.
+
+Normal branches (text, image, "no bracket yet") are unaffected — they either omit `cacheable` (defaults to `True` → cached) or explicitly set `False` for transient states. No regression.
+
+### 3. nothing_picked semantics ✅
+
+`pickers_missing_all` returns keys where `_pick_for_tie` is `None` for **every** tie (via `all(…)`). Empty `ties` → early `return []`. Order preserved (iterates `participants.items()` which is insertion-ordered in Python 3.7+). Correct.
+
+### 4. utc_date handling ✅
+
+`sorted(round_matches, key=lambda m: m.utc_date)` sorts by the **string** `utc_date`. Since the football-data API always returns ISO 8601 strings in the fixed format `YYYY-MM-DDTHH:MM:SSZ` (all same length, zero-padded, Zulu suffix), lexicographic order equals chronological order. `round_matches[0]` is the earliest.
+
+**Risk if mixed offsets (e.g. `+02:00` vs `Z`):** lex sort would be wrong. In practice the API contract is always `Z`-terminated; `_parse_match_utc` enforces `%Y-%m-%dT%H:%M:%SZ` and returns `None` on non-Z strings, which makes the nudge fall through harmlessly. Acceptable.
+
+### 5. Module purity ✅
+
+`porra/elecciones.py` remains pure — no `datetime`, no I/O, no network. Only `NUDGE_THRESHOLD_HOURS` (a constant float), `pickers_missing_all`, and `build_nudge_text` were added; all are pure functions. Time/now lives exclusively in `handlers.py` (`_utcnow`, `_parse_match_utc`), both patchable.
+
+### 6. Mentions & message ✅
+
+`build_nudge_text` produces `@{uname}` for each username. "gana" for `final`/`third_place`, "pasa" otherwise. No HTML entities, no markdown syntax (no `<b>`, no `*`, no `_`). `_serve_after_placeholder` sends via `send_message(chat_id=…, text=msg)` with **no `parse_mode` argument** → defaults to `None` → Telegram treats the text as plain, so `@username` triggers a mention notification. Correct.
+
+### 7. No regression ✅
+
+- Grupos path: entirely separate `if yaml_key == "grupos"` branch, untouched.
+- Normal knockout matrix path: the refactor `ties → round_matches` produces the same `ties` list — just extracts the sorted match objects first. The image and text rendering code below is identical.
+- The nudge branch is additive: it returns early **only** when `missing and first_utc and hours_until > 2.0`. All other paths fall through to existing behaviour.
+
+---
+
+## Test coverage
+
+144 tests pass. New tests cover:
+- `pickers_missing_all`: empty ties, no picks, valid pick, eliminated-only picks, partial pick, insertion order, all picked, missing key entirely.
+- `build_nudge_text`: @mentions, pasa/gana verb selection for all phases, phase labels.
+- Integration (`_generate_elecciones_artifact`): missing + far → nudge; everyone picked → matrix; missing + near deadline → matrix with ❓; past match → matrix; unparseable date → no crash; grupos → never nudges.
+
+Comprehensive and correct.
+
+---
+
+## Non-blocking nits
+
+_(No blocking issues found. Listing minor observations only — none require action.)_
+
+1. `build_nudge_text` accepts `participants` but doesn't use it. Harmless (may be useful later for display_name), but the unused parameter is a small API smell.
+
+---
+
+## Verdict
+
+# ✅ APPROVED
+
+Clean, minimal, correct. The time logic is sound, caching is safe, module purity is preserved, and test coverage is thorough. Ship it.
+
+---
+
+### 2026-07-18T16:48:00Z: Deploy — feat/elecciones-nudge
+
+**Date:** 2026-07-18
+**Merged by:** Maldini (DevOps)
+**Approved by:** Pirlo + Buffon
+
+## Merge Details
+
+- **Feature branch:** `feat/elecciones-nudge`
+- **Commits merged:** 3 (elecciones.py nudge logic, handlers.py wiring, test_elecciones.py coverage)
+- **Rebase:** origin/main had 1 bot CHANGELOG commit ahead (`367cb4e`); rebased cleanly over it.
+- **Merge type:** Fast-forward — no merge commit, clean linear history.
+- **Final origin/main HEAD:** `7f444b6` — _refactor(elecciones): drop unused participants param from build_nudge_text_
+
+## CI Run
+
+- **Workflow:** Build and Deploy Docker Image
+- **Run ID:** 29652587787
+- **Status at push time:** `in_progress`
+- **URL:** https://github.com/DrDonoso/WC2026Over9000Bot/actions/runs/29652587787
+
+## Notes
+
+- Feature branch `feat/elecciones-nudge` is safe to delete once CI confirms success.
+- Unstaged `.squad/agents/kante/history.md` was temporarily stashed (`git stash`/`pop`) to allow the rebase; all .squad files left uncommitted per policy.
