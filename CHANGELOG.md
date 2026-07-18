@@ -5,6 +5,14 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260718] - 2026-07-18
+
+- refactor(elecciones): drop unused participants param from build_nudge_text
+- test_exactly_2h_returns_normal_matrix: at hours_until==2.0 the condition (hours_until > 2.0) is False, so the normal matrix is returned, not a nudge.
+- test_just_over_2h_returns_nudge: at hours_until=2.000278 (2h+1s) the condition is True, confirming the strict > boundary fires correctly.
+- feat(elecciones): nudge missing pickers >2h before the round
+
+
 ## [20260717.03] - 2026-07-17
 
 - refactor: simplify death-branch anchor to anchor=True (review nit)
