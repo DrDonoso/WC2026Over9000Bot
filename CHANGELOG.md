@@ -5,6 +5,19 @@ en cada release de GitHub (ver `.github/workflows/docker-deploy.yml`).
 
 <!-- releases -->
 
+## [20260721] - 2026-07-21
+
+- README.md: reflect current features (dual-source live goals, AI daily update, rich-image evolution, picante/revive chat, /elecciones, final ceremony, TVE markers), complete command table, grouped env-var config, architecture module map, link to the full reference.
+- docs/REFERENCIA.md: new exhaustive Spanish reference — every user and hidden/admin command, background jobs, subsystem map, porra scoring, data files/formats, full env-var catalogue, and operational gotchas — intended for reuse in the next tournament (~2 years out).
+- Created 4 orchestration-log entries (kante, buffon, pirlo, maldini) * Each documents agent role, deliverables, and outcome * kante: nudge implementation (ffd6096 + nit cleanup 7f444b6) * buffon: QA approved + boundary test gap-fills (3a646ba) * pirlo: architecture review approved (7 focus areas) * maldini: deploy to origin/main (7f444b6, CI 29652587787 SUCCESS)
+- Created session log: 2026-07-18T16-48-00Z-elecciones-nudge.md * Feature overview, team manifest, deploy SHA, CI status
+- Updated history files with session learnings: * .squad/agents/kante/history.md: nudge feature summary * .squad/agents/maldini/history.md: deploy execution log
+- Merged 4 inbox decision files into decisions.md: * kante-elecciones-nudge.md (design decisions) * buffon-elecciones-nudge-qa.md (QA approval + boundary tests) * pirlo-elecciones-nudge-review.md (architecture review) * maldini-elecciones-nudge-deploy.md (deploy log)
+- Deleted merged inbox files
+- Feature deployed to origin/main HEAD = 7f444b6
+- CI run 29652587787 SUCCESS
+
+
 ## [20260718] - 2026-07-18
 
 - refactor(elecciones): drop unused participants param from build_nudge_text
